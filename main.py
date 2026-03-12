@@ -2,7 +2,6 @@ from pathlib import Path
 
 from 共通スクリプト.analysis_service import analyze_event_log
 
-
 INPUT_FILE = Path("sample_event_log.csv")
 OUTPUT_ROOT_DIR = Path("出力ファイル")
 # 入力CSVのヘッダー名をここで合わせます。
