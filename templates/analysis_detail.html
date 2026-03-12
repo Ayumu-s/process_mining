@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ analysis_name }} | Process Mining Workbench</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+</head>
+<body data-analysis-key="{{ analysis_key }}">
+    <main class="page-shell page-shell--detail">
+        <section class="detail-hero">
+            <div>
+                <p class="eyebrow">Process Mining Detail</p>
+                <h1 id="detail-page-title">{{ analysis_name }}</h1>
+                <p id="detail-page-copy" class="hero-copy">直前に実行した分析結果の全件を表示します。</p>
+            </div>
+            <a href="/" class="ghost-link">TOPに戻る</a>
+        </section>
+
+        <section id="detail-status-panel" class="status-panel hidden"></section>
+        <section id="detail-summary-panel" class="summary-panel hidden"></section>
+        <section id="detail-chart-panel" class="result-panel hidden">
+            <div class="result-header">
+                <div>
+                    <h2 id="detail-chart-title">グラフ</h2>
+                    <p id="detail-chart-note" class="result-meta"></p>
+                </div>
+            </div>
+            <div id="detail-chart" class="chart-frame"></div>
+        </section>
+        <section id="detail-result-panel" class="result-panel hidden"></section>
+    </main>
+
+    <script src="{{ url_for('static', path='/detail.js') }}"></script>
+</body>
+</html>

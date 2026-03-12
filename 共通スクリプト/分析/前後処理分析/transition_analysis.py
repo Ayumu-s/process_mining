@@ -1,26 +1,22 @@
-from pathlib import Path
-
-import pandas as pd
-
-from 共通スクリプト.Excel出力.excel_exporter import export_dataframe_to_excel
-
-
-ANALYSIS_NAME = "前後処理分析"
-SHEET_NAME = "前後処理分析"
-OUTPUT_FILE_NAME = "前後処理分析.xlsx"
-DISPLAY_COLUMNS = {
-    "from_activity": "遷移元アクティビティ",
-    "to_activity": "遷移先アクティビティ",
-    "transition_count": "遷移件数",
-    "case_count": "ケース数",
-    "from_total_duration_min": "遷移元合計時間(分)",
-    "from_avg_duration_min": "遷移元平均時間(分)",
-    "to_total_duration_min": "遷移先合計時間(分)",
-    "to_avg_duration_min": "遷移先平均時間(分)",
-    "total_waiting_time_min": "合計待ち時間(分)",
-    "avg_waiting_time_min": "平均待ち時間(分)",
-    "transition_ratio_pct": "遷移比率(%)",
+ANALYSIS_CONFIG = {
+    "analysis_name": "前後処理分析",
+    "sheet_name": "前後処理分析",
+    "output_file_name": "前後処理分析.xlsx",
+    "display_columns": {
+        "from_activity": "前処理アクティビティ名",
+        "to_activity": "後処理アクティビティ名",
+        "transition_count": "遷移件数",
+        "case_count": "ケース数",
+        "from_total_duration_min": "前処理合計時間(分)",
+        "from_avg_duration_min": "前処理平均時間(分)",
+        "to_total_duration_min": "後処理合計時間(分)",
+        "to_avg_duration_min": "後処理平均時間(分)",
+        "total_waiting_time_min": "合計待ち時間(分)",
+        "avg_waiting_time_min": "平均待ち時間(分)",
+        "transition_ratio_pct": "遷移比率(%)",
+    },
 }
+
 
 
 def create_transition_analysis(df):
@@ -66,16 +62,23 @@ def create_transition_analysis(df):
     ]
     result[numeric_cols] = result[numeric_cols].round(2)
 
-    return result.sort_values(
+    result = result.sort_values(
         ["transition_count", "from_activity", "to_activity"],
         ascending=[False, True, True],
     ).reset_index(drop=True)
 
+    ordered_columns = [
+        "from_activity",
+        "to_activity",
+        "transition_count",
+        "case_count",
+        "from_total_duration_min",
+        "from_avg_duration_min",
+        "to_total_duration_min",
+        "to_avg_duration_min",
+        "total_waiting_time_min",
+        "avg_waiting_time_min",
+        "transition_ratio_pct",
+    ]
 
-def run_transition_analysis(df, output_root_dir):
-    result = create_transition_analysis(df)
-    excel_result = result.rename(columns=DISPLAY_COLUMNS)
-    output_file = Path(output_root_dir) / ANALYSIS_NAME / OUTPUT_FILE_NAME
-    exported_path = export_dataframe_to_excel(excel_result, output_file, SHEET_NAME)
-    print(f"{ANALYSIS_NAME} 出力完了: {exported_path.resolve()}")
-    return exported_path
+    return result[ordered_columns]

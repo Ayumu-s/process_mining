@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Process Mining Workbench</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+</head>
+<body>
+    <main class="page-shell">
+        <section class="hero-panel">
+            <p class="eyebrow">Process Mining</p>
+            <h1>イベントログをブラウザで分析</h1>
+            <p class="hero-copy">
+                CSV をアップロードして、頻度分析、前後処理分析、処理順パターン分析を画面で確認できます。
+                ファイル未指定なら <code>{{ sample_file_name }}</code> を使います。
+            </p>
+        </section>
+
+        <section class="control-panel">
+            <form id="analyze-form" class="analyze-form">
+                <div class="panel-block">
+                    <h2>入力設定</h2>
+                    <label class="field">
+                        <span>CSV ファイル</span>
+                        <input type="file" name="csv_file" accept=".csv">
+                    </label>
+
+                    <div class="grid-fields">
+                        <label class="field">
+                            <span>ケースID列</span>
+                            <input type="text" name="case_id_column" value="{{ default_headers.case_id_column }}">
+                        </label>
+                        <label class="field">
+                            <span>アクティビティ列</span>
+                            <input type="text" name="activity_column" value="{{ default_headers.activity_column }}">
+                        </label>
+                        <label class="field">
+                            <span>タイムスタンプ列</span>
+                            <input type="text" name="timestamp_column" value="{{ default_headers.timestamp_column }}">
+                        </label>
+                    </div>
+                </div>
+
+                <div class="panel-block">
+                    <h2>分析対象</h2>
+                    <div class="analysis-list">
+                        {% for option in analysis_options %}
+                        <label class="analysis-option">
+                            <input type="checkbox" name="analysis_keys" value="{{ option.key }}" checked>
+                            <span>{{ option.label }}</span>
+                        </label>
+                        {% endfor %}
+                    </div>
+
+                    <label class="checkbox-row">
+                        <input type="checkbox" name="export_excel" checked>
+                        <span>分析結果の Excel も出力する</span>
+                    </label>
+                </div>
+
+                <div class="panel-actions">
+                    <button type="submit" id="submit-button">分析を実行</button>
+                    <p class="hint">TOP 画面では各分析の上位 10 件を表示します。</p>
+                </div>
+            </form>
+        </section>
+
+        <section id="status-panel" class="status-panel hidden"></section>
+        <section id="summary-panel" class="summary-panel hidden"></section>
+        <section id="result-panels" class="result-stack"></section>
+    </main>
+
+    <script src="{{ url_for('static', path='/app.js') }}"></script>
+</body>
+</html>

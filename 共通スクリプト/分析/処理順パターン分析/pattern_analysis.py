@@ -1,22 +1,18 @@
-from pathlib import Path
-
-import pandas as pd
-
-from 共通スクリプト.Excel出力.excel_exporter import export_dataframe_to_excel
-
-
-ANALYSIS_NAME = "処理順パターン分析"
-SHEET_NAME = "処理順パターン分析"
-OUTPUT_FILE_NAME = "処理順パターン分析.xlsx"
-DISPLAY_COLUMNS = {
-    "pattern": "処理順パターン",
-    "case_count": "ケース数",
-    "avg_case_duration_min": "平均ケース時間(分)",
-    "median_case_duration_min": "中央値ケース時間(分)",
-    "min_case_duration_min": "最小ケース時間(分)",
-    "max_case_duration_min": "最大ケース時間(分)",
-    "case_ratio_pct": "ケース比率(%)",
+ANALYSIS_CONFIG = {
+    "analysis_name": "処理順パターン分析",
+    "sheet_name": "処理順パターン分析",
+    "output_file_name": "処理順パターン分析.xlsx",
+    "display_columns": {
+        "case_count": "ケース数",
+        "case_ratio_pct": "ケース比率(%)",
+        "avg_case_duration_min": "平均ケース時間(分)",
+        "median_case_duration_min": "中央値ケース時間(分)",
+        "min_case_duration_min": "最小ケース時間(分)",
+        "max_case_duration_min": "最大ケース時間(分)",
+        "pattern": "処理順パターン",
+    },
 }
+
 
 
 def create_pattern_analysis(df):
@@ -66,13 +62,16 @@ def create_pattern_analysis(df):
     ]
     result[numeric_cols] = result[numeric_cols].round(2)
 
-    return result.sort_values(["case_count", "pattern"], ascending=[False, True]).reset_index(drop=True)
+    result = result.sort_values(["case_count", "pattern"], ascending=[False, True]).reset_index(drop=True)
 
+    ordered_columns = [
+        "case_count",
+        "case_ratio_pct",
+        "avg_case_duration_min",
+        "median_case_duration_min",
+        "min_case_duration_min",
+        "max_case_duration_min",
+        "pattern",
+    ]
 
-def run_pattern_analysis(df, output_root_dir):
-    result = create_pattern_analysis(df)
-    excel_result = result.rename(columns=DISPLAY_COLUMNS)
-    output_file = Path(output_root_dir) / ANALYSIS_NAME / OUTPUT_FILE_NAME
-    exported_path = export_dataframe_to_excel(excel_result, output_file, SHEET_NAME)
-    print(f"{ANALYSIS_NAME} 出力完了: {exported_path.resolve()}")
-    return exported_path
+    return result[ordered_columns]

@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>処理順パターン詳細 | Process Mining Workbench</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+</head>
+<body data-pattern-index="{{ pattern_index }}">
+    <main class="page-shell page-shell--detail">
+        <section class="detail-hero">
+            <div>
+                <p class="eyebrow">Pattern Bottleneck</p>
+                <h1 id="pattern-page-title">処理順パターン詳細</h1>
+                <p id="pattern-page-copy" class="hero-copy">
+                    選択した処理順パターンに属するケースだけを抽出し、どの遷移で待ち時間が大きいかを確認します。
+                </p>
+            </div>
+            <div class="detail-hero-actions">
+                <a href="/analysis/pattern" class="ghost-link">処理順パターン分析へ戻る</a>
+                <a href="/" class="ghost-link">TOPに戻る</a>
+            </div>
+        </section>
+
+        <section id="pattern-status-panel" class="status-panel hidden"></section>
+        <section id="pattern-summary-panel" class="summary-panel hidden"></section>
+        <section id="pattern-bottleneck-panel" class="result-panel hidden"></section>
+        <section id="pattern-step-panel" class="result-panel hidden"></section>
+        <section id="pattern-case-panel" class="result-panel hidden"></section>
+    </main>
+
+    <script src="{{ url_for('static', path='/pattern_detail.js') }}"></script>
+</body>
+</html>
