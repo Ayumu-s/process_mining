@@ -11,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 from 共通スクリプト.analysis_service import (
     DEFAULT_ANALYSIS_KEYS,
     analyze_prepared_event_log,
+    create_pattern_flow_snapshot,
     create_pattern_bottleneck_details,
     get_available_analysis_definitions,
     load_prepared_event_log,
@@ -21,6 +22,8 @@ BASE_DIR = Path(__file__).resolve().parent
 SAMPLE_FILE = BASE_DIR / "sample_event_log.csv"
 OUTPUT_ROOT_DIR = BASE_DIR / "出力ファイル"
 MAX_STORED_RUNS = 5
+PREVIEW_ROW_COUNT = 10
+PROCESS_FLOW_PATTERN_CAP = 500
 
 DEFAULT_HEADERS = {
     "case_id_column": "case_id",
@@ -58,6 +61,31 @@ def get_run_data(run_id):
 
     RUN_STORE.move_to_end(run_id)
     return run_data
+
+
+def build_analysis_payload(analysis, row_limit=None):
+    rows = analysis["rows"] if row_limit is None else analysis["rows"][:row_limit]
+    return {
+        "analysis_name": analysis["analysis_name"],
+        "sheet_name": analysis["sheet_name"],
+        "row_count": len(analysis["rows"]),
+        "rows": rows,
+        "excel_file": analysis["excel_file"],
+    }
+
+
+def build_preview_response(run_id, source_file_name, selected_analysis_keys, result):
+    return {
+        "run_id": run_id,
+        "source_file_name": source_file_name,
+        "selected_analysis_keys": selected_analysis_keys,
+        "case_count": result["case_count"],
+        "event_count": result["event_count"],
+        "analyses": {
+            analysis_key: build_analysis_payload(analysis, PREVIEW_ROW_COUNT)
+            for analysis_key, analysis in result["analyses"].items()
+        },
+    }
 
 
 def get_analysis_options():
@@ -146,6 +174,62 @@ def pattern_detail_api(run_id: str, pattern_index: int):
     )
 
 
+@app.get("/api/runs/{run_id}/analyses/{analysis_key}")
+def analysis_detail_api(run_id: str, analysis_key: str):
+    run_data = get_run_data(run_id)
+    analyses = run_data["result"]["analyses"]
+    analysis = analyses.get(analysis_key)
+
+    if not analysis:
+        raise HTTPException(status_code=404, detail="指定した分析結果が見つかりません。")
+
+    response_analyses = {
+        analysis_key: build_analysis_payload(analysis)
+    }
+
+    return JSONResponse(
+        content={
+            "run_id": run_id,
+            "source_file_name": run_data["source_file_name"],
+            "selected_analysis_keys": run_data["selected_analysis_keys"],
+            "case_count": run_data["result"]["case_count"],
+            "event_count": run_data["result"]["event_count"],
+            "analyses": response_analyses,
+        }
+    )
+
+
+@app.get("/api/runs/{run_id}/pattern-flow")
+def pattern_flow_api(
+    run_id: str,
+    pattern_percent: int = 10,
+    activity_percent: int = 40,
+    connection_percent: int = 30,
+):
+    run_data = get_run_data(run_id)
+    analyses = run_data["result"]["analyses"]
+    pattern_analysis = analyses.get("pattern")
+
+    if not pattern_analysis:
+        raise HTTPException(status_code=400, detail="処理順パターン分析が実行されていません。")
+
+    snapshot = create_pattern_flow_snapshot(
+        pattern_rows=pattern_analysis["rows"],
+        frequency_rows=analyses.get("frequency", {}).get("rows", []),
+        pattern_percent=pattern_percent,
+        activity_percent=activity_percent,
+        connection_percent=connection_percent,
+        pattern_cap=PROCESS_FLOW_PATTERN_CAP,
+    )
+
+    return JSONResponse(
+        content={
+            "run_id": run_id,
+            **snapshot,
+        }
+    )
+
+
 @app.post("/api/analyze")
 async def analyze(request: Request):
     form = await request.form()
@@ -195,12 +279,12 @@ async def analyze(request: Request):
         )
 
     return JSONResponse(
-        content={
-            "run_id": run_id,
-            "source_file_name": source_file_name,
-            "selected_analysis_keys": selected_analysis_keys,
-            **result,
-        }
+        content=build_preview_response(
+            run_id=run_id,
+            source_file_name=source_file_name,
+            selected_analysis_keys=selected_analysis_keys,
+            result=result,
+        )
     )
 
 

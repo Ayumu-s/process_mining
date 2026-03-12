@@ -30,6 +30,16 @@ function buildPatternDetailHref(runId, patternIndex) {
     return `/analysis/patterns/${encodeURIComponent(String(patternIndex))}?run_id=${encodeURIComponent(runId)}`;
 }
 
+function buildAnalysisDetailHref(analysisKey, runId) {
+    const path = `/analysis/${encodeURIComponent(analysisKey)}`;
+
+    if (!runId) {
+        return path;
+    }
+
+    return `${path}?run_id=${encodeURIComponent(runId)}`;
+}
+
 function buildTable(rows, options = {}) {
     if (!rows.length) {
         return '<p class="empty-state">表示できるデータがありません。</p>';
@@ -81,7 +91,23 @@ function buildTable(rows, options = {}) {
 }
 
 function saveLatestResult(data) {
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    try {
+        sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch {
+        try {
+            const fallbackData = {
+                run_id: data.run_id,
+                source_file_name: data.source_file_name,
+                selected_analysis_keys: data.selected_analysis_keys,
+                case_count: data.case_count,
+                event_count: data.event_count,
+                analyses: {},
+            };
+            sessionStorage.setItem(STORAGE_KEY, JSON.stringify(fallbackData));
+        } catch {
+            // Ignore storage failures and keep the in-memory rendered result only.
+        }
+    }
 }
 
 function loadLatestResult() {
@@ -121,10 +147,11 @@ function buildResultHeader(analysisKey, analysis, previewRows) {
     const excelLine = analysis.excel_file
         ? `<p class="excel-path">Excel: ${escapeHtml(analysis.excel_file)}</p>`
         : "";
+    const totalRowCount = analysis.row_count ?? analysis.rows.length;
 
-    const previewMessage = analysis.rows.length > PREVIEW_ROW_COUNT
-        ? `先頭 ${previewRows.length} 件を表示 / 全 ${analysis.rows.length} 件`
-        : `全 ${analysis.rows.length} 件を表示`;
+    const previewMessage = totalRowCount > previewRows.length
+        ? `先頭 ${previewRows.length} 件を表示 / 全 ${totalRowCount} 件`
+        : `全 ${totalRowCount} 件を表示`;
 
     return `
         <div class="result-header">
@@ -133,7 +160,7 @@ function buildResultHeader(analysisKey, analysis, previewRows) {
                 <p class="result-meta">${escapeHtml(previewMessage)}</p>
                 ${excelLine}
             </div>
-            <a href="/analysis/${encodeURIComponent(analysisKey)}" class="detail-link">詳細ページ</a>
+            <a href="${buildAnalysisDetailHref(analysisKey, analysis.run_id || "")}" class="detail-link">詳細ページ</a>
         </div>
     `;
 }
@@ -144,13 +171,14 @@ function renderAnalysisPanels(analyses, runId) {
     Object.entries(analyses).forEach(([analysisKey, analysis]) => {
         const section = document.createElement("section");
         section.className = "result-panel";
+        const analysisWithRunId = { ...analysis, run_id: runId };
 
         const previewRows = analysis.rows
             .slice(0, PREVIEW_ROW_COUNT)
             .map((row, index) => ({ ...row, __rowIndex: index }));
 
         section.innerHTML = `
-            ${buildResultHeader(analysisKey, analysis, previewRows)}
+            ${buildResultHeader(analysisKey, analysisWithRunId, previewRows)}
             ${buildTable(previewRows, { analysisKey, runId })}
         `;
 

@@ -357,6 +357,25 @@ button[type="submit"]:disabled {
     min-height: 280px;
 }
 
+.process-map-empty {
+    min-height: 280px;
+    display: grid;
+    place-items: center;
+    padding: 20px;
+    border: 1px dashed rgba(179, 92, 46, 0.24);
+    border-radius: 18px;
+    background: rgba(255, 250, 242, 0.82);
+}
+
+.process-map-empty p {
+    margin: 0;
+    max-width: 32rem;
+    color: var(--muted);
+    font-size: 0.92rem;
+    line-height: 1.6;
+    text-align: center;
+}
+
 .process-explorer-sidebar {
     display: grid;
     gap: 12px;
@@ -371,10 +390,33 @@ button[type="submit"]:disabled {
     gap: 8px;
 }
 
+.process-explorer-launch {
+    display: grid;
+    gap: 8px;
+}
+
 .process-explorer-button {
     width: 100%;
     padding: 9px 12px;
     font-size: 0.84rem;
+}
+
+.process-explorer-button--primary {
+    background: linear-gradient(135deg, #b35c2e 0%, #d4874a 100%);
+    color: #fffaf2;
+    border-color: transparent;
+}
+
+.process-explorer-button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.process-explorer-caption {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.8rem;
+    line-height: 1.5;
 }
 
 .process-explorer-control {

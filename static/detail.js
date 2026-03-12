@@ -16,6 +16,11 @@ function setStatus(message, type = "info") {
     statusPanel.className = `status-panel ${type}`;
 }
 
+function hideStatus() {
+    statusPanel.className = "status-panel hidden";
+    statusPanel.textContent = "";
+}
+
 function escapeHtml(value) {
     return String(value)
         .replaceAll("&", "&amp;")
@@ -94,7 +99,25 @@ function loadLatestResult() {
     }
 }
 
+function getRunId(latestResult) {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("run_id") || latestResult?.run_id || "";
+}
+
+async function fetchJson(url, fallbackMessage) {
+    const response = await fetch(url);
+    const payload = await response.json();
+
+    if (!response.ok) {
+        throw new Error(payload.detail || payload.error || fallbackMessage);
+    }
+
+    return payload;
+}
+
 function renderSummary(data, analysis) {
+    const rowCount = analysis.row_count ?? analysis.rows.length;
+
     summaryPanel.className = "summary-panel";
     summaryPanel.innerHTML = `
         <article class="summary-card">
@@ -107,19 +130,21 @@ function renderSummary(data, analysis) {
         </article>
         <article class="summary-card">
             <span class="summary-label">表示件数</span>
-            <strong>${escapeHtml(analysis.rows.length)}</strong>
+            <strong>${escapeHtml(rowCount)}</strong>
         </article>
     `;
 }
 
 function renderResult(analysis, runId = "") {
     const tableRows = analysis.rows.map((row, index) => ({ ...row, __rowIndex: index }));
+    const rowCount = analysis.row_count ?? analysis.rows.length;
+
     resultPanel.className = "result-panel";
     resultPanel.innerHTML = `
         <div class="result-header">
             <div>
                 <h2>${escapeHtml(analysis.analysis_name)}</h2>
-                <p class="result-meta">全 ${escapeHtml(analysis.rows.length)} 件を表示</p>
+                <p class="result-meta">全 ${escapeHtml(rowCount)} 件を表示</p>
                 ${analysis.excel_file ? `<p class="excel-path">Excel: ${escapeHtml(analysis.excel_file)}</p>` : ""}
             </div>
         </div>
@@ -1187,78 +1212,121 @@ function renderProcessFlowMap(patternRows, transitionRows = [], frequencyRows = 
     return renderProcessFlowMapFromData(flowData, options);
 }
 
-function initializePatternFlowExplorer(analysis, latestResult) {
+function renderProcessMapEmpty(message) {
+    return `
+        <div class="process-map-empty">
+            <p>${escapeHtml(message)}</p>
+        </div>
+    `;
+}
+
+async function initializePatternFlowExplorer(runId) {
     const mapViewport = document.getElementById("process-map-viewport");
+    const patternsSlider = document.getElementById("process-map-patterns-slider");
     const activitiesSlider = document.getElementById("process-map-activities-slider");
     const connectionsSlider = document.getElementById("process-map-connections-slider");
     const labelsSlider = document.getElementById("process-map-labels-slider");
+    const patternsValue = document.getElementById("process-map-patterns-value");
     const activitiesValue = document.getElementById("process-map-activities-value");
     const connectionsValue = document.getElementById("process-map-connections-value");
     const labelsValue = document.getElementById("process-map-labels-value");
+    const patternsMeta = document.getElementById("process-map-patterns-meta");
     const activitiesMeta = document.getElementById("process-map-activities-meta");
     const connectionsMeta = document.getElementById("process-map-connections-meta");
     const labelsMeta = document.getElementById("process-map-labels-meta");
     const exportSvgButton = document.getElementById("process-map-export-svg");
     const exportPngButton = document.getElementById("process-map-export-png");
 
-    if (!mapViewport || !activitiesSlider || !connectionsSlider || !labelsSlider) {
+    if (!runId) {
+        if (mapViewport) {
+            mapViewport.innerHTML = renderProcessMapEmpty("分析結果が見つかりません。TOP 画面から再度実行してください。");
+        }
         return;
     }
 
-    const transitionRows = latestResult.analyses.transition
-        ? latestResult.analyses.transition.rows
-        : [];
-    const frequencyRows = latestResult.analyses.frequency
-        ? latestResult.analyses.frequency.rows
-        : [];
-    const flowData = buildProcessFlowData(analysis.rows, transitionRows, frequencyRows);
+    if (!mapViewport || !patternsSlider || !activitiesSlider || !connectionsSlider || !labelsSlider) {
+        return;
+    }
 
-    function updateProcessMap() {
+    let requestVersion = 0;
+
+    async function updateProcessMap() {
+        const currentVersion = requestVersion + 1;
+        requestVersion = currentVersion;
+        const patternPercent = Number(patternsSlider.value);
         const activityPercent = Number(activitiesSlider.value);
         const connectionPercent = Number(connectionsSlider.value);
         const labelPercent = Number(labelsSlider.value);
-        const filteredData = filterProcessFlowData(
-            flowData.nodes,
-            flowData.edges,
-            activityPercent,
-            connectionPercent
-        );
-        const labelState = buildProcessMapLabelState(filteredData.edges, labelPercent);
 
+        patternsValue.textContent = `${patternPercent}%`;
         activitiesValue.textContent = `${activityPercent}%`;
         connectionsValue.textContent = `${connectionPercent}%`;
         labelsValue.textContent = `${labelPercent}%`;
-        activitiesMeta.textContent = `${filteredData.nodes.length} / ${filteredData.totalNodeCount} activities`;
-        connectionsMeta.textContent = `${filteredData.edges.length} / ${filteredData.totalEdgeCount} connections`;
-        labelsMeta.textContent = `${labelState.visibleLabelCount} / ${labelState.totalLabelCount} labels`;
-        mapViewport.innerHTML = renderProcessFlowMapFromData(flowData, {
-            activityPercent,
-            connectionPercent,
-            labelPercent,
-        });
+
+        mapViewport.innerHTML = renderProcessMapEmpty("フロー図を読み込んでいます...");
+
+        try {
+            const snapshot = await fetchJson(
+                `/api/runs/${encodeURIComponent(runId)}/pattern-flow?pattern_percent=${encodeURIComponent(String(patternPercent))}&activity_percent=${encodeURIComponent(String(activityPercent))}&connection_percent=${encodeURIComponent(String(connectionPercent))}`,
+                "処理フロー図の読み込みに失敗しました。"
+            );
+
+            if (currentVersion !== requestVersion) {
+                return;
+            }
+
+            const edges = snapshot.flow_data?.edges || [];
+            const labelState = buildProcessMapLabelState(edges, labelPercent);
+
+            patternsMeta.textContent = `${snapshot.pattern_window.used_pattern_count} / ${snapshot.pattern_window.effective_pattern_count} patterns`;
+            activitiesMeta.textContent = `${snapshot.activity_window.visible_activity_count} / ${snapshot.activity_window.available_activity_count} activities`;
+            connectionsMeta.textContent = `${snapshot.connection_window.visible_connection_count} / ${snapshot.connection_window.available_connection_count} connections`;
+            labelsMeta.textContent = `${labelState.visibleLabelCount} / ${labelState.totalLabelCount} labels`;
+
+            if (!(snapshot.flow_data?.nodes || []).length) {
+                mapViewport.innerHTML = renderProcessMapEmpty("表示できるフロー図がありません。表示率を広げてください。");
+                return;
+            }
+
+            mapViewport.innerHTML = renderProcessFlowMapFromData(snapshot.flow_data, {
+                labelPercent,
+            });
+        } catch (error) {
+            if (currentVersion !== requestVersion) {
+                return;
+            }
+
+            patternsMeta.textContent = "";
+            activitiesMeta.textContent = "";
+            connectionsMeta.textContent = "";
+            labelsMeta.textContent = "";
+            mapViewport.innerHTML = renderProcessMapEmpty(error.message);
+        }
     }
 
+    patternsSlider.addEventListener("input", updateProcessMap);
     activitiesSlider.addEventListener("input", updateProcessMap);
     connectionsSlider.addEventListener("input", updateProcessMap);
     labelsSlider.addEventListener("input", updateProcessMap);
     if (exportSvgButton) {
         exportSvgButton.addEventListener("click", () => {
             exportProcessMapSvg(
-                `process_flow_map_${activitiesSlider.value}_${connectionsSlider.value}_${labelsSlider.value}.svg`
+                `process_flow_map_${patternsSlider.value}_${activitiesSlider.value}_${connectionsSlider.value}_${labelsSlider.value}.svg`
             );
         });
     }
     if (exportPngButton) {
         exportPngButton.addEventListener("click", () => {
             exportProcessMapPng(
-                `process_flow_map_${activitiesSlider.value}_${connectionsSlider.value}_${labelsSlider.value}.png`
+                `process_flow_map_${patternsSlider.value}_${activitiesSlider.value}_${connectionsSlider.value}_${labelsSlider.value}.png`
             );
         });
     }
-    updateProcessMap();
+
+    await updateProcessMap();
 }
 
-function renderPatternChart(analysis, latestResult) {
+function renderPatternChart(analysis, runId) {
     const chartRows = analysis.rows.slice(0, 8);
 
     if (!chartRows.length) {
@@ -1330,6 +1398,26 @@ function renderPatternChart(analysis, latestResult) {
                 </div>
                 <section class="process-explorer-control">
                     <div class="process-explorer-control-head">
+                        <span>Patterns</span>
+                        <strong id="process-map-patterns-value">100%</strong>
+                    </div>
+                    <div class="process-explorer-slider-wrap">
+                        <span class="process-explorer-slider-top">100%</span>
+                        <input
+                            id="process-map-patterns-slider"
+                            class="process-explorer-slider"
+                            type="range"
+                            min="10"
+                            max="100"
+                            step="10"
+                            value="100"
+                        >
+                        <span class="process-explorer-slider-bottom">10%</span>
+                    </div>
+                    <p id="process-map-patterns-meta" class="process-explorer-meta"></p>
+                </section>
+                <section class="process-explorer-control">
+                    <div class="process-explorer-control-head">
                         <span>Activities</span>
                         <strong id="process-map-activities-value">100%</strong>
                     </div>
@@ -1394,10 +1482,10 @@ function renderPatternChart(analysis, latestResult) {
             ${cardsHtml}
         </div>
     `;
-    initializePatternFlowExplorer(analysis, latestResult);
+    return initializePatternFlowExplorer(runId);
 }
 
-function renderChart(analysis, latestResult) {
+async function renderChart(analysis, runId) {
     chartPanel.className = "result-panel hidden";
     chartContainer.innerHTML = "";
 
@@ -1412,30 +1500,49 @@ function renderChart(analysis, latestResult) {
     }
 
     if (analysisKey === "pattern") {
-        renderPatternChart(analysis, latestResult);
+        await renderPatternChart(analysis, runId);
     }
 }
 
-function renderDetailPage() {
+async function renderDetailPage() {
     const latestResult = loadLatestResult();
+    const runId = getRunId(latestResult);
 
-    if (!latestResult) {
-        setStatus("TOP 画面で分析を実行してから詳細ページを開いてください。", "error");
+    if (!analysisKey) {
+        setStatus("分析キーを特定できませんでした。", "error");
         return;
     }
 
-    const analysis = latestResult.analyses[analysisKey];
-
-    if (!analysis) {
-        setStatus("指定した分析結果が見つかりません。TOP 画面で分析対象を確認してください。", "error");
+    if (!runId) {
+        setStatus("分析結果が見つかりません。TOP 画面で分析を実行してから詳細ページを開いてください。", "error");
         return;
     }
 
-    detailPageTitle.textContent = analysis.analysis_name;
-    detailPageCopy.textContent = "直前に実行した分析結果の全件を表示しています。";
-    renderSummary(latestResult, analysis);
-    renderChart(analysis, latestResult);
-    renderResult(analysis, latestResult.run_id || "");
+    setStatus("詳細を読み込んでいます...", "info");
+
+    try {
+        const detailData = await fetchJson(
+            `/api/runs/${encodeURIComponent(runId)}/analyses/${encodeURIComponent(analysisKey)}`,
+            "分析詳細の読み込みに失敗しました。"
+        );
+        const analysis = detailData.analyses[analysisKey];
+
+        if (!analysis) {
+            throw new Error("指定した分析結果が見つかりません。");
+        }
+
+        detailPageTitle.textContent = analysis.analysis_name;
+        detailPageCopy.textContent = "指定した分析実行の全件結果を表示しています。";
+        renderSummary(detailData, analysis);
+        await renderChart(analysis, runId);
+        renderResult(analysis, runId);
+        hideStatus();
+    } catch (error) {
+        summaryPanel.className = "summary-panel hidden";
+        chartPanel.className = "result-panel hidden";
+        resultPanel.className = "result-panel hidden";
+        setStatus(error.message, "error");
+    }
 }
 
-renderDetailPage();
+void renderDetailPage();

@@ -119,5 +119,38 @@ class ProcessMiningTestCase(unittest.TestCase):
         self.assertEqual(["C004", "C001"], [row["case_id"] for row in detail["case_examples"][:2]])
 
 
+    def test_pattern_flow_snapshot_filters_top_patterns_nodes_and_edges(self):
+        import importlib.util
+
+        module_path = ROOT_DIR / "共通スクリプト" / "analysis_service.py"
+        spec = importlib.util.spec_from_file_location("analysis_service_local", module_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        pattern_rows = [
+            {"ケース数": 90, "処理順パターン": "申請受付→内容確認→処理完了"},
+            {"ケース数": 70, "処理順パターン": "申請受付→一次承認→処理完了"},
+            {"ケース数": 50, "処理順パターン": "申請受付→差戻し→再提出→処理完了"},
+            {"ケース数": 30, "処理順パターン": "申請受付→自動処理→処理完了"},
+        ]
+
+        snapshot = module.create_pattern_flow_snapshot(
+            pattern_rows=pattern_rows,
+            pattern_percent=50,
+            activity_percent=60,
+            connection_percent=50,
+            pattern_cap=4,
+        )
+
+        self.assertEqual(2, snapshot["pattern_window"]["used_pattern_count"])
+        self.assertEqual(4, snapshot["activity_window"]["available_activity_count"])
+        self.assertEqual(4, snapshot["connection_window"]["available_connection_count"])
+        self.assertTrue(snapshot["flow_data"]["nodes"])
+        self.assertTrue(snapshot["flow_data"]["edges"])
+        self.assertTrue(
+            all("layer" in node and "orderScore" in node for node in snapshot["flow_data"]["nodes"])
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
