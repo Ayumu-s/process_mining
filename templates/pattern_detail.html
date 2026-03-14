@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>処理順パターン詳細 | Process Mining Workbench</title>
-    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ static_version }}">
 </head>
 <body data-pattern-index="{{ pattern_index }}">
     <main class="page-shell page-shell--detail">
@@ -29,6 +29,6 @@
         <section id="pattern-case-panel" class="result-panel hidden"></section>
     </main>
 
-    <script src="{{ url_for('static', path='/pattern_detail.js') }}"></script>
+    <script src="{{ url_for('static', path='/pattern_detail.js') }}?v={{ static_version }}"></script>
 </body>
 </html>

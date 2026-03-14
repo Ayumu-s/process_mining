@@ -75,7 +75,26 @@ function buildTable(rows) {
     const bodyHtml = rows
         .map((row) => {
             const cells = headers
-                .map((header) => `<td>${escapeHtml(row[header])}</td>`)
+                .map((header) => {
+                    const cellValue = escapeHtml(row[header]);
+                    const isWideHeader = (
+                        header === "処理順パターン" || 
+                        header === "アクティビティ名" || 
+                        header === "アクティビティ" ||
+                        header === "前処理アクティビティ名" ||
+                        header === "後処理アクティビティ名"
+                    );
+
+                    if (isWideHeader) {
+                        return `
+                            <td class="table-cell--wide">
+                                <div class="cell-scroll-wrapper">${cellValue}</div>
+                            </td>
+                        `;
+                    }
+
+                    return `<td>${cellValue}</td>`;
+                })
                 .join("");
             return `<tr>${cells}</tr>`;
         })

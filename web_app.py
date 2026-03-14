@@ -1,13 +1,18 @@
 from collections import OrderedDict
+from io import BytesIO
 from pathlib import Path
+from urllib.parse import quote
 from uuid import uuid4
+from zipfile import ZIP_DEFLATED, ZipFile
 
+import pandas as pd
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from 共通スクリプト.Excel出力.excel_exporter import build_excel_bytes
 from 共通スクリプト.analysis_service import (
     DEFAULT_ANALYSIS_KEYS,
     analyze_prepared_event_log,
@@ -20,10 +25,10 @@ from 共通スクリプト.analysis_service import (
 
 BASE_DIR = Path(__file__).resolve().parent
 SAMPLE_FILE = BASE_DIR / "sample_event_log.csv"
-OUTPUT_ROOT_DIR = BASE_DIR / "出力ファイル"
 MAX_STORED_RUNS = 5
 PREVIEW_ROW_COUNT = 10
-PROCESS_FLOW_PATTERN_CAP = 500
+PROCESS_FLOW_PATTERN_CAP = 300
+MAX_PATTERN_FLOW_CACHE = 24
 
 DEFAULT_HEADERS = {
     "case_id_column": "case_id",
@@ -37,6 +42,17 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 RUN_STORE = OrderedDict()
 
 
+def get_static_version():
+    static_dir = BASE_DIR / "static"
+    return str(
+        max(
+            entry.stat().st_mtime_ns
+            for entry in static_dir.iterdir()
+            if entry.is_file()
+        )
+    )
+
+
 def save_run_data(source_file_name, selected_analysis_keys, prepared_df, result):
     run_id = uuid4().hex
     RUN_STORE[run_id] = {
@@ -44,6 +60,7 @@ def save_run_data(source_file_name, selected_analysis_keys, prepared_df, result)
         "selected_analysis_keys": selected_analysis_keys,
         "prepared_df": prepared_df,
         "result": result,
+        "pattern_flow_cache": OrderedDict(),
     }
     RUN_STORE.move_to_end(run_id)
 
@@ -63,15 +80,80 @@ def get_run_data(run_id):
     return run_data
 
 
-def build_analysis_payload(analysis, row_limit=None):
-    rows = analysis["rows"] if row_limit is None else analysis["rows"][:row_limit]
+def build_analysis_payload(analysis, row_limit=None, row_offset=0):
+    total_row_count = len(analysis["rows"])
+    safe_row_offset = max(0, int(row_offset or 0))
+
+    if row_limit is None:
+        safe_row_limit = total_row_count
+        rows = analysis["rows"][safe_row_offset:]
+    else:
+        safe_row_limit = max(0, int(row_limit))
+        rows = analysis["rows"][safe_row_offset : safe_row_offset + safe_row_limit]
+
+    page_end_row_number = safe_row_offset + len(rows)
+    has_previous_page = safe_row_offset > 0
+    has_next_page = page_end_row_number < total_row_count
+    previous_row_offset = max(0, safe_row_offset - safe_row_limit) if has_previous_page else None
+    next_row_offset = page_end_row_number if has_next_page else None
+
     return {
         "analysis_name": analysis["analysis_name"],
         "sheet_name": analysis["sheet_name"],
-        "row_count": len(analysis["rows"]),
+        "output_file_name": analysis.get("output_file_name"),
+        "row_count": total_row_count,
+        "returned_row_count": len(rows),
+        "row_offset": safe_row_offset,
+        "page_size": safe_row_limit,
+        "page_start_row_number": safe_row_offset + 1 if rows else 0,
+        "page_end_row_number": page_end_row_number,
+        "has_previous_page": has_previous_page,
+        "has_next_page": has_next_page,
+        "previous_row_offset": previous_row_offset,
+        "next_row_offset": next_row_offset,
         "rows": rows,
         "excel_file": analysis["excel_file"],
     }
+
+
+def get_pattern_flow_snapshot(
+    run_data,
+    pattern_percent,
+    pattern_count,
+    activity_percent,
+    connection_percent,
+):
+    cache_key = (
+        int(pattern_percent),
+        None if pattern_count is None else int(pattern_count),
+        int(activity_percent),
+        int(connection_percent),
+    )
+    cache = run_data.setdefault("pattern_flow_cache", OrderedDict())
+
+    cached_snapshot = cache.get(cache_key)
+    if cached_snapshot is not None:
+        cache.move_to_end(cache_key)
+        return cached_snapshot
+
+    analyses = run_data["result"]["analyses"]
+    pattern_analysis = analyses.get("pattern")
+    snapshot = create_pattern_flow_snapshot(
+        pattern_rows=pattern_analysis["rows"],
+        frequency_rows=analyses.get("frequency", {}).get("rows", []),
+        pattern_percent=pattern_percent,
+        pattern_count=pattern_count,
+        activity_percent=activity_percent,
+        connection_percent=connection_percent,
+        pattern_cap=PROCESS_FLOW_PATTERN_CAP,
+    )
+
+    cache[cache_key] = snapshot
+    cache.move_to_end(cache_key)
+    while len(cache) > MAX_PATTERN_FLOW_CACHE:
+        cache.popitem(last=False)
+
+    return snapshot
 
 
 def build_preview_response(run_id, source_file_name, selected_analysis_keys, result):
@@ -112,6 +194,7 @@ def index(request: Request):
             "analysis_options": get_analysis_options(),
             "default_headers": DEFAULT_HEADERS,
             "sample_file_name": SAMPLE_FILE.name,
+            "static_version": get_static_version(),
         },
     )
 
@@ -123,6 +206,7 @@ def pattern_detail_page(request: Request, pattern_index: int):
         {
             "request": request,
             "pattern_index": pattern_index,
+            "static_version": get_static_version(),
         },
     )
 
@@ -140,6 +224,7 @@ def analysis_detail(request: Request, analysis_key):
             "request": request,
             "analysis_key": analysis_key,
             "analysis_name": analysis_definitions[analysis_key]["config"]["analysis_name"],
+            "static_version": get_static_version(),
         },
     )
 
@@ -175,7 +260,12 @@ def pattern_detail_api(run_id: str, pattern_index: int):
 
 
 @app.get("/api/runs/{run_id}/analyses/{analysis_key}")
-def analysis_detail_api(run_id: str, analysis_key: str):
+def analysis_detail_api(
+    run_id: str,
+    analysis_key: str,
+    row_limit: int | None = None,
+    row_offset: int = 0,
+):
     run_data = get_run_data(run_id)
     analyses = run_data["result"]["analyses"]
     analysis = analyses.get(analysis_key)
@@ -184,7 +274,11 @@ def analysis_detail_api(run_id: str, analysis_key: str):
         raise HTTPException(status_code=404, detail="指定した分析結果が見つかりません。")
 
     response_analyses = {
-        analysis_key: build_analysis_payload(analysis)
+        analysis_key: build_analysis_payload(
+            analysis,
+            row_limit=row_limit,
+            row_offset=row_offset,
+        )
     }
 
     return JSONResponse(
@@ -199,10 +293,57 @@ def analysis_detail_api(run_id: str, analysis_key: str):
     )
 
 
+@app.get("/api/runs/{run_id}/excel-files/{analysis_key}")
+def analysis_excel_file_api(run_id: str, analysis_key: str):
+    run_data = get_run_data(run_id)
+    analyses = run_data["result"]["analyses"]
+    analysis = analyses.get(analysis_key)
+
+    if not analysis:
+        raise HTTPException(status_code=404, detail="指定した分析結果が見つかりません。")
+
+    excel_df = pd.DataFrame(analysis["rows"])
+    excel_bytes = build_excel_bytes(excel_df, analysis["sheet_name"])
+    output_file_name = analysis.get("output_file_name") or f"{analysis['analysis_name']}.xlsx"
+
+    return Response(
+        content=excel_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(output_file_name)}",
+        },
+    )
+
+
+@app.get("/api/runs/{run_id}/excel-archive")
+def analysis_excel_archive_api(run_id: str):
+    run_data = get_run_data(run_id)
+    analyses = run_data["result"]["analyses"]
+
+    archive_buffer = BytesIO()
+    with ZipFile(archive_buffer, mode="w", compression=ZIP_DEFLATED) as archive_file:
+        for analysis in analyses.values():
+            excel_df = pd.DataFrame(analysis["rows"])
+            output_file_name = analysis.get("output_file_name") or f"{analysis['analysis_name']}.xlsx"
+            excel_bytes = build_excel_bytes(excel_df, analysis["sheet_name"])
+            archive_file.writestr(output_file_name, excel_bytes)
+
+    archive_file_name = f"{Path(run_data['source_file_name']).stem}_analysis_excels.zip"
+
+    return Response(
+        content=archive_buffer.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(archive_file_name)}",
+        },
+    )
+
+
 @app.get("/api/runs/{run_id}/pattern-flow")
 def pattern_flow_api(
     run_id: str,
     pattern_percent: int = 10,
+    pattern_count: int | None = None,
     activity_percent: int = 40,
     connection_percent: int = 30,
 ):
@@ -213,13 +354,12 @@ def pattern_flow_api(
     if not pattern_analysis:
         raise HTTPException(status_code=400, detail="処理順パターン分析が実行されていません。")
 
-    snapshot = create_pattern_flow_snapshot(
-        pattern_rows=pattern_analysis["rows"],
-        frequency_rows=analyses.get("frequency", {}).get("rows", []),
+    snapshot = get_pattern_flow_snapshot(
+        run_data=run_data,
         pattern_percent=pattern_percent,
+        pattern_count=pattern_count,
         activity_percent=activity_percent,
         connection_percent=connection_percent,
-        pattern_cap=PROCESS_FLOW_PATTERN_CAP,
     )
 
     return JSONResponse(
@@ -238,7 +378,6 @@ async def analyze(request: Request):
     activity_column = (form.get("activity_column") or DEFAULT_HEADERS["activity_column"]).strip()
     timestamp_column = (form.get("timestamp_column") or DEFAULT_HEADERS["timestamp_column"]).strip()
     selected_analysis_keys = form.getlist("analysis_keys")
-    export_excel = form.get("export_excel") == "on"
 
     if uploaded_file and uploaded_file.filename:
         uploaded_file.file.seek(0)
@@ -258,8 +397,8 @@ async def analyze(request: Request):
         result = analyze_prepared_event_log(
             prepared_df=prepared_df,
             selected_analysis_keys=selected_analysis_keys,
-            output_root_dir=OUTPUT_ROOT_DIR,
-            export_excel=export_excel,
+            output_root_dir=None,
+            export_excel=False,
         )
         run_id = save_run_data(
             source_file_name=source_file_name,

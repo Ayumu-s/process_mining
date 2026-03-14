@@ -1,4 +1,16 @@
 const STORAGE_KEY = "processMiningLastResult";
+const DETAIL_ROW_LIMIT = 500;
+const RENDERING_LIMIT = 1200; // Stricter limit for total elements
+const EDGE_LIMIT = 800;      // Stricter limit for paths specifically
+const AGGRESSIVE_LIMIT = 3000; // Threshold for extreme reduction
+
+function debounce(func, wait) {
+    let timeout;
+    return (...args) => {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => func(...args), wait);
+    };
+}
 
 const analysisKey = document.body.dataset.analysisKey;
 const statusPanel = document.getElementById("detail-status-panel");
@@ -34,6 +46,15 @@ function buildPatternDetailHref(runId, patternIndex) {
     return `/analysis/patterns/${encodeURIComponent(String(patternIndex))}?run_id=${encodeURIComponent(runId)}`;
 }
 
+function buildAnalysisDetailApiUrl(runId, rowOffset = 0) {
+    const params = new URLSearchParams({
+        row_limit: String(DETAIL_ROW_LIMIT),
+        row_offset: String(Math.max(0, Number(rowOffset) || 0)),
+    });
+
+    return `/api/runs/${encodeURIComponent(runId)}/analyses/${encodeURIComponent(analysisKey)}?${params.toString()}`;
+}
+
 function buildTable(rows, options = {}) {
     if (!rows.length) {
         return '<p class="empty-state">表示できるデータがありません。</p>';
@@ -50,6 +71,13 @@ function buildTable(rows, options = {}) {
             const cells = headers
                 .map((header) => {
                     const cellValue = escapeHtml(row[header]);
+                    const isWideHeader = (
+                        header === "処理順パターン" || 
+                        header === "アクティビティ名" || 
+                        header === "アクティビティ" ||
+                        header === "前処理アクティビティ名" ||
+                        header === "後処理アクティビティ名"
+                    );
                     const isPatternLink = (
                         tableAnalysisKey === "pattern"
                         && header === "処理順パターン"
@@ -59,10 +87,20 @@ function buildTable(rows, options = {}) {
 
                     if (isPatternLink) {
                         return `
-                            <td>
-                                <a href="${buildPatternDetailHref(runId, row.__rowIndex)}" class="table-link">
-                                    ${cellValue}
-                                </a>
+                            <td class="table-cell--wide">
+                                <div class="cell-scroll-wrapper">
+                                    <a href="${buildPatternDetailHref(runId, row.__rowIndex)}" class="table-link">
+                                        ${cellValue}
+                                    </a>
+                                </div>
+                            </td>
+                        `;
+                    }
+
+                    if (isWideHeader) {
+                        return `
+                            <td class="table-cell--wide">
+                                <div class="cell-scroll-wrapper">${cellValue}</div>
                             </td>
                         `;
                     }
@@ -104,15 +142,34 @@ function getRunId(latestResult) {
     return params.get("run_id") || latestResult?.run_id || "";
 }
 
-async function fetchJson(url, fallbackMessage) {
-    const response = await fetch(url);
-    const payload = await response.json();
+async function fetchJson(url, fallbackMessage, timeoutMs = 30000) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs);
 
-    if (!response.ok) {
-        throw new Error(payload.detail || payload.error || fallbackMessage);
+    try {
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(id);
+        const payload = await response.json();
+
+        if (!response.ok) {
+            throw new Error(payload.detail || payload.error || fallbackMessage);
+        }
+
+        return payload;
+    } catch (error) {
+        clearTimeout(id);
+        if (error.name === "AbortError") {
+            throw new Error("サーバーからの応答がタイムアウトしました。データ量を減らして再試行してください。");
+        }
+        throw error;
     }
+}
 
-    return payload;
+function loadAnalysisPage(runId, rowOffset = 0) {
+    return fetchJson(
+        buildAnalysisDetailApiUrl(runId, rowOffset),
+        "分析詳細の読み込みに失敗しました。"
+    );
 }
 
 function renderSummary(data, analysis) {
@@ -135,21 +192,94 @@ function renderSummary(data, analysis) {
     `;
 }
 
-function renderResult(analysis, runId = "") {
-    const tableRows = analysis.rows.map((row, index) => ({ ...row, __rowIndex: index }));
+function renderResult(analysis, runId = "", onPageChange = null) {
+    const rowOffset = Number(analysis.row_offset || 0);
     const rowCount = analysis.row_count ?? analysis.rows.length;
+    const returnedRowCount = analysis.returned_row_count ?? analysis.rows.length;
+    const tableRows = analysis.rows.map((row, index) => ({ ...row, __rowIndex: rowOffset + index }));
+    const resultMeta = returnedRowCount < rowCount
+        ? `全 ${escapeHtml(rowCount)} 件中、先頭 ${escapeHtml(returnedRowCount)} 件を表示`
+        : `全 ${escapeHtml(rowCount)} 件を表示`;
+    const pageStart = analysis.page_start_row_number ?? (returnedRowCount ? rowOffset + 1 : 0);
+    const pageEnd = analysis.page_end_row_number ?? (rowOffset + returnedRowCount);
+    const paginationHtml = rowCount > DETAIL_ROW_LIMIT
+        ? `
+            <div class="result-pagination">
+                <p class="result-pagination-meta">${escapeHtml(pageStart)} - ${escapeHtml(pageEnd)} / ${escapeHtml(rowCount)} 件</p>
+                <div class="result-pagination-actions">
+                    <button
+                        type="button"
+                        id="detail-prev-page-button"
+                        class="ghost-link result-pagination-button"
+                        ${analysis.has_previous_page ? "" : "disabled"}
+                    >
+                        前のページ
+                    </button>
+                    <button
+                        type="button"
+                        id="detail-next-page-button"
+                        class="ghost-link result-pagination-button"
+                        ${analysis.has_next_page ? "" : "disabled"}
+                    >
+                        次のページ
+                    </button>
+                </div>
+            </div>
+        `
+        : "";
 
     resultPanel.className = "result-panel";
     resultPanel.innerHTML = `
         <div class="result-header">
             <div>
                 <h2>${escapeHtml(analysis.analysis_name)}</h2>
-                <p class="result-meta">全 ${escapeHtml(rowCount)} 件を表示</p>
+                <p class="result-meta">${resultMeta}</p>
+                ${returnedRowCount < rowCount ? '<p class="result-meta">大量データでは画面停止を防ぐため、詳細表は一部のみ取得しています。</p>' : ""}
                 ${analysis.excel_file ? `<p class="excel-path">Excel: ${escapeHtml(analysis.excel_file)}</p>` : ""}
             </div>
         </div>
         ${buildTable(tableRows, { analysisKey, runId })}
+        ${paginationHtml}
     `;
+
+    if (!onPageChange || rowCount <= DETAIL_ROW_LIMIT) {
+        return;
+    }
+
+    const previousPageButton = document.getElementById("detail-prev-page-button");
+    const nextPageButton = document.getElementById("detail-next-page-button");
+
+    if (previousPageButton && analysis.has_previous_page) {
+        previousPageButton.addEventListener("click", () => {
+            onPageChange(analysis.previous_row_offset ?? 0);
+        });
+    }
+
+    if (nextPageButton && analysis.has_next_page) {
+        nextPageButton.addEventListener("click", () => {
+            onPageChange(analysis.next_row_offset ?? pageEnd);
+        });
+    }
+}
+
+function getInitialPatternFlowSettings(totalPatternCount) {
+    if (totalPatternCount >= 50000) {
+        return { patterns: 10, activities: 20, connections: 15, labels: 0 };
+    }
+
+    if (totalPatternCount >= 10000) {
+        return { patterns: 15, activities: 30, connections: 20, labels: 0 };
+    }
+
+    if (totalPatternCount >= 2000) {
+        return { patterns: 25, activities: 45, connections: 30, labels: 10 };
+    }
+
+    if (totalPatternCount >= 500) {
+        return { patterns: 40, activities: 60, connections: 40, labels: 30 };
+    }
+
+    return { patterns: 100, activities: 100, connections: 100, labels: 100 };
 }
 
 function wrapJapaneseLabel(text, maxCharsPerLine = 12, maxLines = 2) {
@@ -485,6 +615,14 @@ function buildProcessFlowData(patternRows, transitionRows = [], frequencyRows = 
         const node = ensureNode(activityName);
         node.weight = Math.max(node.weight, Number(row["イベント件数"]) || 0);
         node.caseWeight = Math.max(node.caseWeight, Number(row["ケース数"]) || 0);
+
+        // Extract duration metrics for tooltips
+        if (row["平均時間(分)"] !== undefined) {
+            node.avgDuration = Number(row["平均時間(分)"]) || 0;
+        }
+        if (row["最大時間(分)"] !== undefined) {
+            node.maxDuration = Number(row["最大時間(分)"]) || 0;
+        }
     });
 
     patternRows.forEach((row) => {
@@ -698,8 +836,50 @@ function buildProcessFlowData(patternRows, transitionRows = [], frequencyRows = 
         const layerNodes = nodesByLayer.get(layer) || [];
         optimizeLayerBySwaps(layerNodes, edges, nodeLookup);
     }
+    
+    // CELONIS STYLE: Extract main spine
+    // Find highest throughput path from top to bottom
+    const mainSpineNodes = new Set();
+    const mainSpineEdges = new Set();
+    
+    if (nodes.length > 0) {
+        // Start from node with layer 0 and highest weight
+        let currentNodes = nodes.filter(n => n.layer === 0).sort((a, b) => b.weight - a.weight);
+        if(currentNodes.length > 0) {
+            let currentNode = currentNodes[0];
+            mainSpineNodes.add(currentNode.name);
+            
+            // Greedily follow the heaviest outgoing edge
+            while (currentNode) {
+                const outgoing = edges.filter(e => e.source === currentNode.name && nodeLookup.get(e.target).layer > currentNode.layer);
+                if (outgoing.length === 0) break;
+                
+                // Sort by weight/count
+                outgoing.sort((a, b) => b.count - a.count);
+                const heaviestEdge = outgoing[0];
+                const nextNodeName = heaviestEdge.target;
+                
+                // Prevent infinite loops just in case
+                if(mainSpineNodes.has(nextNodeName)) break;
+                
+                mainSpineEdges.add(getProcessFlowEdgeKey(heaviestEdge));
+                mainSpineNodes.add(nextNodeName);
+                
+                currentNode = nodeLookup.get(nextNodeName);
+            }
+        }
+    }
+    
+    // Tag nodes and edges
+    nodes.forEach(node => {
+        node.isMainSpine = mainSpineNodes.has(node.name);
+    });
+    
+    edges.forEach(edge => {
+        edge.isMainSpine = mainSpineEdges.has(getProcessFlowEdgeKey(edge));
+    });
 
-    return { nodes, edges };
+    return { nodes, edges, mainSpineNodes, mainSpineEdges };
 }
 
 function filterProcessFlowData(sourceNodes, sourceEdges, activityPercent = 100, connectionPercent = 100) {
@@ -757,28 +937,6 @@ function filterProcessFlowData(sourceNodes, sourceEdges, activityPercent = 100, 
     };
 }
 
-function buildProcessFlowPath(edge, sourceNode, targetNode, nodeWidth) {
-    const startX = sourceNode.x + nodeWidth;
-    const startY = edge.sourceOffsetY;
-    const endX = targetNode.x;
-    const endY = edge.targetOffsetY;
-
-    if (targetNode.layer > sourceNode.layer) {
-        const curveOffset = Math.max(96, (endX - startX) * 0.42);
-        return `M ${startX} ${startY} C ${startX + curveOffset} ${startY}, ${endX - curveOffset} ${endY}, ${endX} ${endY}`;
-    }
-
-    const routeX = getProcessFlowRouteX(sourceNode, targetNode, nodeWidth);
-    return `M ${startX} ${startY} C ${routeX} ${startY}, ${routeX} ${endY}, ${endX} ${endY}`;
-}
-
-function getProcessFlowRouteX(sourceNode, targetNode, nodeWidth) {
-    const startX = sourceNode.x + nodeWidth;
-    const endX = targetNode.x;
-
-    return Math.max(startX, endX) + 210 + Math.abs(targetNode.layer - sourceNode.layer) * 32;
-}
-
 function getProcessFlowEdgeKey(edge) {
     return `${edge.source}|||${edge.target}`;
 }
@@ -832,6 +990,13 @@ function buildProcessMapExportSvg() {
     }
 
     const clonedSvg = svgElement.cloneNode(true);
+    
+    // Reset transform for export to ensure it saves at 100% original size
+    const exportWrap = clonedSvg.querySelector("g.viewport-wrap");
+    if (exportWrap) {
+        exportWrap.style.transform = "none";
+    }
+    
     const viewBox = clonedSvg.getAttribute("viewBox") || "0 0 1200 600";
     const [, , widthValue, heightValue] = viewBox.split(" ").map(Number);
     const exportStyles = `
@@ -850,10 +1015,10 @@ function buildProcessMapExportSvg() {
             font-weight: 700;
             text-anchor: middle;
             paint-order: stroke;
-            stroke: rgba(255, 250, 242, 0.96);
+            stroke: #ffffff;
             stroke-width: 4px;
             stroke-linejoin: round;
-            font-family: "BIZ UDPGothic", "Yu Gothic UI", sans-serif;
+            font-family: inherit;
         }
         .process-map-edge-label--return {
             fill: rgba(207, 122, 69, 0.88);
@@ -878,7 +1043,7 @@ function buildProcessMapExportSvg() {
     backgroundRect.setAttribute("y", "0");
     backgroundRect.setAttribute("width", "100%");
     backgroundRect.setAttribute("height", "100%");
-    backgroundRect.setAttribute("fill", "#fffaf2");
+    backgroundRect.setAttribute("fill", "#f5f7fa"); // Unified with var(--bg)
     clonedSvg.insertBefore(backgroundRect, clonedSvg.firstChild);
 
     const styleElement = document.createElementNS("http://www.w3.org/2000/svg", "style");
@@ -947,6 +1112,87 @@ function exportProcessMapPng(fileName) {
     image.src = objectUrl;
 }
 
+function calculateProcessFlowLayout(nodes, edges) {
+    if (!nodes.length) return { chartWidth: 0, chartHeight: 0, mainSpineX: 0 };
+
+    const chartLeft = 40;
+    const chartTop = 60;
+    const baseNodeWidth = 140;
+    const baseNodeHeight = 44;
+    const layerGap = 280;
+    const rowGap = 200;
+    const nodesByLayer = new Map();
+
+    nodes.forEach((node) => {
+        if (!nodesByLayer.has(node.layer)) {
+            nodesByLayer.set(node.layer, []);
+        }
+        nodesByLayer.get(node.layer).push(node);
+    });
+
+    const layerKeys = Array.from(nodesByLayer.keys()).sort((a, b) => a - b);
+    const maxNodesInLayer = Math.max(...Array.from(nodesByLayer.values()).map(arr => arr.length), 1);
+    const svgWidth = Math.max(1460, maxNodesInLayer * layerGap + 400); 
+    const mainSpineX = Math.floor(svgWidth / 2) - Math.floor(baseNodeWidth / 2);
+
+    layerKeys.forEach((layerKey) => {
+        const layerNodes = nodesByLayer.get(layerKey);
+        const spineNodes = layerNodes.filter(n => n.isMainSpine);
+        const branchNodes = layerNodes.filter(n => !n.isMainSpine);
+        
+        let nextLeftOffset = 1;
+        let nextRightOffset = 1;
+        
+        if (spineNodes.length > 0) {
+            spineNodes[0].centerX = mainSpineX + (baseNodeWidth / 2);
+            spineNodes[0].y = chartTop + layerKey * rowGap;
+        }
+        
+        branchNodes.sort((a, b) => b.weight - a.weight);
+        branchNodes.forEach((node, idx) => {
+            node.y = chartTop + layerKey * rowGap;
+            if (idx % 2 === 0) {
+                node.centerX = mainSpineX + (nextRightOffset * layerGap) + (baseNodeWidth / 2);
+                nextRightOffset++;
+            } else {
+                node.centerX = mainSpineX - (nextLeftOffset * layerGap) + (baseNodeWidth / 2);
+                node.centerX = Math.max(chartLeft + (baseNodeWidth / 2), node.centerX);
+                nextLeftOffset++;
+            }
+        });
+    });
+
+    const maxNodeWeightForSize = Math.max(...nodes.map((node) => node.weight), 1);
+    nodes.forEach(node => {
+        const scale = Math.sqrt(node.weight / maxNodeWeightForSize);
+        node.calcWidth = baseNodeWidth + scale * 80;
+        node.calcHeight = baseNodeHeight + scale * 20;
+        node.x = node.centerX - (node.calcWidth / 2);
+    });
+
+    const nodeLookup = new Map(nodes.map(n => [n.name, n]));
+    const maxNodeBottom = Math.max(...nodes.map(n => n.y + n.calcHeight), chartTop + baseNodeHeight);
+    
+    let maxRouteY = maxNodeBottom;
+    edges.forEach(edge => {
+        const sourceNode = nodeLookup.get(edge.source);
+        const targetNode = nodeLookup.get(edge.target);
+        if (sourceNode && targetNode && targetNode.layer <= sourceNode.layer) {
+            const startY = sourceNode.y + sourceNode.calcHeight;
+            const endY = targetNode.y;
+            const routeY = Math.max(startY, endY) + 210 + Math.abs(targetNode.layer - sourceNode.layer) * 32;
+            if (routeY > maxRouteY) maxRouteY = routeY;
+        }
+    });
+
+    const bottomPadding = 60;
+    return {
+        chartWidth: svgWidth,
+        chartHeight: Math.max(400, maxRouteY + bottomPadding),
+        mainSpineX: mainSpineX
+    };
+}
+
 function renderProcessFlowMapFromData(flowData, options = {}) {
     const activityPercent = Number(options.activityPercent ?? 100);
     const connectionPercent = Number(options.connectionPercent ?? 100);
@@ -959,250 +1205,137 @@ function renderProcessFlowMapFromData(flowData, options = {}) {
     );
     const { nodes, edges } = filteredData;
 
-    if (!nodes.length || !edges.length) {
+    if (!nodes.length) {
         return '<p class="empty-state">フロー図を作れるデータがありません。</p>';
     }
 
-    const chartLeft = 40;
-    const chartTop = 36;
-    const nodeWidth = 176;
-    const nodeHeight = 48;
-    const layerGap = 300;
-    const rowGap = 78;
-    const nodesByLayer = new Map();
+    // Reuse pre-calculated layout if available, otherwise calculate once
+    const layout = calculateProcessFlowLayout(nodes, edges);
+    const { chartWidth, chartHeight, mainSpineX } = layout;
+    const layerGap = 280;
 
-    nodes
-        .sort((left, right) => {
-            if (left.layer !== right.layer) {
-                return left.layer - right.layer;
-            }
-
-            if (left.orderScore !== right.orderScore) {
-                return left.orderScore - right.orderScore;
-            }
-
-            return right.weight - left.weight;
-        })
-        .forEach((node) => {
-            if (!nodesByLayer.has(node.layer)) {
-                nodesByLayer.set(node.layer, []);
-            }
-
-            nodesByLayer.get(node.layer).push(node);
-        });
-
-    const layerKeys = Array.from(nodesByLayer.keys()).sort((left, right) => left - right);
-
-    layerKeys.forEach((layerKey) => {
-        const layerNodes = nodesByLayer.get(layerKey);
-        layerNodes.forEach((node, index) => {
-            node.x = chartLeft + layerKey * layerGap;
-            node.y = chartTop + index * rowGap;
-        });
-    });
-
-    const nodeLookup = new Map(nodes.map((node) => [node.name, node]));
-    const maxNodeRight = Math.max(...nodes.map((node) => node.x + nodeWidth), chartLeft + nodeWidth);
-    const maxRouteX = edges.reduce((currentMax, edge) => {
-        const sourceNode = nodeLookup.get(edge.source);
-        const targetNode = nodeLookup.get(edge.target);
-
-        if (!sourceNode || !targetNode || targetNode.layer > sourceNode.layer) {
-            return currentMax;
-        }
-
-        return Math.max(currentMax, getProcessFlowRouteX(sourceNode, targetNode, nodeWidth));
-    }, maxNodeRight);
-    const chartWidth = Math.max(
-        1460,
-        maxNodeRight + 180,
-        maxRouteX + 150
-    );
-    const chartHeight = Math.max(
-        360,
-        chartTop + Math.max(...nodes.map((node) => node.y), 0) + nodeHeight + 48
-    );
-    const maxEdgeCount = Math.max(...edges.map((edge) => edge.count), 1);
-    const maxNodeWeight = Math.max(...nodes.map((node) => node.weight), 1);
+    const nodeLookup = new Map(nodes.map(n => [n.name, n]));
+    const maxEdgeCount = Math.max(...edges.map(e => e.count), 1);
+    const maxNodeWeight = Math.max(...nodes.map(n => n.weight), 1);
     const labelState = buildProcessMapLabelState(edges, labelPercent);
     const outgoingEdgeMap = new Map();
     const incomingEdgeMap = new Map();
 
-    edges.forEach((edge) => {
-        if (!outgoingEdgeMap.has(edge.source)) {
-            outgoingEdgeMap.set(edge.source, []);
-        }
-
-        if (!incomingEdgeMap.has(edge.target)) {
-            incomingEdgeMap.set(edge.target, []);
-        }
-
+    edges.forEach(edge => {
+        if (!outgoingEdgeMap.has(edge.source)) outgoingEdgeMap.set(edge.source, []);
+        if (!incomingEdgeMap.has(edge.target)) incomingEdgeMap.set(edge.target, []);
         outgoingEdgeMap.get(edge.source).push(edge);
         incomingEdgeMap.get(edge.target).push(edge);
     });
 
-    nodes.forEach((node) => {
-        const outgoingEdges = outgoingEdgeMap.get(node.name) || [];
-        const incomingEdges = incomingEdgeMap.get(node.name) || [];
+    nodes.forEach(node => {
+        const outEdges = outgoingEdgeMap.get(node.name) || [];
+        const inEdges = incomingEdgeMap.get(node.name) || [];
 
-        outgoingEdges
-            .sort((left, right) => {
-                const leftTarget = nodeLookup.get(left.target);
-                const rightTarget = nodeLookup.get(right.target);
-                const leftY = leftTarget ? leftTarget.y : 0;
-                const rightY = rightTarget ? rightTarget.y : 0;
+        outEdges.sort((a, b) => {
+            const aX = (nodeLookup.get(a.target) || {x: 0}).x;
+            const bX = (nodeLookup.get(b.target) || {x: 0}).x;
+            return aX !== bX ? aX - bX : b.count - a.count;
+        }).forEach((edge, i) => {
+            edge.sourceOffsetX = edge.isMainSpine ? node.x + (node.calcWidth / 2) : node.x + 8 + ((i + 1) * (node.calcWidth - 16)) / (outEdges.length + 1);
+        });
 
-                if (leftY !== rightY) {
-                    return leftY - rightY;
-                }
-
-                return right.count - left.count;
-            })
-            .forEach((edge, index) => {
-                const usableHeight = nodeHeight - 16;
-                edge.sourceOffsetY = node.y + 8 + ((index + 1) * usableHeight) / (outgoingEdges.length + 1);
-            });
-
-        incomingEdges
-            .sort((left, right) => {
-                const leftSource = nodeLookup.get(left.source);
-                const rightSource = nodeLookup.get(right.source);
-                const leftY = leftSource ? leftSource.y : 0;
-                const rightY = rightSource ? rightSource.y : 0;
-
-                if (leftY !== rightY) {
-                    return leftY - rightY;
-                }
-
-                return right.count - left.count;
-            })
-            .forEach((edge, index) => {
-                const usableHeight = nodeHeight - 16;
-                edge.targetOffsetY = node.y + 8 + ((index + 1) * usableHeight) / (incomingEdges.length + 1);
-            });
+        inEdges.sort((a, b) => {
+            const aX = (nodeLookup.get(a.source) || {x: 0}).x;
+            const bX = (nodeLookup.get(b.source) || {x: 0}).x;
+            return aX !== bX ? aX - bX : b.count - a.count;
+        }).forEach((edge, i) => {
+            edge.targetOffsetX = edge.isMainSpine ? node.x + (node.calcWidth / 2) : node.x + 8 + ((i + 1) * (node.calcWidth - 16)) / (inEdges.length + 1);
+        });
     });
 
-    const edgesSvg = edges
-        .map((edge) => {
-            const sourceNode = nodeLookup.get(edge.source);
-            const targetNode = nodeLookup.get(edge.target);
+    const edgesSvg = edges.map(edge => {
+        const s = nodeLookup.get(edge.source);
+        const t = nodeLookup.get(edge.target);
+        if (!s || !t) return "";
 
-            if (!sourceNode || !targetNode) {
-                return "";
+        const isSpine = edge.isMainSpine;
+        const isBack = t.layer <= s.layer;
+        let opacity, strokeWidth;
+        if (isSpine) { opacity = 0.9; strokeWidth = 14; }
+        else if (isBack) { opacity = 0.08; strokeWidth = 1.0; }
+        else {
+            opacity = 0.10 + (edge.count / maxEdgeCount) * 0.50;
+            strokeWidth = 1.0 + (edge.count / maxEdgeCount) * 9.0;
+        }
+
+        const startX = edge.sourceOffsetX, startY = s.y + s.calcHeight;
+        const endX = edge.targetOffsetX, endY = t.y;
+        let pathD = "", lblX = 0, lblY = 0;
+
+        if (!isBack) {
+            if (isSpine) { pathD = `M ${startX} ${startY} L ${endX} ${endY}`; lblX = (startX + endX) / 2 + 10; lblY = (startY + endY) / 2; }
+            else {
+                const off = Math.max(120, (endY - startY) * 0.5);
+                pathD = `M ${startX} ${startY} C ${startX} ${startY + off}, ${endX} ${endY - off}, ${endX} ${endY}`;
+                lblX = (startX + endX) / 2 + 5; lblY = (startY + endY) / 2;
             }
+        } else {
+            const rY = Math.max(startY, endY) + 210 + Math.abs(t.layer - s.layer) * 32;
+            const rXOff = s.x >= mainSpineX ? 220 + layerGap : -(220 + layerGap); 
+            pathD = `M ${startX} ${startY} C ${startX} ${rY}, ${endX + rXOff} ${rY}, ${endX} ${endY}`;
+            lblX = endX + rXOff / 2; lblY = rY - 10;
+        }
 
-            const opacity = 0.14 + (edge.count / maxEdgeCount) * 0.86;
-            const strokeWidth = 2 + (edge.count / maxEdgeCount) * 8;
-            const isBackward = targetNode.layer <= sourceNode.layer;
-            const routeX = isBackward
-                ? getProcessFlowRouteX(sourceNode, targetNode, nodeWidth)
-                : 0;
-            const edgeClassName = isBackward
-                ? "process-map-edge process-map-edge--return"
-                : "process-map-edge";
-            const edgeLabelClassName = isBackward
-                ? "process-map-edge-label process-map-edge-label--return"
-                : "process-map-edge-label";
-            const edgeMarkerId = isBackward
-                ? "process-map-arrow-return"
-                : "process-map-arrow";
-            const edgeLabelX = isBackward
-                ? routeX - 44
-                : (sourceNode.x + targetNode.x + nodeWidth) / 2;
-            const edgeLabelY = (edge.sourceOffsetY + edge.targetOffsetY) / 2 - 10;
-            const showLabel = labelState.visibleLabelKeys.has(getProcessFlowEdgeKey(edge));
+        const showLabel = labelState.visibleLabelKeys.has(getProcessFlowEdgeKey(edge));
+        return `
+            <path d="${pathD}" class="${isBack ? "process-map-edge process-map-edge--return" : "process-map-edge"}" marker-end="url(#${isBack ? "process-map-arrow-return" : "process-map-arrow"})" data-source="${escapeHtml(edge.source)}" data-target="${escapeHtml(edge.target)}" style="stroke-width: ${strokeWidth}; opacity: ${opacity}; fill: none; ${isSpine ? "stroke: #0a3b8c;" : "stroke: currentColor;"}"></path>
+            ${showLabel ? `<text x="${lblX}" y="${lblY}" class="${isBack ? "process-map-edge-label process-map-edge-label--return" : "process-map-edge-label"}" data-source="${escapeHtml(edge.source)}" data-target="${escapeHtml(edge.target)}">${escapeHtml(edge.count.toLocaleString("ja-JP"))}件</text>` : ""}
+        `;
+    }).join("");
 
-            return `
-                <path
-                    d="${buildProcessFlowPath(edge, sourceNode, targetNode, nodeWidth)}"
-                    class="${edgeClassName}"
-                    marker-end="url(#${edgeMarkerId})"
-                    style="stroke-width: ${strokeWidth}; opacity: ${opacity};"
-                ></path>
-                ${showLabel ? `
-                    <text x="${edgeLabelX}" y="${edgeLabelY}" class="${edgeLabelClassName}">
-                        ${escapeHtml(edge.count.toLocaleString("ja-JP"))}件
-                    </text>
-                ` : ""}
-            `;
-        })
-        .join("");
+    const nodesSvg = nodes.map(node => {
+        const lines = wrapJapaneseLabel(node.name, 10, 2);
+        const isSpine = node.isMainSpine, isStart = node.incoming === 0, isEnd = node.outgoing === 0;
+        const ratio = node.weight / maxNodeWeight;
+        let fill, stroke, lblCol, strokeW, rx;
 
-    const nodesSvg = nodes
-        .map((node) => {
-            const lines = wrapJapaneseLabel(node.name, 10, 2);
-            const weightRatio = node.weight / maxNodeWeight;
-            const fillColor = `rgba(48, 96, 212, ${0.1 + weightRatio * 0.78})`;
-            const strokeColor = `rgba(35, 75, 176, ${0.3 + weightRatio * 0.62})`;
-            const labelColor = weightRatio >= 0.55 ? "#ffffff" : "#1f335e";
-            const labelSvg = lines
-                .map((line, index) => {
-                    const y = lines.length === 1
-                        ? node.y + 27
-                        : node.y + 21 + index * 15;
+        if (isStart) { fill = "rgba(38, 166, 91, 0.9)"; stroke = "#1e8248"; lblCol = "#ffffff"; strokeW = "2.5"; rx = "32"; }
+        else if (isEnd) { fill = "rgba(28, 43, 89, 0.9)"; stroke = "#13204a"; lblCol = "#ffffff"; strokeW = "2.5"; rx = "32"; }
+        else if (isSpine) { fill = `rgba(18, 55, 148, ${0.4 + ratio * 0.6})`; stroke = "#0a2e7a"; lblCol = "#ffffff"; strokeW = "2.5"; rx = "14"; }
+        else {
+            fill = `rgba(48, 96, 212, ${0.1 + ratio * 0.5})`;
+            stroke = `rgba(35, 75, 176, ${0.3 + ratio * 0.4})`;
+            lblCol = ratio >= 0.55 ? "#ffffff" : "#1f335e";
+            strokeW = "1.2"; rx = "14";
+        }
 
-                    return `
-                        <text x="${node.x + 16}" y="${y}" class="process-map-node-label" style="fill: ${labelColor};">
-                            ${escapeHtml(line)}
-                        </text>
-                    `;
-                })
-                .join("");
+        const labelSvg = lines.map((line, i) => {
+            const yOff = lines.length > 1 ? (i - (lines.length - 1) / 2) * 16 : 0;
+            return `<text x="${node.x + node.calcWidth / 2}" y="${node.y + node.calcHeight / 2 + yOff}" class="process-map-node-label" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" style="fill: ${lblCol}; pointer-events: none;">${escapeHtml(line)}</text>`;
+        }).join("");
 
-            return `
-                <rect
-                    x="${node.x}"
-                    y="${node.y}"
-                    width="${nodeWidth}"
-                    height="${nodeHeight}"
-                    rx="14"
-                    ry="14"
-                    class="process-map-node"
-                    style="fill: ${fillColor}; stroke: ${strokeColor};"
-                ></rect>
+        let tooltip = `【${node.name}】\n実行回数: ${node.weight.toLocaleString('ja-JP')}件`;
+        if (node.avgDuration !== undefined) tooltip += `\n平均処理時間: ${node.avgDuration.toFixed(1)}分`;
+
+        return `
+            <g class="process-map-node-group" data-node="${escapeHtml(node.name)}" style="cursor: pointer;">
+                <title>${escapeHtml(tooltip)}</title>
+                <rect x="${node.x}" y="${node.y}" width="${node.calcWidth}" height="${node.calcHeight}" rx="${rx}" ry="${rx}" class="process-map-node" style="fill: ${fill}; stroke: ${stroke}; stroke-width: ${strokeW};" filter="url(#drop-shadow)"></rect>
                 ${labelSvg}
-            `;
-        })
-        .join("");
+            </g>
+        `;
+    }).join("");
 
     return `
         <div class="process-map-wrap">
-            <svg
-                class="process-map-svg"
-                width="${chartWidth}"
-                height="${chartHeight}"
-                viewBox="0 0 ${chartWidth} ${chartHeight}"
-                role="img"
-                aria-label="業務全体フロー図"
-                preserveAspectRatio="xMinYMin meet"
-            >
+            <svg class="process-map-svg" width="${chartWidth}" height="${chartHeight}" viewBox="0 0 ${chartWidth} ${chartHeight}" role="img" aria-label="業務全体フロー図" preserveAspectRatio="xMinYMin meet">
                 <defs>
-                    <marker
-                        id="process-map-arrow"
-                        markerUnits="userSpaceOnUse"
-                        markerWidth="12"
-                        markerHeight="12"
-                        refX="11"
-                        refY="6"
-                        orient="auto"
-                    >
-                        <path d="M 0 0 L 10 5 L 0 10 z" fill="#2458d3"></path>
-                    </marker>
-                    <marker
-                        id="process-map-arrow-return"
-                        markerUnits="userSpaceOnUse"
-                        markerWidth="12"
-                        markerHeight="12"
-                        refX="11"
-                        refY="6"
-                        orient="auto"
-                    >
-                        <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf7a45"></path>
-                    </marker>
+                    <filter id="drop-shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="8" stdDeviation="6" flood-color="rgba(10, 20, 40, 0.15)" /></filter>
+                    <marker id="process-map-arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2458d3"></path></marker>
+                    <marker id="process-map-arrow-return" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#cf7a45"></path></marker>
                 </defs>
-                ${edgesSvg}
-                ${nodesSvg}
+                <g class="viewport-wrap">
+                    ${edgesSvg}
+                    ${nodesSvg}
+                </g>
             </svg>
+            <div class="process-map-zoom-indicator" style="position: absolute; bottom: 16px; right: 16px; background: rgba(255, 255, 255, 0.9); padding: 4px 10px; border-radius: 4px; font-size: 14px; font-weight: 700; color: #1f335e; box-shadow: 0 2px 6px rgba(0,0,0,0.15); pointer-events: none;">100%</div>
         </div>
     `;
 }
@@ -1258,6 +1391,7 @@ async function initializePatternFlowExplorer(runId) {
         const connectionPercent = Number(connectionsSlider.value);
         const labelPercent = Number(labelsSlider.value);
 
+        // Update labels instantly
         patternsValue.textContent = `${patternPercent}%`;
         activitiesValue.textContent = `${activityPercent}%`;
         connectionsValue.textContent = `${connectionPercent}%`;
@@ -1275,27 +1409,48 @@ async function initializePatternFlowExplorer(runId) {
                 return;
             }
 
-            const edges = snapshot.flow_data?.edges || [];
-            const labelState = buildProcessMapLabelState(edges, labelPercent);
+            const flowData = snapshot.flow_data || { nodes: [], edges: [] };
+            const labelState = buildProcessMapLabelState(flowData.edges || [], labelPercent);
 
             patternsMeta.textContent = `${snapshot.pattern_window.used_pattern_count} / ${snapshot.pattern_window.effective_pattern_count} patterns`;
             activitiesMeta.textContent = `${snapshot.activity_window.visible_activity_count} / ${snapshot.activity_window.available_activity_count} activities`;
             connectionsMeta.textContent = `${snapshot.connection_window.visible_connection_count} / ${snapshot.connection_window.available_connection_count} connections`;
             labelsMeta.textContent = `${labelState.visibleLabelCount} / ${labelState.totalLabelCount} labels`;
 
-            if (!(snapshot.flow_data?.nodes || []).length) {
+            if (!flowData.nodes.length) {
                 mapViewport.innerHTML = renderProcessMapEmpty("表示できるフロー図がありません。表示率を広げてください。");
                 return;
             }
 
-            mapViewport.innerHTML = renderProcessFlowMapFromData(snapshot.flow_data, {
+            const edgeCount = flowData.edges.length;
+            const totalToRender = flowData.nodes.length + edgeCount;
+            if (totalToRender > AGGRESSIVE_LIMIT) {
+                mapViewport.innerHTML = renderProcessMapEmpty(
+                    `図が複雑すぎるため（要素数: ${totalToRender.toLocaleString()}）、現在の表示率では描画を停止しました。スライダーを下げてください。`
+                );
+                return;
+            }
+
+            if (totalToRender > RENDERING_LIMIT || edgeCount > EDGE_LIMIT) {
+                const reason = totalToRender > RENDERING_LIMIT
+                    ? `要素数: ${totalToRender.toLocaleString()}`
+                    : `線の数: ${edgeCount.toLocaleString()}`;
+                mapViewport.innerHTML = renderProcessMapEmpty(
+                    `図が複雑すぎるため（${reason}）、ブラウザのフリーズを防ぐために描画を停止しました。スライダーで表示率を下げてください。`
+                );
+                return;
+            }
+
+            mapViewport.innerHTML = renderProcessFlowMapFromData(flowData, {
                 labelPercent,
+                activityPercent: 100,
+                connectionPercent: 100,
             });
+            attachProcessMapInteractions(mapViewport);
         } catch (error) {
             if (currentVersion !== requestVersion) {
                 return;
             }
-
             patternsMeta.textContent = "";
             activitiesMeta.textContent = "";
             connectionsMeta.textContent = "";
@@ -1304,10 +1459,28 @@ async function initializePatternFlowExplorer(runId) {
         }
     }
 
-    patternsSlider.addEventListener("input", updateProcessMap);
-    activitiesSlider.addEventListener("input", updateProcessMap);
-    connectionsSlider.addEventListener("input", updateProcessMap);
-    labelsSlider.addEventListener("input", updateProcessMap);
+    const debouncedUpdate = debounce(updateProcessMap, 300);
+
+    patternsSlider.addEventListener("input", () => {
+        patternsValue.textContent = `${patternsSlider.value}%`;
+        debouncedUpdate();
+    });
+    activitiesSlider.addEventListener("input", () => {
+        activitiesValue.textContent = `${activitiesSlider.value}%`;
+        debouncedUpdate();
+    });
+    connectionsSlider.addEventListener("input", () => {
+        connectionsValue.textContent = `${connectionsSlider.value}%`;
+        debouncedUpdate();
+    });
+    labelsSlider.addEventListener("input", () => {
+        labelsValue.textContent = `${labelsSlider.value}%`;
+        debouncedUpdate();
+    });
+    
+    // We also want real-time label change without a network request ideally, but 'input' event 
+    // for all might cause lag. Use 'change' instead.
+    
     if (exportSvgButton) {
         exportSvgButton.addEventListener("click", () => {
             exportProcessMapSvg(
@@ -1326,8 +1499,142 @@ async function initializePatternFlowExplorer(runId) {
     await updateProcessMap();
 }
 
+function attachProcessMapInteractions(viewportElement) {
+    const svgElement = viewportElement.querySelector("svg.process-map-svg");
+    const zoomIndicator = viewportElement.querySelector(".process-map-zoom-indicator");
+    if (!svgElement) return;
+
+    let isDragging = false;
+    let startPanX = 0;
+    let startPanY = 0;
+    
+    // Check if we already have a transform applied
+    let currentScale = 1;
+    let currentPanX = 0;
+    let currentPanY = 0;
+
+    // We need a wrapper inside the SVG to apply transforms, or apply to root
+    const rootMatrix = svgElement.createSVGMatrix();
+
+    svgElement.style.cursor = "grab";
+
+    svgElement.addEventListener("mousedown", (e) => {
+        isDragging = true;
+        svgElement.style.cursor = "grabbing";
+        startPanX = e.clientX - currentPanX;
+        startPanY = e.clientY - currentPanY;
+        e.preventDefault();
+    });
+
+    window.addEventListener("mousemove", (e) => {
+        if (!isDragging) return;
+        currentPanX = e.clientX - startPanX;
+        currentPanY = e.clientY - startPanY;
+        applyTransform();
+    });
+
+    window.addEventListener("mouseup", () => {
+        isDragging = false;
+        if(svgElement) svgElement.style.cursor = "grab";
+    });
+
+    svgElement.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        
+        const zoomIntensity = 0.1;
+        const delta = e.deltaY > 0 ? -zoomIntensity : zoomIntensity;
+        
+        // Calculate new scale
+        let newScale = currentScale * (1 + delta);
+        newScale = Math.max(0.1, Math.min(newScale, 5)); // Limit zoom
+        
+        // Zoom towards cursor
+        const rect = svgElement.getBoundingClientRect();
+        const cursorX = e.clientX - rect.left;
+        const cursorY = e.clientY - rect.top;
+        
+        currentPanX = cursorX - (cursorX - currentPanX) * (newScale / currentScale);
+        currentPanY = cursorY - (cursorY - currentPanY) * (newScale / currentScale);
+        
+        currentScale = newScale;
+        applyTransform();
+    }, { passive: false });
+    
+    // Set up click-to-focus highlighting
+    svgElement.addEventListener("click", (e) => {
+        // If they were just dragging, ignore the click
+        if (isDragging) return;
+
+        const nodeGroup = e.target.closest(".process-map-node-group");
+        
+        if (!nodeGroup) {
+            // Clicked background, clear focus
+            svgElement.classList.remove("is-focusing");
+            svgElement.querySelectorAll(".is-focused").forEach(el => el.classList.remove("is-focused"));
+            return;
+        }
+
+        const focusedNodeName = nodeGroup.getAttribute("data-node");
+        if (!focusedNodeName) return;
+
+        // Toggle focus off if clicking the already focused node
+        if (nodeGroup.classList.contains("is-focused") && svgElement.classList.contains("is-focusing")) {
+            svgElement.classList.remove("is-focusing");
+            svgElement.querySelectorAll(".is-focused").forEach(el => el.classList.remove("is-focused"));
+            return;
+        }
+
+        // Apply focusing state
+        svgElement.classList.add("is-focusing");
+        svgElement.querySelectorAll(".is-focused").forEach(el => el.classList.remove("is-focused"));
+
+        // Focus the clicked node
+        nodeGroup.classList.add("is-focused");
+
+        // Find and focus connected edges and their other connected nodes
+        const edges = svgElement.querySelectorAll(".process-map-edge, .process-map-edge-label");
+        const connectedNodes = new Set();
+        
+        edges.forEach(edge => {
+            const source = edge.getAttribute("data-source");
+            const target = edge.getAttribute("data-target");
+
+            if (source === focusedNodeName || target === focusedNodeName) {
+                edge.classList.add("is-focused");
+                connectedNodes.add(source);
+                connectedNodes.add(target);
+            }
+        });
+
+        // Focus the connected nodes
+        const allNodes = svgElement.querySelectorAll(".process-map-node-group");
+        allNodes.forEach(n => {
+            if (connectedNodes.has(n.getAttribute("data-node"))) {
+                n.classList.add("is-focused");
+            }
+        });
+    });
+    
+    function applyTransform() {
+        const gWrap = svgElement.querySelector(".viewport-wrap");
+        if (!gWrap) return;
+        
+        const transformString = `translate(${currentPanX}px, ${currentPanY}px) scale(${currentScale})`;
+        gWrap.style.transform = transformString;
+        gWrap.style.transformOrigin = "0 0";
+        
+        if (zoomIndicator) {
+            zoomIndicator.textContent = Math.round(currentScale * 100) + "%";
+        }
+    }
+    
+    // Apply initial transform to wrap properly
+    applyTransform();
+}
+
 function renderPatternChart(analysis, runId) {
     const chartRows = analysis.rows.slice(0, 8);
+    const initialFlowSettings = getInitialPatternFlowSettings(analysis.row_count ?? analysis.rows.length);
 
     if (!chartRows.length) {
         chartPanel.className = "result-panel";
@@ -1385,7 +1692,7 @@ function renderPatternChart(analysis, runId) {
 
     chartPanel.className = "result-panel";
     chartTitle.textContent = "業務全体フロー図";
-    chartNote.textContent = "右側のバーで表示率を絞れます。ノードは件数が多いほど濃く、線は件数が多いほど太く濃く表示しています。下に上位8件の処理順パターンも表示しています。";
+    chartNote.textContent = "大量データでは初期表示を自動で絞っています。右側のバーで表示率を調整できます。ノードは件数が多いほど濃く、線は件数が多いほど太く表示します。";
     chartContainer.innerHTML = `
         <div class="process-explorer-shell">
             <div class="process-explorer-map-panel">
@@ -1399,7 +1706,7 @@ function renderPatternChart(analysis, runId) {
                 <section class="process-explorer-control">
                     <div class="process-explorer-control-head">
                         <span>Patterns</span>
-                        <strong id="process-map-patterns-value">100%</strong>
+                        <strong id="process-map-patterns-value">${initialFlowSettings.patterns}%</strong>
                     </div>
                     <div class="process-explorer-slider-wrap">
                         <span class="process-explorer-slider-top">100%</span>
@@ -1410,7 +1717,7 @@ function renderPatternChart(analysis, runId) {
                             min="10"
                             max="100"
                             step="10"
-                            value="100"
+                            value="${initialFlowSettings.patterns}"
                         >
                         <span class="process-explorer-slider-bottom">10%</span>
                     </div>
@@ -1419,7 +1726,7 @@ function renderPatternChart(analysis, runId) {
                 <section class="process-explorer-control">
                     <div class="process-explorer-control-head">
                         <span>Activities</span>
-                        <strong id="process-map-activities-value">100%</strong>
+                        <strong id="process-map-activities-value">${initialFlowSettings.activities}%</strong>
                     </div>
                     <div class="process-explorer-slider-wrap">
                         <span class="process-explorer-slider-top">100%</span>
@@ -1430,7 +1737,7 @@ function renderPatternChart(analysis, runId) {
                             min="10"
                             max="100"
                             step="10"
-                            value="100"
+                            value="${initialFlowSettings.activities}"
                         >
                         <span class="process-explorer-slider-bottom">10%</span>
                     </div>
@@ -1439,7 +1746,7 @@ function renderPatternChart(analysis, runId) {
                 <section class="process-explorer-control">
                     <div class="process-explorer-control-head">
                         <span>Connections</span>
-                        <strong id="process-map-connections-value">100%</strong>
+                        <strong id="process-map-connections-value">${initialFlowSettings.connections}%</strong>
                     </div>
                     <div class="process-explorer-slider-wrap">
                         <span class="process-explorer-slider-top">100%</span>
@@ -1450,7 +1757,7 @@ function renderPatternChart(analysis, runId) {
                             min="10"
                             max="100"
                             step="10"
-                            value="100"
+                            value="${initialFlowSettings.connections}"
                         >
                         <span class="process-explorer-slider-bottom">10%</span>
                     </div>
@@ -1459,7 +1766,7 @@ function renderPatternChart(analysis, runId) {
                 <section class="process-explorer-control">
                     <div class="process-explorer-control-head">
                         <span>Labels</span>
-                        <strong id="process-map-labels-value">100%</strong>
+                        <strong id="process-map-labels-value">${initialFlowSettings.labels}%</strong>
                     </div>
                     <div class="process-explorer-slider-wrap">
                         <span class="process-explorer-slider-top">100%</span>
@@ -1470,7 +1777,7 @@ function renderPatternChart(analysis, runId) {
                             min="0"
                             max="100"
                             step="10"
-                            value="100"
+                            value="${initialFlowSettings.labels}"
                         >
                         <span class="process-explorer-slider-bottom">0%</span>
                     </div>
@@ -1507,6 +1814,7 @@ async function renderChart(analysis, runId) {
 async function renderDetailPage() {
     const latestResult = loadLatestResult();
     const runId = getRunId(latestResult);
+    let detailRequestVersion = 0;
 
     if (!analysisKey) {
         setStatus("分析キーを特定できませんでした。", "error");
@@ -1521,21 +1829,46 @@ async function renderDetailPage() {
     setStatus("詳細を読み込んでいます...", "info");
 
     try {
-        const detailData = await fetchJson(
-            `/api/runs/${encodeURIComponent(runId)}/analyses/${encodeURIComponent(analysisKey)}`,
-            "分析詳細の読み込みに失敗しました。"
-        );
+        const detailData = await loadAnalysisPage(runId, 0);
         const analysis = detailData.analyses[analysisKey];
 
         if (!analysis) {
             throw new Error("指定した分析結果が見つかりません。");
         }
 
+        const renderAnalysisPage = async (rowOffset) => {
+            const currentVersion = detailRequestVersion + 1;
+            detailRequestVersion = currentVersion;
+            setStatus("表を読み込んでいます...", "info");
+
+            try {
+                const pageData = await loadAnalysisPage(runId, rowOffset);
+
+                if (currentVersion !== detailRequestVersion) {
+                    return;
+                }
+
+                const pageAnalysis = pageData.analyses[analysisKey];
+                if (!pageAnalysis) {
+                    throw new Error("指定した分析結果が見つかりません。");
+                }
+
+                renderResult(pageAnalysis, runId, renderAnalysisPage);
+                hideStatus();
+            } catch (error) {
+                if (currentVersion !== detailRequestVersion) {
+                    return;
+                }
+
+                setStatus(error.message, "error");
+            }
+        };
+
         detailPageTitle.textContent = analysis.analysis_name;
         detailPageCopy.textContent = "指定した分析実行の全件結果を表示しています。";
         renderSummary(detailData, analysis);
         await renderChart(analysis, runId);
-        renderResult(analysis, runId);
+        renderResult(analysis, runId, renderAnalysisPage);
         hideStatus();
     } catch (error) {
         summaryPanel.className = "summary-panel hidden";

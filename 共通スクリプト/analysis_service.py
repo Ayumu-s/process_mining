@@ -47,6 +47,7 @@ FLOW_PATTERN_CASE_COUNT_COLUMN = "ケース数"
 FLOW_PATTERN_COLUMN = "処理順パターン"
 FLOW_PATH_SEPARATOR = "→"
 FLOW_PATTERN_CAP = 500
+FLOW_LAYOUT_SWEEP_ITERATIONS = 4
 
 
 def get_available_analysis_definitions():
@@ -115,6 +116,7 @@ def analyze_prepared_event_log(
         analysis_results[analysis_key] = {
             "analysis_name": analysis_config["analysis_name"],
             "sheet_name": analysis_config["sheet_name"],
+            "output_file_name": analysis_config["output_file_name"],
             "rows": convert_analysis_result_to_records(
                 result_df,
                 analysis_config["display_columns"],
@@ -349,7 +351,14 @@ def _filter_flow_graph(nodes, edges, activity_percent=100, connection_percent=10
         }
         for edge in selected_edges
     ]
-    visible_nodes, visible_edges = _apply_flow_layout(visible_nodes, visible_edges)
+    # Re-index orderScore to keep it compact for the subset, but keep layer/weight from parent
+    nodes_by_layer = defaultdict(list)
+    for n in visible_nodes:
+        nodes_by_layer[n["layer"]].append(n)
+    for layer in nodes_by_layer:
+        nodes_by_layer[layer].sort(key=lambda x: (x.get("orderScore", 0), x["name"]))
+        for i, n in enumerate(nodes_by_layer[layer]):
+            n["orderScore"] = i
 
     return {
         "nodes": visible_nodes,
@@ -421,14 +430,15 @@ def _count_layer_crossings(layer, edges, node_lookup):
     )
 
 
-def _optimize_layer_by_swaps(layer_nodes, edges, node_lookup):
+def _optimize_layer_by_swaps(layer_nodes, edges, node_lookup, max_swaps=100):
     if len(layer_nodes) < 2:
         return
 
     layer = layer_nodes[0]["layer"]
     updated = True
+    swap_count = 0
 
-    while updated:
+    while updated and swap_count < max_swaps:
         updated = False
 
         for index in range(len(layer_nodes) - 1):
@@ -442,6 +452,9 @@ def _optimize_layer_by_swaps(layer_nodes, edges, node_lookup):
             swapped_score = _count_layer_crossings(layer, edges, node_lookup)
             if swapped_score < current_score:
                 updated = True
+                swap_count += 1
+                if swap_count >= max_swaps:
+                    break
                 continue
 
             layer_nodes[index], layer_nodes[index + 1] = first_node, second_node
@@ -517,30 +530,36 @@ def _apply_flow_layout(nodes, edges):
     node_lookup = {node["name"]: node for node in nodes}
     max_layer = max(nodes_by_layer) if nodes_by_layer else 0
 
-    for layer in range(1, max_layer + 1):
-        layer_nodes = nodes_by_layer.get(layer, [])
-        layer_nodes.sort(
-            key=lambda node: (
-                _incoming_barycenter(node, edges, node_lookup),
-                -node["weight"],
-                node["name"],
+    # Repeat the sweep so dense graphs keep a stable left-to-right order.
+    for _ in range(FLOW_LAYOUT_SWEEP_ITERATIONS):
+        for layer in range(1, max_layer + 1):
+            layer_nodes = nodes_by_layer.get(layer, [])
+            layer_nodes.sort(
+                key=lambda node: (
+                    _incoming_barycenter(node, edges, node_lookup),
+                    -node["weight"],
+                    node["name"],
+                )
             )
-        )
-        _reindex_layer_nodes(layer_nodes)
+            _reindex_layer_nodes(layer_nodes)
 
-    for layer in range(max_layer - 1, -1, -1):
-        layer_nodes = nodes_by_layer.get(layer, [])
-        layer_nodes.sort(
-            key=lambda node: (
-                _outgoing_barycenter(node, edges, node_lookup),
-                -node["weight"],
-                node["name"],
+        for layer in range(max_layer - 1, -1, -1):
+            layer_nodes = nodes_by_layer.get(layer, [])
+            layer_nodes.sort(
+                key=lambda node: (
+                    _outgoing_barycenter(node, edges, node_lookup),
+                    -node["weight"],
+                    node["name"],
+                )
             )
-        )
-        _reindex_layer_nodes(layer_nodes)
+            _reindex_layer_nodes(layer_nodes)
 
     for layer in range(1, max_layer):
-        _optimize_layer_by_swaps(nodes_by_layer.get(layer, []), edges, node_lookup)
+        # Dense graph safety: don't spend too much time on huge layers
+        layer_nodes = nodes_by_layer.get(layer, [])
+        if len(layer_nodes) > 50:
+            continue
+        _optimize_layer_by_swaps(layer_nodes, edges, node_lookup, max_swaps=50)
 
     ordered_nodes = []
     for layer in sorted(nodes_by_layer):
@@ -558,6 +577,7 @@ def create_pattern_flow_snapshot(
     pattern_rows,
     frequency_rows=None,
     pattern_percent=10,
+    pattern_count=None,
     activity_percent=40,
     connection_percent=30,
     pattern_cap=FLOW_PATTERN_CAP,
@@ -576,10 +596,14 @@ def create_pattern_flow_snapshot(
     )
 
     effective_pattern_count = min(len(sorted_pattern_rows), cap)
-    used_pattern_count = _calculate_flow_limit(
-        effective_pattern_count,
-        requested_pattern_percent,
-    )
+    requested_pattern_count = None if pattern_count is None else max(0, int(pattern_count or 0))
+    if requested_pattern_count is None:
+        used_pattern_count = _calculate_flow_limit(
+            effective_pattern_count,
+            requested_pattern_percent,
+        )
+    else:
+        used_pattern_count = min(effective_pattern_count, requested_pattern_count)
     selected_pattern_rows = sorted_pattern_rows[:used_pattern_count]
     nodes, edges = _build_flow_graph(
         pattern_rows=selected_pattern_rows,
@@ -596,6 +620,7 @@ def create_pattern_flow_snapshot(
     return {
         "pattern_window": {
             "requested_percent": requested_pattern_percent,
+            "requested_count": requested_pattern_count,
             "total_pattern_count": len(sorted_pattern_rows),
             "effective_pattern_count": effective_pattern_count,
             "used_pattern_count": used_pattern_count,

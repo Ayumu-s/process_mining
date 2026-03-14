@@ -6,6 +6,8 @@ const submitButton = document.getElementById("submit-button");
 const statusPanel = document.getElementById("status-panel");
 const summaryPanel = document.getElementById("summary-panel");
 const resultPanels = document.getElementById("result-panels");
+const exportExcelToggle = document.getElementById("export-excel-toggle");
+const excelExportSettings = document.getElementById("excel-export-settings");
 
 function setStatus(message, type = "info") {
     statusPanel.textContent = message;
@@ -56,6 +58,13 @@ function buildTable(rows, options = {}) {
             const cells = headers
                 .map((header) => {
                     const cellValue = escapeHtml(row[header]);
+                    const isWideHeader = (
+                        header === "処理順パターン" || 
+                        header === "アクティビティ名" || 
+                        header === "アクティビティ" ||
+                        header === "前処理アクティビティ名" ||
+                        header === "後処理アクティビティ名"
+                    );
                     const isPatternLink = (
                         analysisKey === "pattern"
                         && header === "処理順パターン"
@@ -65,10 +74,20 @@ function buildTable(rows, options = {}) {
 
                     if (isPatternLink) {
                         return `
-                            <td>
-                                <a href="${buildPatternDetailHref(runId, row.__rowIndex)}" class="table-link">
-                                    ${cellValue}
-                                </a>
+                            <td class="table-cell--wide">
+                                <div class="cell-scroll-wrapper">
+                                    <a href="${buildPatternDetailHref(runId, row.__rowIndex)}" class="table-link">
+                                        ${cellValue}
+                                    </a>
+                                </div>
+                            </td>
+                        `;
+                    }
+
+                    if (isWideHeader) {
+                        return `
+                            <td class="table-cell--wide">
+                                <div class="cell-scroll-wrapper">${cellValue}</div>
                             </td>
                         `;
                     }
@@ -123,6 +142,57 @@ function loadLatestResult() {
         sessionStorage.removeItem(STORAGE_KEY);
         return null;
     }
+}
+
+function syncExcelExportSettings() {
+    const enabled = Boolean(exportExcelToggle?.checked);
+
+    if (excelExportSettings) {
+        excelExportSettings.classList.toggle("hidden", !enabled);
+    }
+}
+
+function getDownloadFileName(response, fallbackFileName) {
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const utf8FileNameMatch = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+
+    if (utf8FileNameMatch) {
+        return decodeURIComponent(utf8FileNameMatch[1]);
+    }
+
+    const fileNameMatch = disposition.match(/filename="([^"]+)"/i);
+
+    if (fileNameMatch) {
+        return fileNameMatch[1];
+    }
+
+    return fallbackFileName;
+}
+
+async function downloadExcelArchive(data) {
+    setStatus("分析は完了しました。Excel ZIP を生成しています...", "info");
+
+    const response = await fetch(
+        `/api/runs/${encodeURIComponent(data.run_id)}/excel-archive`
+    );
+
+    if (!response.ok) {
+        const payload = await response.json();
+        throw new Error(payload.detail || payload.error || "Excel ZIP の生成に失敗しました。");
+    }
+
+    const archiveBlob = await response.blob();
+    const fallbackFileName = `${data.source_file_name.replace(/\.[^.]+$/, "") || "analysis"}_analysis_excels.zip`;
+    const downloadFileName = getDownloadFileName(response, fallbackFileName);
+    const downloadUrl = URL.createObjectURL(archiveBlob);
+    const downloadLink = document.createElement("a");
+
+    downloadLink.href = downloadUrl;
+    downloadLink.download = downloadFileName;
+    document.body.appendChild(downloadLink);
+    downloadLink.click();
+    downloadLink.remove();
+    URL.revokeObjectURL(downloadUrl);
 }
 
 function renderSummary(data) {
@@ -194,15 +264,18 @@ function renderDashboard(data) {
 form.addEventListener("submit", async (event) => {
     event.preventDefault();
 
+    const shouldExportExcel = Boolean(exportExcelToggle?.checked);
+
     submitButton.disabled = true;
     setStatus("分析を実行しています...", "info");
     summaryPanel.className = "summary-panel hidden";
     resultPanels.innerHTML = "";
 
     try {
+        const formData = new FormData(form);
         const response = await fetch("/api/analyze", {
             method: "POST",
-            body: new FormData(form),
+            body: formData,
         });
 
         const data = await response.json();
@@ -213,7 +286,13 @@ form.addEventListener("submit", async (event) => {
 
         saveLatestResult(data);
         renderDashboard(data);
-        setStatus("分析が完了しました。", "success");
+
+        if (shouldExportExcel) {
+            await downloadExcelArchive(data);
+            setStatus("分析が完了し、Excel ZIP をダウンロードしました。", "success");
+        } else {
+            setStatus("分析が完了しました。", "success");
+        }
     } catch (error) {
         setStatus(error.message, "error");
     } finally {
@@ -227,4 +306,8 @@ if (latestResult) {
     renderDashboard(latestResult);
 }
 
+if (exportExcelToggle) {
+    exportExcelToggle.addEventListener("change", syncExcelExportSettings);
+    syncExcelExportSettings();
+}
 hideStatus();

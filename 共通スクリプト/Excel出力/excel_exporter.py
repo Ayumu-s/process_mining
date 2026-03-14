@@ -1,3 +1,4 @@
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
@@ -10,21 +11,31 @@ def format_analysis_result(df, display_columns=None):
     return df.rename(columns=display_columns)
 
 
+def build_excel_bytes(
+    df,
+    sheet_name,
+):
+    buffer = BytesIO()
+
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    return buffer.getvalue()
+
+
 def export_dataframe_to_excel(
     df,
     output_file,
     sheet_name,
 ):
     output_path = Path(output_file)
-    # 分析ごとの出力先フォルダが無ければ作成します。
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
+        output_path.write_bytes(build_excel_bytes(df, sheet_name))
     except PermissionError as exc:
         raise PermissionError(
-            f"{output_path} に書き込めません。Excelで開いている場合は閉じて再実行してください。"
+            f"{output_path} に書き込めません。Excel で開いている場合は閉じてから再実行してください。"
         ) from exc
 
     return output_path
