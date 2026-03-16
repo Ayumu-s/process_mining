@@ -12,33 +12,99 @@
             <p class="eyebrow">Process Mining</p>
             <h1>イベントログをブラウザで分析</h1>
             <p class="hero-copy">
-                CSV をアップロードして、頻度分析、前後処理分析、処理順パターン分析を画面で確認できます。
-                ファイル未指定なら <code>{{ sample_file_name }}</code> を使います。
+                CSV をアップロードし、列マッピングと任意のグループ/カテゴリー条件を設定して分析します。
+                ファイル未指定の場合は <code>{{ sample_file_name }}</code> を使います。
             </p>
         </section>
 
         <section class="control-panel">
             <form id="analyze-form" class="analyze-form">
                 <div class="panel-block">
-                    <h2>入力設定</h2>
+                    <h2>ログ読み込み</h2>
                     <label class="field">
                         <span>CSV ファイル</span>
-                        <input type="file" name="csv_file" accept=".csv">
+                        <input type="file" name="csv_file" accept=".csv" id="csv-file-input">
                     </label>
+                    <p id="column-source-note" class="hint" data-source-file-name="{{ sample_file_name }}">
+                        現在は <code>{{ sample_file_name }}</code> の内容を基準に表示しています。
+                    </p>
+                </div>
+
+                <div class="panel-block">
+                    <h2>列マッピング</h2>
+                    <div class="grid-fields">
+                        <label class="field">
+                            <span>Case ID列</span>
+                            <select name="case_id_column" id="case-id-column-select">
+                                <option value="">選択してください</option>
+                            </select>
+                        </label>
+                        <label class="field">
+                            <span>Activity列</span>
+                            <select name="activity_column" id="activity-column-select">
+                                <option value="">選択してください</option>
+                            </select>
+                        </label>
+                        <label class="field">
+                            <span>Timestamp列</span>
+                            <select name="timestamp_column" id="timestamp-column-select">
+                                <option value="">選択してください</option>
+                            </select>
+                        </label>
+                    </div>
 
                     <div class="grid-fields">
                         <label class="field">
-                            <span>ケースID列</span>
-                            <input type="text" name="case_id_column" value="{{ default_headers.case_id_column }}">
+                            <span>グループ/カテゴリー フィルター①</span>
+                            <select name="filter_column_1" id="filter-column-1-select">
+                                <option value="">未設定</option>
+                            </select>
                         </label>
                         <label class="field">
-                            <span>アクティビティ列</span>
-                            <input type="text" name="activity_column" value="{{ default_headers.activity_column }}">
+                            <span>グループ/カテゴリー フィルター②</span>
+                            <select name="filter_column_2" id="filter-column-2-select">
+                                <option value="">未設定</option>
+                            </select>
                         </label>
                         <label class="field">
-                            <span>タイムスタンプ列</span>
-                            <input type="text" name="timestamp_column" value="{{ default_headers.timestamp_column }}">
+                            <span>グループ/カテゴリー フィルター③</span>
+                            <select name="filter_column_3" id="filter-column-3-select">
+                                <option value="">未設定</option>
+                            </select>
                         </label>
+                    </div>
+                    <p class="hint">フィルター列は任意です。未設定のままでも分析できます。</p>
+                </div>
+
+                <div class="panel-block">
+                    <h2>絞り込み条件</h2>
+                    <div class="grid-fields">
+                        <label class="field">
+                            <span id="filter-value-1-label">グループ/カテゴリー フィルター①</span>
+                            <select name="filter_value_1" id="filter-value-1-select" disabled>
+                                <option value="">全て</option>
+                            </select>
+                        </label>
+                        <label class="field">
+                            <span id="filter-value-2-label">グループ/カテゴリー フィルター②</span>
+                            <select name="filter_value_2" id="filter-value-2-select" disabled>
+                                <option value="">全て</option>
+                            </select>
+                        </label>
+                        <label class="field">
+                            <span id="filter-value-3-label">グループ/カテゴリー フィルター③</span>
+                            <select name="filter_value_3" id="filter-value-3-select" disabled>
+                                <option value="">全て</option>
+                            </select>
+                        </label>
+                    </div>
+                    <p id="filter-selection-note" class="hint">列マッピングを設定すると、絞り込み条件を選択できます。</p>
+                </div>
+
+                <div class="panel-block">
+                    <h2>ログ診断</h2>
+                    <div id="log-diagnostics-panel" class="diagnostics-panel">
+                        <p class="empty-state">ログを読み込むと、件数・期間・列情報を表示します。</p>
                     </div>
                 </div>
 
@@ -55,16 +121,16 @@
 
                     <label class="checkbox-row">
                         <input type="checkbox" name="export_excel" id="export-excel-toggle">
-                        <span>分析結果の Excel ZIP をダウンロードする</span>
+                        <span>分析後の Excel ZIP をダウンロードする</span>
                     </label>
                     <div id="excel-export-settings" class="excel-export-settings hidden">
-                        <p class="hint">分析完了後に、選択した分析結果の Excel ファイルを ZIP 形式でまとめてダウンロードします。</p>
+                        <p class="hint">分析完了後に、選択した各分析結果の Excel ファイルを ZIP にまとめてダウンロードします。</p>
                     </div>
                 </div>
 
                 <div class="panel-actions">
                     <button type="submit" id="submit-button">分析を実行</button>
-                    <p class="hint">TOP 画面では各分析の上位 10 件を表示します。</p>
+                    <p class="hint">TOP 画面では各分析の先頭 10 件を表示します。</p>
                 </div>
             </form>
         </section>
@@ -74,6 +140,7 @@
         <section id="result-panels" class="result-stack"></section>
     </main>
 
+    <script id="initial-profile-payload" type="application/json">{{ sample_profile_payload | tojson }}</script>
     <script src="{{ url_for('static', path='/app.js') }}?v={{ static_version }}"></script>
 </body>
 </html>

@@ -26,7 +26,7 @@ def prepare_event_log(
             raise ValueError(f"入力CSVに必要な列がありません: {column_name}")
 
     # 指定ヘッダーを内部で使う共通列名へそろえます。
-    work = work[required_columns].rename(
+    work = work.rename(
         columns={
             case_id_column: "case_id",
             activity_column: "activity",

@@ -3,7 +3,18 @@ import unittest
 
 import pandas as pd
 
-from 共通スクリプト.analysis_service import create_pattern_bottleneck_details
+from 共通スクリプト.analysis_service import (
+    create_bottleneck_summary,
+    create_case_trace_details,
+    create_pattern_bottleneck_details,
+    create_transition_case_drilldown,
+    create_variant_flow_snapshot,
+    create_variant_summary,
+    filter_prepared_df,
+    get_filter_options,
+    normalize_filter_column_settings,
+    normalize_filter_params,
+)
 from 共通スクリプト.data_loader import load_and_prepare_data, prepare_event_log
 from 共通スクリプト.分析.前後処理分析.transition_analysis import create_transition_analysis
 from 共通スクリプト.分析.処理順パターン分析.pattern_analysis import create_pattern_analysis
@@ -25,7 +36,7 @@ class ProcessMiningTestCase(unittest.TestCase):
         )
 
     def test_prepare_event_log_adds_analysis_columns(self):
-        expected_columns = [
+        expected_columns = {
             "case_id",
             "activity",
             "timestamp",
@@ -35,8 +46,9 @@ class ProcessMiningTestCase(unittest.TestCase):
             "duration_min",
             "sequence_no",
             "event_count_in_case",
-        ]
-        self.assertEqual(expected_columns, self.prepared_df.columns.tolist())
+        }
+        self.assertTrue(expected_columns.issubset(set(self.prepared_df.columns.tolist())))
+        self.assertIn("end_time", self.prepared_df.columns.tolist())
 
         first_row = self.prepared_df.iloc[0]
         self.assertEqual("C001", first_row["case_id"])
@@ -118,6 +130,70 @@ class ProcessMiningTestCase(unittest.TestCase):
         self.assertEqual(10.0, detail["bottleneck_transition"]["avg_duration_min"])
         self.assertEqual(["C004", "C001"], [row["case_id"] for row in detail["case_examples"][:2]])
 
+    def test_variant_summary_returns_ranked_variants(self):
+        variants = create_variant_summary(self.prepared_df, limit=10)
+
+        self.assertEqual(3, len(variants))
+        self.assertEqual(1, variants[0]["variant_id"])
+        self.assertEqual(["受付", "確認", "完了"], variants[0]["activities"])
+        self.assertEqual(2, variants[0]["count"])
+        self.assertEqual(0.3333, variants[0]["ratio"])
+
+    def test_bottleneck_summary_returns_ranked_activity_and_transition_rows(self):
+        summary = create_bottleneck_summary(self.prepared_df, limit=3)
+
+        self.assertEqual(3, len(summary["activity_bottlenecks"]))
+        self.assertEqual(3, len(summary["transition_bottlenecks"]))
+
+        top_activity = summary["activity_bottlenecks"][0]
+        self.assertEqual("確認", top_activity["activity"])
+        self.assertEqual(8, top_activity["count"])
+        self.assertEqual(6, top_activity["case_count"])
+        self.assertEqual(577.5, top_activity["avg_duration_sec"])
+        self.assertEqual(0.16, top_activity["avg_duration_hours"])
+        self.assertEqual(0.13, top_activity["median_duration_hours"])
+        self.assertEqual(0.28, top_activity["max_duration_hours"])
+        self.assertEqual("heat-5", summary["activity_heatmap"]["確認"]["heat_class"])
+
+        top_transition = summary["transition_bottlenecks"][0]
+        self.assertEqual("確認", top_transition["from_activity"])
+        self.assertEqual("差戻し", top_transition["to_activity"])
+        self.assertEqual("確認__TO__差戻し", top_transition["transition_key"])
+        self.assertEqual(2, top_transition["count"])
+        self.assertEqual(2, top_transition["case_count"])
+        self.assertEqual(720.0, top_transition["avg_duration_sec"])
+        self.assertEqual(0.2, top_transition["avg_duration_hours"])
+        self.assertEqual(0.2, top_transition["median_duration_hours"])
+        self.assertEqual(0.28, top_transition["max_duration_hours"])
+        self.assertEqual("heat-5", summary["transition_heatmap"]["確認__TO__差戻し"]["heat_class"])
+
+    def test_transition_case_drilldown_returns_slowest_cases(self):
+        rows = create_transition_case_drilldown(
+            self.prepared_df,
+            from_activity="確認",
+            to_activity="差戻し",
+            limit=5,
+        )
+
+        self.assertEqual(2, len(rows))
+        self.assertEqual("C002", rows[0]["case_id"])
+        self.assertEqual(1020.0, rows[0]["duration_sec"])
+        self.assertEqual("17m 0s", rows[0]["duration_text"])
+        self.assertEqual("C005", rows[1]["case_id"])
+        self.assertEqual(420.0, rows[1]["duration_sec"])
+
+    def test_variant_flow_snapshot_returns_single_variant_graph(self):
+        snapshot = create_variant_flow_snapshot(
+            self.prepared_df,
+            "受付→確認→承認→完了",
+            activity_percent=100,
+            connection_percent=100,
+        )
+
+        self.assertEqual(1, snapshot["pattern_window"]["used_pattern_count"])
+        self.assertTrue(snapshot["flow_data"]["nodes"])
+        self.assertTrue(snapshot["flow_data"]["edges"])
+
 
     def test_pattern_flow_snapshot_filters_top_patterns_nodes_and_edges(self):
         import importlib.util
@@ -150,6 +226,120 @@ class ProcessMiningTestCase(unittest.TestCase):
         self.assertTrue(
             all("layer" in node and "orderScore" in node for node in snapshot["flow_data"]["nodes"])
         )
+
+    def test_case_trace_details_returns_case_timeline(self):
+        trace = create_case_trace_details(self.prepared_df, "C001")
+
+        self.assertTrue(trace["found"])
+        self.assertEqual("C001", trace["case_id"])
+        self.assertEqual(4, trace["summary"]["event_count"])
+        self.assertEqual(900.0, trace["summary"]["total_duration_sec"])
+        self.assertEqual("15m 0s", trace["summary"]["total_duration_text"])
+        self.assertEqual(4, len(trace["events"]))
+        self.assertEqual(1, trace["events"][0]["sequence_no"])
+        self.assertEqual(trace["events"][1]["activity"], trace["events"][0]["next_activity"])
+        self.assertEqual(120.0, trace["events"][0]["wait_to_next_sec"])
+        self.assertEqual("", trace["events"][-1]["wait_to_next_text"])
+        self.assertIsNone(trace["events"][-1]["next_activity"])
+
+    def test_case_trace_details_returns_not_found_payload(self):
+        trace = create_case_trace_details(self.prepared_df, "C999")
+
+        self.assertFalse(trace["found"])
+        self.assertEqual("C999", trace["case_id"])
+        self.assertIsNone(trace["summary"])
+        self.assertEqual([], trace["events"])
+
+    def test_normalize_filter_params_trims_blank_values(self):
+        normalized = normalize_filter_params(
+            date_from=" 2024-01-01 ",
+            date_to="",
+            filter_value_1=" Sales ",
+            filter_value_2="   ",
+            filter_value_3=None,
+        )
+
+        self.assertEqual("2024-01-01", normalized["date_from"])
+        self.assertIsNone(normalized["date_to"])
+        self.assertEqual("Sales", normalized["filter_value_1"])
+        self.assertIsNone(normalized["filter_value_2"])
+        self.assertIsNone(normalized["filter_value_3"])
+
+    def test_filter_prepared_df_filters_by_date_and_attributes(self):
+        raw_df = pd.DataFrame(
+            [
+                {"case": "C001", "step": "Submit", "ts": "2024-01-01 09:00:00", "group_a": "Sales", "group_b": "Web", "group_c": "A"},
+                {"case": "C001", "step": "Approve", "ts": "2024-01-03 09:00:00", "group_a": "Sales", "group_b": "Web", "group_c": "A"},
+                {"case": "C002", "step": "Submit", "ts": "2024-01-02 10:00:00", "group_a": "HR", "group_b": "Mail", "group_c": "B"},
+                {"case": "C002", "step": "Reject", "ts": "2024-01-04 10:00:00", "group_a": "HR", "group_b": "Mail", "group_c": "B"},
+            ]
+        )
+        prepared_df = prepare_event_log(
+            df=raw_df,
+            case_id_column="case",
+            activity_column="step",
+            timestamp_column="ts",
+        )
+
+        filtered_df = filter_prepared_df(
+            prepared_df,
+            {
+                "date_from": "2024-01-02",
+                "date_to": "2024-01-03",
+                "filter_value_1": "Sales",
+                "filter_value_2": "Web",
+                "filter_value_3": "A",
+            },
+            {
+                "filter_column_1": "group_a",
+                "filter_column_2": "group_b",
+                "filter_column_3": "group_c",
+            },
+        )
+
+        self.assertEqual(1, len(filtered_df))
+        self.assertEqual(["C001"], filtered_df["case_id"].tolist())
+        self.assertEqual(["Approve"], filtered_df["activity"].tolist())
+
+    def test_get_filter_options_returns_sorted_unique_values(self):
+        raw_df = pd.DataFrame(
+            [
+                {"case": "C001", "step": "Submit", "ts": "2024-01-01 09:00:00", "group_a": "Sales", "group_b": "Web", "group_c": "A"},
+                {"case": "C002", "step": "Review", "ts": "2024-01-01 10:00:00", "group_a": "HR", "group_b": "Mail", "group_c": "B"},
+                {"case": "C003", "step": "Approve", "ts": "2024-01-01 11:00:00", "group_a": "Sales", "group_b": "API", "group_c": "A"},
+            ]
+        )
+        prepared_df = prepare_event_log(
+            df=raw_df,
+            case_id_column="case",
+            activity_column="step",
+            timestamp_column="ts",
+        )
+
+        options = get_filter_options(
+            prepared_df,
+            {
+                "filter_column_1": "group_a",
+                "filter_column_2": "group_b",
+                "filter_column_3": "group_c",
+            },
+        )
+
+        self.assertEqual(["HR", "Sales"], options["filters"][0]["options"])
+        self.assertEqual(["API", "Mail", "Web"], options["filters"][1]["options"])
+        self.assertEqual(["A", "B"], options["filters"][2]["options"])
+
+    def test_normalize_filter_column_settings_accepts_stored_slot_shape(self):
+        normalized = normalize_filter_column_settings(
+            filter_value_1={"column_name": "group_a", "label": "分類1"},
+            filter_value_2={"column_name": "group_b", "label": "分類2"},
+        )
+
+        self.assertEqual("group_a", normalized["filter_value_1"]["column_name"])
+        self.assertEqual("分類1", normalized["filter_value_1"]["label"])
+        self.assertEqual("group_b", normalized["filter_value_2"]["column_name"])
+        self.assertEqual("分類2", normalized["filter_value_2"]["label"])
+        self.assertIsNone(normalized["filter_value_3"]["column_name"])
 
 
 if __name__ == "__main__":
