@@ -1,5 +1,6 @@
 const PREVIEW_ROW_COUNT = 10;
 const STORAGE_KEY = "processMiningLastResult";
+const TOP_PAGE_STATE_KEY = "processMiningTopPageState";
 const FLOW_SELECTION_STORAGE_KEY = "processMiningFlowSelection";
 const TRANSITION_DRILLDOWN_STORAGE_KEY = "processMiningTransitionDrilldown";
 const FILTER_SLOT_KEYS = ["filter_value_1", "filter_value_2", "filter_value_3"];
@@ -19,38 +20,53 @@ const excelExportSettings = document.getElementById("excel-export-settings");
 const csvFileInput = document.getElementById("csv-file-input");
 const columnSourceNote = document.getElementById("column-source-note");
 const diagnosticsPanel = document.getElementById("log-diagnostics-panel");
+const diagnosticsButton = document.getElementById("run-diagnostics-button");
 const filterSelectionNote = document.getElementById("filter-selection-note");
 const initialProfilePayloadElement = document.getElementById("initial-profile-payload");
 
 const caseIdColumnSelect = document.getElementById("case-id-column-select");
 const activityColumnSelect = document.getElementById("activity-column-select");
 const timestampColumnSelect = document.getElementById("timestamp-column-select");
+const analysisDateFromInput = document.getElementById("analysis-date-from");
+const analysisDateToInput = document.getElementById("analysis-date-to");
 
 const filterColumnRefs = [
     {
         slot: "filter_value_1",
+        titleElement: document.getElementById("filter-group-title-1"),
         columnSelect: document.getElementById("filter-column-1-select"),
         valueSelect: document.getElementById("filter-value-1-select"),
         valueLabel: document.getElementById("filter-value-1-label"),
     },
     {
         slot: "filter_value_2",
+        titleElement: document.getElementById("filter-group-title-2"),
         columnSelect: document.getElementById("filter-column-2-select"),
         valueSelect: document.getElementById("filter-value-2-select"),
         valueLabel: document.getElementById("filter-value-2-label"),
     },
     {
         slot: "filter_value_3",
+        titleElement: document.getElementById("filter-group-title-3"),
         columnSelect: document.getElementById("filter-column-3-select"),
         valueSelect: document.getElementById("filter-value-3-select"),
         valueLabel: document.getElementById("filter-value-3-label"),
     },
 ];
 
+const defaultSourceFileName = String(columnSourceNote?.dataset?.sourceFileName || "").trim();
+
 let isLoadingProfile = false;
 let isAnalyzing = false;
+let isRunningDiagnostics = false;
 let profileRequestVersion = 0;
-let currentProfilePayload = loadInitialProfilePayload();
+let diagnosticRequestVersion = 0;
+let restoredTopPageState = loadTopPageState();
+let requiresFileReselection = false;
+let currentProfilePayload = mergeProfilePayload(
+    loadInitialProfilePayload(),
+    restoredTopPageState?.profilePayload,
+);
 
 function setStatus(message, type = "info") {
     statusPanel.textContent = message;
@@ -71,28 +87,49 @@ function escapeHtml(value) {
         .replaceAll("'", "&#039;");
 }
 
+function buildDefaultProfilePayload() {
+    return {
+        headers: [],
+        default_selection: {},
+        column_settings: { filters: [] },
+        filter_options: { filters: [] },
+        diagnostics: null,
+        source_file_name: "",
+    };
+}
+
 function loadInitialProfilePayload() {
     if (!initialProfilePayloadElement) {
-        return {
-            headers: [],
-            default_selection: {},
-            column_settings: { filters: [] },
-            diagnostics: null,
-            source_file_name: "",
-        };
+        return buildDefaultProfilePayload();
     }
 
     try {
-        return JSON.parse(initialProfilePayloadElement.textContent || "{}");
+        return mergeProfilePayload(
+            buildDefaultProfilePayload(),
+            JSON.parse(initialProfilePayloadElement.textContent || "{}"),
+        );
     } catch {
-        return {
-            headers: [],
-            default_selection: {},
-            column_settings: { filters: [] },
-            diagnostics: null,
-            source_file_name: "",
-        };
+        return buildDefaultProfilePayload();
     }
+}
+
+function mergeProfilePayload(basePayload, nextPayload) {
+    const base = basePayload || buildDefaultProfilePayload();
+    if (!nextPayload) {
+        return base;
+    }
+
+    return {
+        ...base,
+        ...nextPayload,
+        headers: Array.isArray(nextPayload.headers) ? nextPayload.headers : base.headers,
+        default_selection: nextPayload.default_selection || base.default_selection,
+        column_settings: nextPayload.column_settings || base.column_settings,
+        filter_options: nextPayload.filter_options || base.filter_options,
+        diagnostics: Object.prototype.hasOwnProperty.call(nextPayload, "diagnostics")
+            ? nextPayload.diagnostics
+            : base.diagnostics,
+    };
 }
 
 function syncExcelExportSettings() {
@@ -103,7 +140,10 @@ function syncExcelExportSettings() {
 }
 
 function syncSubmitState() {
-    submitButton.disabled = isLoadingProfile || isAnalyzing;
+    submitButton.disabled = isLoadingProfile || isAnalyzing || isRunningDiagnostics;
+    if (diagnosticsButton) {
+        diagnosticsButton.disabled = isLoadingProfile || isAnalyzing || isRunningDiagnostics;
+    }
 }
 
 function buildPatternDetailHref(runId, patternIndex) {
@@ -214,6 +254,90 @@ function loadLatestResult() {
     }
 }
 
+function loadTopPageState() {
+    const storedValue = sessionStorage.getItem(TOP_PAGE_STATE_KEY);
+    if (!storedValue) {
+        return null;
+    }
+
+    try {
+        return JSON.parse(storedValue);
+    } catch {
+        sessionStorage.removeItem(TOP_PAGE_STATE_KEY);
+        return null;
+    }
+}
+
+function isUploadedSourceName(sourceFileName) {
+    return Boolean(sourceFileName && defaultSourceFileName && sourceFileName !== defaultSourceFileName);
+}
+
+function buildTopPageState() {
+    return {
+        source_file_name: currentProfilePayload?.source_file_name || "",
+        profilePayload: currentProfilePayload,
+        mapping_state: getCurrentMappingState(),
+        filter_value_state: getCurrentFilterValueState(),
+        date_from: String(analysisDateFromInput?.value || "").trim(),
+        date_to: String(analysisDateToInput?.value || "").trim(),
+    };
+}
+
+function saveTopPageState() {
+    try {
+        sessionStorage.setItem(TOP_PAGE_STATE_KEY, JSON.stringify(buildTopPageState()));
+    } catch {
+        // Ignore storage failures and keep the current render only.
+    }
+}
+
+function restoreTopPageState(state) {
+    if (!state) {
+        return;
+    }
+
+    const mappingState = state.mapping_state || {};
+    const filterValueState = state.filter_value_state || {};
+
+    if (caseIdColumnSelect) {
+        caseIdColumnSelect.value = mappingState.case_id_column || caseIdColumnSelect.value;
+    }
+    if (activityColumnSelect) {
+        activityColumnSelect.value = mappingState.activity_column || activityColumnSelect.value;
+    }
+    if (timestampColumnSelect) {
+        timestampColumnSelect.value = mappingState.timestamp_column || timestampColumnSelect.value;
+    }
+    if (analysisDateFromInput) {
+        analysisDateFromInput.value = state.date_from || "";
+    }
+    if (analysisDateToInput) {
+        analysisDateToInput.value = state.date_to || "";
+    }
+
+    filterColumnRefs.forEach((filterRef, index) => {
+        const selectedColumn = mappingState[`filter_column_${index + 1}`] || "";
+        if (filterRef.columnSelect) {
+            filterRef.columnSelect.value = selectedColumn;
+        }
+
+        const availableOptions = Array.from(filterRef.valueSelect?.options || []).map((option) => option.value);
+        const selectedValue = getPreferredSelection(
+            availableOptions,
+            filterValueState[filterRef.slot],
+        );
+        if (filterRef.valueSelect) {
+            filterRef.valueSelect.value = selectedValue;
+        }
+    });
+
+    const restoredSourceFileName = String(
+        state.profilePayload?.source_file_name || state.source_file_name || "",
+    ).trim();
+    requiresFileReselection = isUploadedSourceName(restoredSourceFileName) && !csvFileInput?.files?.[0];
+    updateColumnSourceNote(currentProfilePayload?.source_file_name || restoredSourceFileName);
+}
+
 function getCurrentMappingState() {
     return {
         case_id_column: String(caseIdColumnSelect?.value || "").trim(),
@@ -253,10 +377,14 @@ function getProfileFilterDefinitions(profilePayload) {
     });
 }
 
-function getDiagnosticFilterDefinitions(profilePayload) {
-    const rawDefinitions = Array.isArray(profilePayload?.diagnostics?.filters)
-        ? profilePayload.diagnostics.filters
-        : [];
+function getFilterValueDefinitions(profilePayload) {
+    const rawDefinitions = Array.isArray(profilePayload?.filter_options?.filters)
+        ? profilePayload.filter_options.filters
+        : (
+            Array.isArray(profilePayload?.diagnostics?.filters)
+                ? profilePayload.diagnostics.filters
+                : []
+        );
     const definitionMap = new Map(rawDefinitions.map((definition) => [definition.slot, definition]));
 
     return getProfileFilterDefinitions(profilePayload).map((definition) => ({
@@ -333,13 +461,16 @@ function renderColumnSelectors(profilePayload) {
             currentMappingState[`filter_column_${index + 1}`],
             definition.column_name,
         );
+        if (filterRef.titleElement) {
+            filterRef.titleElement.textContent = definition.label;
+        }
         replaceSelectOptions(filterRef.columnSelect, headers, selectedColumn, "未設定");
     });
 }
 
 function renderFilterValueSelectors(profilePayload) {
     const currentFilterValues = getCurrentFilterValueState();
-    const filterDefinitions = getDiagnosticFilterDefinitions(profilePayload);
+    const filterDefinitions = getFilterValueDefinitions(profilePayload);
     const selectedFilters = filterDefinitions
         .filter((definition) => definition.column_name)
         .map((definition) => `${definition.label}: ${definition.column_name}`);
@@ -353,7 +484,7 @@ function renderFilterValueSelectors(profilePayload) {
         );
 
         if (filterRef.valueLabel) {
-            filterRef.valueLabel.textContent = definition.label;
+            filterRef.valueLabel.textContent = "値";
         }
 
         replaceSelectOptions(filterRef.valueSelect, options, selectedValue, "全て");
@@ -365,8 +496,8 @@ function renderFilterValueSelectors(profilePayload) {
     }
 
     filterSelectionNote.textContent = selectedFilters.length
-        ? `現在の絞り込み対象列: ${selectedFilters.join(" / ")}`
-        : "フィルター列を設定すると、絞り込み条件を選択できます。";
+        ? `現在の分析対象条件: ${selectedFilters.join(" / ")}`
+        : "フィルターごとに対象列を設定すると、絞り込み値を選択できます。";
 }
 
 function buildMissingCountText(diagnostics) {
@@ -386,6 +517,11 @@ function buildLogPeriodText(diagnostics) {
     return `${diagnostics.time_range.min} 〜 ${diagnostics.time_range.max}`;
 }
 
+function buildDuplicateRateText(diagnostics) {
+    const duplicateRate = Number(diagnostics?.duplicate_rate || 0);
+    return `${(duplicateRate * 100).toFixed(1)}%`;
+}
+
 function renderDiagnostics(profilePayload) {
     if (!diagnosticsPanel) {
         return;
@@ -393,7 +529,7 @@ function renderDiagnostics(profilePayload) {
 
     const diagnostics = profilePayload?.diagnostics;
     if (!diagnostics) {
-        diagnosticsPanel.innerHTML = '<p class="empty-state">ログを読み込むと、件数・期間・列情報を表示します。</p>';
+        diagnosticsPanel.innerHTML = '<p class="empty-state">ログ診断を実行すると、件数・期間・欠損件数・列サマリーを表示します。</p>';
         return;
     }
 
@@ -410,12 +546,16 @@ function renderDiagnostics(profilePayload) {
     diagnosticsPanel.innerHTML = `
         <div class="diagnostics-summary-grid">
             <article class="diagnostic-card">
+                <span class="summary-label">ログレコード数</span>
+                <strong>${escapeHtml(diagnostics.record_count ?? "-")}</strong>
+            </article>
+            <article class="diagnostic-card">
                 <span class="summary-label">総ケース数</span>
                 <strong>${escapeHtml(diagnostics.case_count ?? "-")}</strong>
             </article>
             <article class="diagnostic-card">
-                <span class="summary-label">総イベント数</span>
-                <strong>${escapeHtml(diagnostics.event_count ?? "-")}</strong>
+                <span class="summary-label">アクティビティ種類数</span>
+                <strong>${escapeHtml(diagnostics.activity_type_count ?? "-")}</strong>
             </article>
             <article class="diagnostic-card">
                 <span class="summary-label">ログ期間</span>
@@ -425,7 +565,25 @@ function renderDiagnostics(profilePayload) {
                 <span class="summary-label">欠損件数</span>
                 <strong>${escapeHtml(buildMissingCountText(diagnostics))}</strong>
             </article>
+            <article class="diagnostic-card">
+                <span class="summary-label">重複行数</span>
+                <strong>${escapeHtml(diagnostics.duplicate_row_count ?? 0)}</strong>
+            </article>
+            <article class="diagnostic-card">
+                <span class="summary-label">重複あり/なし</span>
+                <strong>${escapeHtml(diagnostics.duplicate_status || "なし")}</strong>
+            </article>
+            <article class="diagnostic-card">
+                <span class="summary-label">重複除外後レコード数</span>
+                <strong>${escapeHtml(diagnostics.deduplicated_record_count ?? "-")}</strong>
+            </article>
+            <article class="diagnostic-card">
+                <span class="summary-label">重複率</span>
+                <strong>${escapeHtml(buildDuplicateRateText(diagnostics))}</strong>
+            </article>
         </div>
+        <p class="panel-note">ログレコード数 = イベント行数です。同じタイムスタンプが複数行に現れることは正常です。</p>
+        <p class="panel-note">重複行は全列完全一致で判定しています。</p>
         <p class="panel-note">ヘッダー一覧: ${escapeHtml((diagnostics.headers || []).join(", "))}</p>
         <div class="table-wrap diagnostics-table-wrap">
             <table>
@@ -445,6 +603,11 @@ function renderDiagnostics(profilePayload) {
 
 function updateColumnSourceNote(sourceFileName) {
     if (!columnSourceNote) {
+        return;
+    }
+
+    if (requiresFileReselection && !csvFileInput?.files?.[0]) {
+        columnSourceNote.innerHTML = `前回は <code>${escapeHtml(sourceFileName || "アップロードファイル")}</code> の設定を復元しています。再分析やログ診断を実行するには、CSV ファイルを再選択してください。`;
         return;
     }
 
@@ -487,7 +650,27 @@ async function fetchLogProfile(file) {
     const payload = await response.json();
 
     if (!response.ok) {
-        throw new Error(payload.error || "ログ診断情報の取得に失敗しました。");
+        throw new Error(payload.error || "ヘッダー一覧の取得に失敗しました。");
+    }
+
+    return payload;
+}
+
+async function fetchLogDiagnostics(file) {
+    const formData = new FormData();
+    if (file) {
+        formData.append("csv_file", file);
+    }
+    appendMappingSettings(formData);
+
+    const response = await fetch("/api/log-diagnostics", {
+        method: "POST",
+        body: formData,
+    });
+    const payload = await response.json();
+
+    if (!response.ok) {
+        throw new Error(payload.error || "ログ診断の実行に失敗しました。");
     }
 
     return payload;
@@ -495,11 +678,18 @@ async function fetchLogProfile(file) {
 
 async function refreshLogProfile() {
     const selectedFile = csvFileInput?.files?.[0] || null;
+    const fileSelectionError = validateFileSelectionState();
+    if (fileSelectionError && !selectedFile) {
+        setStatus(fileSelectionError, "error");
+        return;
+    }
+
     const currentVersion = profileRequestVersion + 1;
     profileRequestVersion = currentVersion;
+    diagnosticRequestVersion += 1;
     isLoadingProfile = true;
     syncSubmitState();
-    setStatus("ログ情報を読み込んでいます...", "info");
+    setStatus("ヘッダー一覧を読み込んでいます...", "info");
 
     try {
         const payload = await fetchLogProfile(selectedFile);
@@ -507,8 +697,10 @@ async function refreshLogProfile() {
             return;
         }
 
+        requiresFileReselection = false;
         renderProfilePayload(payload);
-        setStatus("列候補とログ診断を更新しました。", "success");
+        saveTopPageState();
+        setStatus("列候補を更新しました。", "success");
     } catch (error) {
         if (currentVersion !== profileRequestVersion) {
             return;
@@ -517,6 +709,57 @@ async function refreshLogProfile() {
     } finally {
         if (currentVersion === profileRequestVersion) {
             isLoadingProfile = false;
+            syncSubmitState();
+        }
+    }
+}
+
+function validateFileSelectionState() {
+    if (requiresFileReselection && !csvFileInput?.files?.[0]) {
+        return "前回アップロードしたファイル設定を復元しています。分析またはログ診断を実行するには、CSV ファイルを再選択してください。";
+    }
+
+    return "";
+}
+
+async function runLogDiagnostics() {
+    const validationError = (
+        validateFileSelectionState()
+        || validateColumnSelections()
+        || validateFilterColumnSelections()
+    );
+    if (validationError) {
+        setStatus(validationError, "error");
+        return;
+    }
+
+    const selectedFile = csvFileInput?.files?.[0] || null;
+    const currentVersion = diagnosticRequestVersion + 1;
+    diagnosticRequestVersion = currentVersion;
+    isRunningDiagnostics = true;
+    syncSubmitState();
+    diagnosticsPanel.innerHTML = '<p class="panel-note">読み込み中...</p>';
+    setStatus("ログ診断を実行しています...", "info");
+
+    try {
+        const payload = await fetchLogDiagnostics(selectedFile);
+        if (currentVersion !== diagnosticRequestVersion) {
+            return;
+        }
+
+        requiresFileReselection = false;
+        renderProfilePayload(payload);
+        saveTopPageState();
+        setStatus("ログ診断を表示しました。", "success");
+    } catch (error) {
+        if (currentVersion !== diagnosticRequestVersion) {
+            return;
+        }
+        renderDiagnostics({ diagnostics: null });
+        setStatus(error.message, "error");
+    } finally {
+        if (currentVersion === diagnosticRequestVersion) {
+            isRunningDiagnostics = false;
             syncSubmitState();
         }
     }
@@ -553,6 +796,11 @@ function validateFilterColumnSelections() {
 function validateAnalyzeForm() {
     if (!Array.isArray(currentProfilePayload?.headers) || !currentProfilePayload.headers.length) {
         return "ログ情報を取得できていません。ファイルを選び直してください。";
+    }
+
+    const fileSelectionError = validateFileSelectionState();
+    if (fileSelectionError) {
+        return fileSelectionError;
     }
 
     const columnError = validateColumnSelections();
@@ -613,9 +861,18 @@ async function downloadExcelArchive(data) {
 function buildAppliedFilterSummary(appliedFilters = {}, columnSettings = {}) {
     const filterDefinitions = Array.isArray(columnSettings?.filters) ? columnSettings.filters : [];
     const labelMap = new Map(filterDefinitions.map((definition) => [definition.slot, definition.label]));
-    const appliedItems = FILTER_SLOT_KEYS
+    const appliedItems = [];
+
+    if (appliedFilters?.date_from) {
+        appliedItems.push(`開始日: ${appliedFilters.date_from}`);
+    }
+    if (appliedFilters?.date_to) {
+        appliedItems.push(`終了日: ${appliedFilters.date_to}`);
+    }
+
+    appliedItems.push(...FILTER_SLOT_KEYS
         .filter((slot) => Boolean(appliedFilters?.[slot]))
-        .map((slot) => `${labelMap.get(slot) || DEFAULT_FILTER_LABELS[slot]}: ${appliedFilters[slot]}`);
+        .map((slot) => `${labelMap.get(slot) || DEFAULT_FILTER_LABELS[slot]}: ${appliedFilters[slot]}`));
 
     return appliedItems.length ? appliedItems.join(" / ") : "フィルタ未適用";
 }
@@ -709,6 +966,7 @@ form.addEventListener("submit", async (event) => {
 
         saveLatestResult(data);
         renderDashboard(data);
+        saveTopPageState();
 
         if (shouldExportExcel) {
             await downloadExcelArchive(data);
@@ -725,6 +983,7 @@ form.addEventListener("submit", async (event) => {
 });
 
 csvFileInput?.addEventListener("change", () => {
+    requiresFileReselection = false;
     void refreshLogProfile();
 });
 
@@ -732,12 +991,27 @@ csvFileInput?.addEventListener("change", () => {
     .forEach((element) => {
         element?.addEventListener("change", () => {
             hideStatus();
+            saveTopPageState();
             void refreshLogProfile();
         });
     });
 
 filterColumnRefs.forEach((filterRef) => {
-    filterRef.valueSelect?.addEventListener("change", hideStatus);
+    filterRef.valueSelect?.addEventListener("change", () => {
+        hideStatus();
+        saveTopPageState();
+    });
+});
+
+[analysisDateFromInput, analysisDateToInput].forEach((element) => {
+    element?.addEventListener("change", () => {
+        hideStatus();
+        saveTopPageState();
+    });
+});
+
+diagnosticsButton?.addEventListener("click", () => {
+    void runLogDiagnostics();
 });
 
 const latestResult = loadLatestResult();
@@ -751,5 +1025,7 @@ if (exportExcelToggle) {
 }
 
 renderProfilePayload(currentProfilePayload);
+restoreTopPageState(restoredTopPageState);
+saveTopPageState();
 syncSubmitState();
 hideStatus();

@@ -15,12 +15,16 @@ from fastapi.templating import Jinja2Templates
 from 共通スクリプト.Excel出力.excel_exporter import build_excel_bytes
 from 共通スクリプト.analysis_service import (
     DEFAULT_ANALYSIS_KEYS,
+    create_activity_case_drilldown,
     analyze_prepared_event_log,
     create_analysis_records,
     create_bottleneck_summary,
     create_case_trace_details,
+    create_dashboard_summary,
+    create_impact_summary,
     create_log_diagnostics,
     create_pattern_index_entries,
+    create_root_cause_summary,
     create_transition_case_drilldown,
     filter_prepared_df,
     filter_prepared_df_by_pattern,
@@ -57,23 +61,6 @@ app = FastAPI(title="Process Mining Workbench")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 RUN_STORE = OrderedDict()
-
-
-def read_csv_headers(file_source):
-    if hasattr(file_source, "seek"):
-        file_source.seek(0)
-
-    try:
-        header_df = pd.read_csv(file_source, nrows=0)
-    finally:
-        if hasattr(file_source, "seek"):
-            file_source.seek(0)
-
-    headers = [str(column_name) for column_name in header_df.columns.tolist()]
-    if not headers:
-        raise ValueError("CSV headers could not be read. Please use a CSV whose first row contains column names.")
-
-    return headers
 
 
 def build_column_selection_payload(headers):
@@ -133,6 +120,16 @@ def read_raw_log_dataframe(file_source):
     return raw_df
 
 
+def resolve_profile_file_source(form):
+    uploaded_file = form.get("csv_file")
+
+    if uploaded_file and uploaded_file.filename:
+        uploaded_file.file.seek(0)
+        return uploaded_file.file, uploaded_file.filename
+
+    return SAMPLE_FILE, SAMPLE_FILE.name
+
+
 def get_static_version():
     static_dir = BASE_DIR / "static"
     return str(
@@ -164,6 +161,9 @@ def save_run_data(
         "pattern_flow_cache": OrderedDict(),
         "variant_cache": {},
         "bottleneck_cache": {},
+        "dashboard_cache": {},
+        "root_cause_cache": {},
+        "impact_cache": {},
         "analysis_cache": {},
         "filter_options": None,
     }
@@ -448,6 +448,72 @@ def get_bottleneck_summary(run_data, variant_id=None, pattern_index=None, filter
     return cache[cache_key]
 
 
+def get_dashboard_summary(run_data, filter_params=None, prepared_df=None):
+    cache_key = build_filter_cache_key(filter_params)
+    cache = run_data.setdefault("dashboard_cache", {})
+
+    if cache_key not in cache:
+        filtered_df = prepared_df
+        if filtered_df is None:
+            filtered_df = filter_prepared_df(
+                run_data["prepared_df"],
+                filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+            )
+
+        cache[cache_key] = create_dashboard_summary(
+            filtered_df,
+            variant_items=get_variant_items(run_data, filter_params=filter_params)[:10],
+            bottleneck_summary=get_bottleneck_summary(run_data, filter_params=filter_params),
+            coverage_limit=10,
+        )
+
+    return cache[cache_key]
+
+
+def get_root_cause_summary(run_data, filter_params=None, prepared_df=None):
+    cache_key = build_filter_cache_key(filter_params)
+    cache = run_data.setdefault("root_cause_cache", {})
+
+    if cache_key not in cache:
+        filtered_df = prepared_df
+        if filtered_df is None:
+            filtered_df = filter_prepared_df(
+                run_data["prepared_df"],
+                filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+            )
+
+        cache[cache_key] = create_root_cause_summary(
+            filtered_df,
+            filter_column_settings=run_data.get("column_settings"),
+            limit=10,
+        )
+
+    return cache[cache_key]
+
+
+def get_impact_summary(run_data, filter_params=None, prepared_df=None):
+    cache_key = build_filter_cache_key(filter_params)
+    cache = run_data.setdefault("impact_cache", {})
+
+    if cache_key not in cache:
+        filtered_df = prepared_df
+        if filtered_df is None:
+            filtered_df = filter_prepared_df(
+                run_data["prepared_df"],
+                filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+            )
+
+        cache[cache_key] = create_impact_summary(
+            filtered_df,
+            limit=10,
+        )
+
+    return cache[cache_key]
+
+
 def get_pattern_flow_snapshot(
     run_data,
     pattern_percent,
@@ -542,6 +608,7 @@ def build_log_profile_payload(
     activity_column="",
     timestamp_column="",
     filter_column_settings=None,
+    include_diagnostics=False,
 ):
     headers = [str(column_name) for column_name in raw_df.columns.tolist()]
     selection_payload = build_column_selection_payload(headers)
@@ -561,12 +628,20 @@ def build_log_profile_payload(
                 **normalized_filter_column_settings,
             }
         ),
-        "diagnostics": create_log_diagnostics(
+        "filter_options": get_filter_options(
             raw_df,
-            case_id_column=resolved_case_id_column,
-            activity_column=resolved_activity_column,
-            timestamp_column=resolved_timestamp_column,
             filter_column_settings=normalized_filter_column_settings,
+        ),
+        "diagnostics": (
+            create_log_diagnostics(
+                raw_df,
+                case_id_column=resolved_case_id_column,
+                activity_column=resolved_activity_column,
+                timestamp_column=resolved_timestamp_column,
+                filter_column_settings=normalized_filter_column_settings,
+            )
+            if include_diagnostics
+            else None
         ),
     }
 
@@ -591,6 +666,7 @@ def index(request: Request):
     sample_profile_payload = build_log_profile_payload(
         raw_df=read_raw_log_dataframe(SAMPLE_FILE),
         source_file_name=SAMPLE_FILE.name,
+        include_diagnostics=False,
     )
 
     return templates.TemplateResponse(
@@ -665,13 +741,12 @@ def analysis_detail_api(
     run_data = get_run_data(run_id)
     filter_params = get_effective_filter_params(run_data, get_request_filter_params(request))
     analysis = get_analysis_data(run_data, analysis_key, filter_params=filter_params)
-    filtered_meta = build_filtered_meta(
-        filter_prepared_df(
-            run_data["prepared_df"],
-            filter_params,
-            filter_column_settings=run_data.get("column_settings"),
-        )
+    filtered_df = filter_prepared_df(
+        run_data["prepared_df"],
+        filter_params,
+        filter_column_settings=run_data.get("column_settings"),
     )
+    filtered_meta = build_filtered_meta(filtered_df)
 
     response_analyses = {
         analysis_key: build_analysis_payload(
@@ -688,6 +763,21 @@ def analysis_detail_api(
             "selected_analysis_keys": run_data["selected_analysis_keys"],
             "case_count": filtered_meta["case_count"],
             "event_count": filtered_meta["event_count"],
+            "dashboard": get_dashboard_summary(
+                run_data,
+                filter_params=filter_params,
+                prepared_df=filtered_df,
+            ),
+            "impact": get_impact_summary(
+                run_data,
+                filter_params=filter_params,
+                prepared_df=filtered_df,
+            ),
+            "root_cause": get_root_cause_summary(
+                run_data,
+                filter_params=filter_params,
+                prepared_df=filtered_df,
+            ),
             "applied_filters": filter_params,
             "column_settings": build_column_settings_payload(run_data.get("column_settings")),
             "analyses": response_analyses,
@@ -914,6 +1004,44 @@ def transition_case_drilldown_api(
     )
 
 
+@app.get("/api/runs/{run_id}/activity-cases")
+def activity_case_drilldown_api(
+    request: Request,
+    run_id: str,
+    activity: str,
+    limit: int = 20,
+    variant_id: int | None = None,
+    pattern_index: int | None = None,
+):
+    run_data = get_run_data(run_id)
+    filter_params = get_effective_filter_params(run_data, get_request_filter_params(request))
+    filtered_df = get_filtered_prepared_df(
+        run_data,
+        variant_id=variant_id,
+        pattern_index=pattern_index,
+        filter_params=filter_params,
+    )
+    safe_limit = max(0, int(limit))
+    case_rows = create_activity_case_drilldown(
+        filtered_df,
+        activity=activity,
+        limit=safe_limit,
+    )
+
+    return JSONResponse(
+        content={
+            "run_id": run_id,
+            "variant_id": variant_id,
+            "pattern_index": pattern_index,
+            "activity": activity,
+            "limit": safe_limit,
+            "returned_case_count": len(case_rows),
+            "applied_filters": filter_params,
+            "cases": case_rows,
+        }
+    )
+
+
 @app.get("/api/runs/{run_id}/cases/{case_id:path}")
 def case_trace_api(run_id: str, case_id: str):
     run_data = get_run_data(run_id)
@@ -944,19 +1072,11 @@ def case_trace_api(run_id: str, case_id: str):
 @app.post("/api/csv-headers")
 async def csv_headers(request: Request):
     form = await request.form()
-    uploaded_file = form.get("csv_file")
     raw_case_id_column = form.get("case_id_column")
     raw_activity_column = form.get("activity_column")
     raw_timestamp_column = form.get("timestamp_column")
     filter_column_settings = get_form_filter_column_settings(form)
-
-    if uploaded_file and uploaded_file.filename:
-        uploaded_file.file.seek(0)
-        file_source = uploaded_file.file
-        source_file_name = uploaded_file.filename
-    else:
-        file_source = SAMPLE_FILE
-        source_file_name = SAMPLE_FILE.name
+    file_source, source_file_name = resolve_profile_file_source(form)
 
     try:
         raw_df = read_raw_log_dataframe(file_source)
@@ -979,6 +1099,42 @@ async def csv_headers(request: Request):
             activity_column=str(raw_activity_column or "").strip(),
             timestamp_column=str(raw_timestamp_column or "").strip(),
             filter_column_settings=filter_column_settings,
+            include_diagnostics=False,
+        )
+    )
+
+
+@app.post("/api/log-diagnostics")
+async def log_diagnostics(request: Request):
+    form = await request.form()
+    raw_case_id_column = form.get("case_id_column")
+    raw_activity_column = form.get("activity_column")
+    raw_timestamp_column = form.get("timestamp_column")
+    filter_column_settings = get_form_filter_column_settings(form)
+    file_source, source_file_name = resolve_profile_file_source(form)
+
+    try:
+        raw_df = read_raw_log_dataframe(file_source)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "Log diagnostics could not be read. Please check the file encoding and header row.",
+                "detail": str(exc),
+            },
+        )
+
+    return JSONResponse(
+        content=build_log_profile_payload(
+            raw_df=raw_df,
+            source_file_name=source_file_name,
+            case_id_column=str(raw_case_id_column or "").strip(),
+            activity_column=str(raw_activity_column or "").strip(),
+            timestamp_column=str(raw_timestamp_column or "").strip(),
+            filter_column_settings=filter_column_settings,
+            include_diagnostics=True,
         )
     )
 

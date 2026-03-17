@@ -4,9 +4,14 @@ import unittest
 import pandas as pd
 
 from 共通スクリプト.analysis_service import (
+    create_activity_case_drilldown,
     create_bottleneck_summary,
     create_case_trace_details,
+    create_dashboard_summary,
+    create_impact_summary,
+    create_log_diagnostics,
     create_pattern_bottleneck_details,
+    create_root_cause_summary,
     create_transition_case_drilldown,
     create_variant_flow_snapshot,
     create_variant_summary,
@@ -167,6 +172,75 @@ class ProcessMiningTestCase(unittest.TestCase):
         self.assertEqual(0.28, top_transition["max_duration_hours"])
         self.assertEqual("heat-5", summary["transition_heatmap"]["確認__TO__差戻し"]["heat_class"])
 
+    def test_dashboard_summary_returns_overview_metrics(self):
+        dashboard = create_dashboard_summary(
+            self.prepared_df,
+            variant_items=create_variant_summary(self.prepared_df, limit=10),
+            bottleneck_summary=create_bottleneck_summary(self.prepared_df, limit=10),
+        )
+        case_durations = self.prepared_df.groupby("case_id")["duration_sec"].sum().astype(float)
+
+        self.assertTrue(dashboard["has_data"])
+        self.assertEqual(6, dashboard["total_cases"])
+        self.assertEqual(len(self.prepared_df), dashboard["total_records"])
+        self.assertEqual(self.prepared_df["activity"].nunique(), dashboard["activity_type_count"])
+        self.assertEqual(round(float(case_durations.mean()), 2), dashboard["avg_case_duration_sec"])
+        self.assertEqual(round(float(case_durations.median()), 2), dashboard["median_case_duration_sec"])
+        self.assertEqual(round(float(case_durations.max()), 2), dashboard["max_case_duration_sec"])
+        self.assertEqual(1.0, dashboard["top10_variant_coverage_ratio"])
+        self.assertEqual("確認 → 差戻し", dashboard["top_bottleneck_transition_label"])
+        self.assertEqual(720.0, dashboard["top_bottleneck_avg_wait_sec"])
+
+    def test_impact_summary_returns_ranked_transition_rows(self):
+        impact = create_impact_summary(self.prepared_df, limit=10)
+
+        self.assertTrue(impact["has_data"])
+        self.assertGreaterEqual(impact["total_transition_count"], impact["returned_transition_count"])
+        self.assertTrue(impact["rows"])
+
+        top_row = impact["rows"][0]
+        self.assertEqual(1, top_row["rank"])
+        self.assertEqual("確認__TO__承認", top_row["transition_key"])
+        self.assertEqual(4, top_row["case_count"])
+        self.assertEqual(630.0, top_row["avg_duration_sec"])
+        self.assertEqual(840.0, top_row["max_duration_sec"])
+        self.assertGreater(top_row["wait_share_pct"], 0)
+        self.assertEqual(2520.0, top_row["impact_score"])
+        self.assertGreater(top_row["impact_share_pct"], 0)
+
+    def test_root_cause_summary_returns_ranked_groups(self):
+        raw_df = pd.DataFrame(
+            [
+                {"case_id": "C001", "activity": "受付", "start_time": "2024-01-01 09:00:00", "group_a": "営業"},
+                {"case_id": "C001", "activity": "完了", "start_time": "2024-01-01 10:00:00", "group_a": "営業"},
+                {"case_id": "C002", "activity": "受付", "start_time": "2024-01-01 09:00:00", "group_a": "経理"},
+                {"case_id": "C002", "activity": "完了", "start_time": "2024-01-03 09:00:00", "group_a": "経理"},
+                {"case_id": "C003", "activity": "受付", "start_time": "2024-01-01 09:00:00", "group_a": "IT"},
+                {"case_id": "C003", "activity": "完了", "start_time": "2024-01-01 11:00:00", "group_a": "IT"},
+            ]
+        )
+        prepared_df = prepare_event_log(
+            df=raw_df,
+            case_id_column="case_id",
+            activity_column="activity",
+            timestamp_column="start_time",
+        )
+
+        root_cause = create_root_cause_summary(
+            prepared_df,
+            filter_column_settings={
+                "filter_value_1": {"column_name": "group_a", "label": "グループ/カテゴリー フィルター①"},
+            },
+            limit=10,
+        )
+
+        self.assertTrue(root_cause["has_data"])
+        self.assertEqual(1, root_cause["configured_group_count"])
+        self.assertEqual("group_a", root_cause["groups"][0]["column_name"])
+        self.assertEqual("経理", root_cause["groups"][0]["rows"][0]["value"])
+        self.assertEqual(1, root_cause["groups"][0]["rows"][0]["case_count"])
+        self.assertEqual(33.33, root_cause["groups"][0]["rows"][0]["case_ratio_pct"])
+
     def test_transition_case_drilldown_returns_slowest_cases(self):
         rows = create_transition_case_drilldown(
             self.prepared_df,
@@ -181,6 +255,19 @@ class ProcessMiningTestCase(unittest.TestCase):
         self.assertEqual("17m 0s", rows[0]["duration_text"])
         self.assertEqual("C005", rows[1]["case_id"])
         self.assertEqual(420.0, rows[1]["duration_sec"])
+
+    def test_activity_case_drilldown_returns_slowest_cases(self):
+        rows = create_activity_case_drilldown(
+            self.prepared_df,
+            activity="確認",
+            limit=5,
+        )
+
+        self.assertEqual(5, len(rows))
+        self.assertEqual("C002", rows[0]["case_id"])
+        self.assertEqual(1020.0, rows[0]["duration_sec"])
+        self.assertEqual("17m 0s", rows[0]["duration_text"])
+        self.assertEqual("差戻し", rows[0]["next_activity"])
 
     def test_variant_flow_snapshot_returns_single_variant_graph(self):
         snapshot = create_variant_flow_snapshot(
@@ -249,6 +336,29 @@ class ProcessMiningTestCase(unittest.TestCase):
         self.assertEqual("C999", trace["case_id"])
         self.assertIsNone(trace["summary"])
         self.assertEqual([], trace["events"])
+
+    def test_create_log_diagnostics_reports_duplicate_counts(self):
+        raw_df = pd.DataFrame(
+            [
+                {"case_id": "C001", "activity": "申請", "start_time": "2024-01-01 09:00:00", "group_a": "Sales"},
+                {"case_id": "C001", "activity": "申請", "start_time": "2024-01-01 09:00:00", "group_a": "Sales"},
+                {"case_id": "C002", "activity": "承認", "start_time": "2024-01-02 10:00:00", "group_a": "HR"},
+            ]
+        )
+
+        diagnostics = create_log_diagnostics(
+            raw_df,
+            case_id_column="case_id",
+            activity_column="activity",
+            timestamp_column="start_time",
+        )
+
+        self.assertEqual(3, diagnostics["record_count"])
+        self.assertEqual(2, diagnostics["activity_type_count"])
+        self.assertEqual(1, diagnostics["duplicate_row_count"])
+        self.assertEqual("あり", diagnostics["duplicate_status"])
+        self.assertEqual(2, diagnostics["deduplicated_record_count"])
+        self.assertEqual(0.3333, diagnostics["duplicate_rate"])
 
     def test_normalize_filter_params_trims_blank_values(self):
         normalized = normalize_filter_params(

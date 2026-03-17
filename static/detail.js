@@ -1,10 +1,12 @@
-const STORAGE_KEY = "processMiningLastResult";
 const FLOW_SELECTION_STORAGE_KEY = "processMiningFlowSelection";
 const DETAIL_ROW_LIMIT = 500;
 const RENDERING_LIMIT = 1200; // Stricter limit for total elements
 const EDGE_LIMIT = 800;      // Stricter limit for paths specifically
 const AGGRESSIVE_LIMIT = 3000; // Threshold for extreme reduction
 
+// -----------------------------------------------------------------------------
+// Generic utilities
+// -----------------------------------------------------------------------------
 function debounce(func, wait) {
     let timeout;
     return (...args) => {
@@ -38,25 +40,16 @@ const DEFAULT_DETAIL_FILTERS = Object.freeze({
 });
 let activeDetailFilters = { ...DEFAULT_DETAIL_FILTERS };
 let detailPageAnalysisLoader = null;
+let currentDetailColumnSettings = {};
 
-function setStatus(message, type = "info") {
-    statusPanel.textContent = message;
-    statusPanel.className = `status-panel ${type}`;
-}
+const sharedUi = window.ProcessMiningShared;
+const { buildTransitionKey, escapeHtml, fetchJson, formatDateTime, getRunId, loadLatestResult } = sharedUi;
+const setStatus = (message, type = "info") => sharedUi.setStatus(statusPanel, message, type);
+const hideStatus = () => sharedUi.hideStatus(statusPanel);
 
-function hideStatus() {
-    statusPanel.className = "status-panel hidden";
-    statusPanel.textContent = "";
-}
-
-function escapeHtml(value) {
-    return String(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
-}
+// -----------------------------------------------------------------------------
+// Filter state helpers
+// -----------------------------------------------------------------------------
 
 function cloneDetailFilters(filters = {}) {
     return {
@@ -117,14 +110,13 @@ function buildFilterQueryParams(filters = {}) {
     return params;
 }
 
-function hasActiveDetailFilters(filters = {}) {
-    const normalizedFilters = cloneDetailFilters(filters);
-    return Object.values(normalizedFilters).some((filterValue) => Boolean(filterValue));
-}
-
 function buildPatternDetailHref(runId, patternIndex) {
     return `/analysis/patterns/${encodeURIComponent(String(patternIndex))}?run_id=${encodeURIComponent(runId)}`;
 }
+
+// -----------------------------------------------------------------------------
+// Analysis detail API helpers
+// -----------------------------------------------------------------------------
 
 function buildAnalysisDetailApiUrl(runId, rowOffset = 0, filters = activeDetailFilters) {
     const params = new URLSearchParams({
@@ -139,113 +131,10 @@ function buildAnalysisDetailApiUrl(runId, rowOffset = 0, filters = activeDetailF
 }
 
 function buildTable(rows, options = {}) {
-    if (!rows.length) {
-        return '<p class="empty-state">表示できるデータがありません。</p>';
-    }
-
-    const { analysisKey: tableAnalysisKey = "", runId = "" } = options;
-    const headers = Object.keys(rows[0]).filter((header) => !header.startsWith("__"));
-    const headHtml = headers
-        .map((header) => `<th>${escapeHtml(header)}</th>`)
-        .join("");
-
-    const bodyHtml = rows
-        .map((row) => {
-            const cells = headers
-                .map((header) => {
-                    const cellValue = escapeHtml(row[header]);
-                    const isWideHeader = (
-                        header === "処理順パターン" || 
-                        header === "アクティビティ名" || 
-                        header === "アクティビティ" ||
-                        header === "前処理アクティビティ名" ||
-                        header === "後処理アクティビティ名"
-                    );
-                    const isPatternLink = (
-                        tableAnalysisKey === "pattern"
-                        && header === "処理順パターン"
-                        && runId
-                        && Number.isInteger(row.__rowIndex)
-                    );
-
-                    if (isPatternLink) {
-                        return `
-                            <td class="table-cell--wide">
-                                <div class="cell-scroll-wrapper">
-                                    <a href="${buildPatternDetailHref(runId, row.__rowIndex)}" class="table-link">
-                                        ${cellValue}
-                                    </a>
-                                </div>
-                            </td>
-                        `;
-                    }
-
-                    if (isWideHeader) {
-                        return `
-                            <td class="table-cell--wide">
-                                <div class="cell-scroll-wrapper">${cellValue}</div>
-                            </td>
-                        `;
-                    }
-
-                    return `<td>${cellValue}</td>`;
-                })
-                .join("");
-            return `<tr>${cells}</tr>`;
-        })
-        .join("");
-
-    return `
-        <div class="table-wrap">
-            <table>
-                <thead><tr>${headHtml}</tr></thead>
-                <tbody>${bodyHtml}</tbody>
-            </table>
-        </div>
-    `;
-}
-
-function loadLatestResult() {
-    const storedValue = sessionStorage.getItem(STORAGE_KEY);
-
-    if (!storedValue) {
-        return null;
-    }
-
-    try {
-        return JSON.parse(storedValue);
-    } catch {
-        sessionStorage.removeItem(STORAGE_KEY);
-        return null;
-    }
-}
-
-function getRunId(latestResult) {
-    const params = new URLSearchParams(window.location.search);
-    return params.get("run_id") || latestResult?.run_id || "";
-}
-
-async function fetchJson(url, fallbackMessage, timeoutMs = 30000) {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-        const response = await fetch(url, { signal: controller.signal });
-        clearTimeout(id);
-        const payload = await response.json();
-
-        if (!response.ok) {
-            throw new Error(payload.detail || payload.error || fallbackMessage);
-        }
-
-        return payload;
-    } catch (error) {
-        clearTimeout(id);
-        if (error.name === "AbortError") {
-            throw new Error("サーバーからの応答がタイムアウトしました。データ量を減らして再試行してください。");
-        }
-        throw error;
-    }
+    return sharedUi.buildTable(rows, {
+        ...options,
+        buildPatternDetailHref,
+    });
 }
 
 function loadFlowSelection(runId) {
@@ -313,6 +202,29 @@ function loadBottleneckSummary(runId, limit = 5, variantId = null, filters = act
     );
 }
 
+function buildActivityCasesApiUrl(runId, activity, limit = 20, variantId = null, filters = activeDetailFilters) {
+    const params = new URLSearchParams({
+        activity: String(activity || ""),
+        limit: String(Math.max(0, Number(limit) || 0)),
+    });
+
+    if (variantId !== null && variantId !== undefined) {
+        params.set("variant_id", String(variantId));
+    }
+    buildFilterQueryParams(filters).forEach((value, key) => {
+        params.set(key, value);
+    });
+
+    return `/api/runs/${encodeURIComponent(runId)}/activity-cases?${params.toString()}`;
+}
+
+function loadActivityCases(runId, activity, limit = 20, variantId = null, filters = activeDetailFilters) {
+    return fetchJson(
+        buildActivityCasesApiUrl(runId, activity, limit, variantId, filters),
+        "Activity cases could not be loaded."
+    );
+}
+
 function buildTransitionCasesApiUrl(runId, fromActivity, toActivity, limit = 20, variantId = null, filters = activeDetailFilters) {
     const params = new URLSearchParams({
         from_activity: String(fromActivity || ""),
@@ -337,17 +249,6 @@ function loadTransitionCases(runId, fromActivity, toActivity, limit = 20, varian
     );
 }
 
-function buildFilterOptionsApiUrl(runId) {
-    return `/api/runs/${encodeURIComponent(runId)}/filter-options`;
-}
-
-function loadFilterOptions(runId) {
-    return fetchJson(
-        buildFilterOptionsApiUrl(runId),
-        "Filter options could not be loaded."
-    );
-}
-
 function buildCaseTraceApiUrl(runId, caseId) {
     return `/api/runs/${encodeURIComponent(runId)}/cases/${encodeURIComponent(String(caseId || "").trim())}`;
 }
@@ -358,6 +259,10 @@ function loadCaseTrace(runId, caseId) {
         "Case trace could not be loaded."
     );
 }
+
+// -----------------------------------------------------------------------------
+// Formatting helpers
+// -----------------------------------------------------------------------------
 
 function formatVariantRatio(ratio) {
     return (Number(ratio || 0) * 100).toLocaleString("ja-JP", {
@@ -372,19 +277,6 @@ function formatDurationHours(hours) {
     })}h`;
 }
 
-function formatDateTime(value) {
-    if (!value) {
-        return "";
-    }
-
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) {
-        return String(value);
-    }
-
-    return date.toLocaleString("ja-JP");
-}
-
 function formatDurationSeconds(seconds) {
     return `${Number(seconds || 0).toLocaleString("ja-JP", {
         minimumFractionDigits: 0,
@@ -392,9 +284,251 @@ function formatDurationSeconds(seconds) {
     })} sec`;
 }
 
-function buildTransitionKey(fromActivity, toActivity) {
-    return `${fromActivity}__TO__${toActivity}`;
+function formatDashboardMetricNumber(value) {
+    return Number(value || 0).toLocaleString("ja-JP");
 }
+
+function formatDashboardCoverage(coveragePct) {
+    return `${Number(coveragePct || 0).toLocaleString("ja-JP", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 2,
+    })}%`;
+}
+
+function buildDashboardCardsHtml(dashboard) {
+    if (!dashboard?.has_data) {
+        return `
+            <section class="summary-panel-dashboard">
+                <div class="dashboard-header">
+                    <h2 class="dashboard-title">基本ダッシュボード</h2>
+                    <p class="dashboard-copy">分析対象条件適用後の分析要約です。Variant選択中も全体値を表示します。</p>
+                </div>
+                <div class="dashboard-empty">
+                    <p class="empty-state">条件に一致するデータがありません。</p>
+                </div>
+            </section>
+        `;
+    }
+
+    const dashboardCards = [
+        {
+            label: "アクティビティ種類数",
+            value: formatDashboardMetricNumber(dashboard.activity_type_count),
+        },
+        {
+            label: "平均処理時間",
+            value: dashboard.avg_case_duration_text || "0s",
+        },
+        {
+            label: "中央処理時間",
+            value: dashboard.median_case_duration_text || "0s",
+        },
+        {
+            label: "最大処理時間",
+            value: dashboard.max_case_duration_text || "0s",
+        },
+        {
+            label: "上位10パターンカバレッジ",
+            value: formatDashboardCoverage(dashboard.top10_variant_coverage_pct),
+        },
+        {
+            label: "最大ボトルネック",
+            value: dashboard.top_bottleneck_transition_label || "-",
+        },
+        {
+            label: "最大ボトルネック平均待ち時間",
+            value: dashboard.top_bottleneck_transition_label
+                ? `Avg ${formatDurationHours(dashboard.top_bottleneck_avg_wait_hours)}`
+                : "-",
+            note: dashboard.top_bottleneck_transition_label || "対象遷移なし",
+        },
+    ];
+
+    return `
+        <section class="summary-panel-dashboard">
+            <div class="dashboard-header">
+                <h2 class="dashboard-title">基本ダッシュボード</h2>
+                <p class="dashboard-copy">分析対象条件適用後の分析要約です。Variant選択中も全体値を表示します。</p>
+            </div>
+            <div class="dashboard-grid">
+                ${dashboardCards.map((card) => `
+                    <article class="dashboard-card">
+                        <span class="summary-label">${escapeHtml(card.label)}</span>
+                        <strong class="dashboard-value">${escapeHtml(card.value)}</strong>
+                        ${card.note ? `<p class="dashboard-note">${escapeHtml(card.note)}</p>` : ""}
+                    </article>
+                `).join("")}
+            </div>
+        </section>
+    `;
+}
+
+function formatRootCauseRatio(ratio) {
+    return `${Number(ratio || 0).toLocaleString("ja-JP", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 2,
+    })}%`;
+}
+
+function formatImpactScore(score) {
+    return Number(score || 0).toLocaleString("ja-JP", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 2,
+    });
+}
+
+function buildRootCauseGroupHtml(group) {
+    const rows = Array.isArray(group?.rows) ? group.rows : [];
+    const metaParts = [`対象列: ${group.column_name || "-"}`];
+    const singleValueNotice = rows.length === 1
+        ? "現在は1値のみのため、比較対象がありません。分析対象条件を広げると、値ごとの差を比較できます。"
+        : "";
+
+    if ((group.total_value_count || 0) > (group.returned_value_count || 0)) {
+        metaParts.push(`平均処理時間が長い順に上位 ${group.returned_value_count} 件を表示`);
+    } else {
+        metaParts.push("平均処理時間が長い順に表示");
+    }
+
+    if (!rows.length) {
+        return `
+            <section class="root-cause-group">
+                <div class="root-cause-group-head">
+                    <h3>${escapeHtml(group.label || "原因分析")}</h3>
+                    <p class="panel-note">${escapeHtml(metaParts.join(" / "))}</p>
+                </div>
+                <p class="empty-state">表示できる値がありません。</p>
+            </section>
+        `;
+    }
+
+    const tableRows = rows.map((row) => ({
+        "値": row.value,
+        "ケース数": formatDashboardMetricNumber(row.case_count),
+        "ケース比率": formatRootCauseRatio(row.case_ratio_pct),
+        "平均処理時間": row.avg_case_duration_text,
+        "中央処理時間": row.median_case_duration_text,
+        "最大処理時間": row.max_case_duration_text,
+    }));
+
+        return `
+            <section class="root-cause-group">
+                <div class="root-cause-group-head">
+                    <h3>${escapeHtml(group.label || "原因分析")}</h3>
+                    <p class="panel-note">${escapeHtml(metaParts.join(" / "))}</p>
+                </div>
+                ${buildTable(tableRows)}
+                ${singleValueNotice ? `<p class="panel-note">${escapeHtml(singleValueNotice)}</p>` : ""}
+            </section>
+        `;
+}
+
+function buildRootCauseSectionHtml(rootCause) {
+    if (!rootCause?.has_data) {
+        return `
+            <section class="root-cause-panel">
+                <div class="result-header">
+                    <div>
+                        <h2>原因分析</h2>
+                        <p class="result-meta">グループ/カテゴリー列ごとに、値別のケース処理時間を比較します。</p>
+                    </div>
+                </div>
+                <p class="empty-state">条件に一致するデータがありません。</p>
+            </section>
+        `;
+    }
+
+    if (!Array.isArray(rootCause.groups) || !rootCause.groups.length) {
+        return `
+            <section class="root-cause-panel">
+                <div class="result-header">
+                    <div>
+                        <h2>原因分析</h2>
+                        <p class="result-meta">グループ/カテゴリー列ごとに、値別のケース処理時間を比較します。</p>
+                    </div>
+                </div>
+                <p class="empty-state">原因分析に使うグループ/カテゴリー列が未設定です。</p>
+            </section>
+        `;
+    }
+
+    return `
+        <section class="root-cause-panel">
+            <div class="result-header">
+                <div>
+                    <h2>原因分析</h2>
+                    <p class="result-meta">TOP画面で設定したグループ/カテゴリー列ごとに、値別のケース処理時間を比較しています。</p>
+                </div>
+            </div>
+            <div class="root-cause-group-list">
+                ${rootCause.groups.map((group) => buildRootCauseGroupHtml(group)).join("")}
+            </div>
+        </section>
+    `;
+}
+
+function buildImpactSectionHtml(impact) {
+    if (!impact?.has_data) {
+        return `
+            <section class="impact-panel">
+                <div class="result-header">
+                    <div>
+                        <h2>改善インパクト分析</h2>
+                        <p class="result-meta">平均待ち時間 × 件数をもとに、改善効果の大きい遷移を表示しています。</p>
+                    </div>
+                </div>
+                <p class="empty-state">条件に一致するデータがありません。</p>
+            </section>
+        `;
+    }
+
+    const rows = Array.isArray(impact.rows) ? impact.rows : [];
+    if (!rows.length) {
+        return `
+            <section class="impact-panel">
+                <div class="result-header">
+                    <div>
+                        <h2>改善インパクト分析</h2>
+                        <p class="result-meta">平均待ち時間 × 件数をもとに、改善効果の大きい遷移を表示しています。</p>
+                    </div>
+                </div>
+                <p class="empty-state">表示できる遷移がありません。</p>
+            </section>
+        `;
+    }
+
+    const tableRows = rows.map((row) => ({
+        "順位": row.rank,
+        "遷移": row.transition_label,
+        "ケース数": formatDashboardMetricNumber(row.case_count),
+        "平均待ち時間": row.avg_duration_text,
+        "最大待ち時間": row.max_duration_text,
+        "待ち時間シェア(%)": formatRootCauseRatio(row.wait_share_pct),
+        "改善インパクト": formatImpactScore(row.impact_score),
+        "改善インパクト比率(%)": formatRootCauseRatio(row.impact_share_pct),
+    }));
+
+    const metaText = impact.total_transition_count > impact.returned_transition_count
+        ? `改善インパクト指標の高い順に上位 ${impact.returned_transition_count} 件を表示しています。`
+        : "改善インパクト指標の高い順に表示しています。";
+
+    return `
+        <section class="impact-panel">
+            <div class="result-header">
+                <div>
+                    <h2>改善インパクト分析</h2>
+                    <p class="result-meta">平均待ち時間 × 件数をもとに、改善効果の大きい遷移を表示しています。</p>
+                </div>
+            </div>
+            <p class="panel-note">${escapeHtml(metaText)}</p>
+            ${buildTable(tableRows, { wideHeaders: new Set(["遷移"]) })}
+        </section>
+    `;
+}
+
+// -----------------------------------------------------------------------------
+// Variant, bottleneck, and case trace render helpers
+// -----------------------------------------------------------------------------
 
 function getVariantSequenceText(variant) {
     return Array.isArray(variant?.activities)
@@ -417,24 +551,6 @@ function buildVariantCoverageHtml(coverage) {
     `;
 }
 
-function buildFilterSelectionSummary(filters = {}) {
-    const normalizedFilters = cloneDetailFilters(filters);
-    const filterLabelMap = {
-        date_from: "開始日",
-        date_to: "終了日",
-        department: "部署",
-        channel: "チャネル",
-        category: "カテゴリ",
-    };
-    const appliedItems = Object.entries(normalizedFilters)
-        .filter(([, filterValue]) => Boolean(filterValue))
-        .map(([filterName, filterValue]) => `${filterLabelMap[filterName]}: ${filterValue}`);
-
-    return appliedItems.length
-        ? appliedItems.join(" / ")
-        : "フィルタ未適用";
-}
-
 function buildFilterSelectionSummary(filters = {}, filterDefinitions = []) {
     const normalizedFilters = cloneDetailFilters(filters);
     const filterLabelMap = new Map(filterDefinitions.map((definition) => [definition.slot, definition.label]));
@@ -455,7 +571,7 @@ function buildFilterSelectionSummary(filters = {}, filterDefinitions = []) {
 
     return appliedItems.length
         ? appliedItems.join(" / ")
-        : "フィルタ未適用";
+        : "分析対象条件未適用";
 }
 
 function buildVariantSelectionState(variants, selectedVariantId) {
@@ -637,6 +753,10 @@ function buildCaseTraceEventsTable(events) {
     return buildTable(eventRows);
 }
 
+// -----------------------------------------------------------------------------
+// Process map selection and heatmap decorators
+// -----------------------------------------------------------------------------
+
 function applyHeatClass(targetElement, heatEntry) {
     if (!targetElement) {
         return;
@@ -722,23 +842,38 @@ function applyProcessMapDecorators(viewportElement, options = {}) {
     });
 }
 
+// -----------------------------------------------------------------------------
+// Analysis panel renderers
+// -----------------------------------------------------------------------------
+
 function renderSummary(data, analysis) {
     const rowCount = analysis.row_count ?? analysis.rows.length;
 
     summaryPanel.className = "summary-panel";
+    const summaryCardsHtml = [
+        {
+            label: "入力ファイル",
+            value: data.source_file_name,
+        },
+        {
+            label: "対象ケース数 / 対象イベント数",
+            value: `${data.case_count} / ${data.event_count}`,
+        },
+        {
+            label: "表示件数",
+            value: rowCount,
+        },
+    ].map((card) => `
+        <article class="summary-card">
+            <span class="summary-label">${escapeHtml(card.label)}</span>
+            <strong>${escapeHtml(card.value)}</strong>
+        </article>
+    `).join("");
+
     summaryPanel.innerHTML = `
-        <article class="summary-card">
-            <span class="summary-label">入力ファイル</span>
-            <strong>${escapeHtml(data.source_file_name)}</strong>
-        </article>
-        <article class="summary-card">
-            <span class="summary-label">ケース数 / イベント数</span>
-            <strong>${escapeHtml(data.case_count)} / ${escapeHtml(data.event_count)}</strong>
-        </article>
-        <article class="summary-card">
-            <span class="summary-label">表示件数</span>
-            <strong>${escapeHtml(rowCount)}</strong>
-        </article>
+        ${summaryCardsHtml}
+        ${buildDashboardCardsHtml(data.dashboard)}
+        ${buildRootCauseSectionHtml(data.root_cause)}
     `;
 }
 
@@ -811,6 +946,10 @@ function renderResult(analysis, runId = "", onPageChange = null) {
         });
     }
 }
+
+// -----------------------------------------------------------------------------
+// Process map graph rendering
+// -----------------------------------------------------------------------------
 
 function getInitialPatternFlowSettings(totalPatternCount) {
     if (totalPatternCount >= 50000) {
@@ -1959,24 +2098,30 @@ function renderProcessHeatLegend() {
                 <span>Heatmap</span>
                 <strong>Avg wait</strong>
             </div>
-            <p class="process-explorer-legend-copy">平均待ち時間ベースの Heatmap です。ノードは activity、線は transition の待ち時間を表します。</p>
-            <div class="process-explorer-legend-scale">
-                <span class="process-explorer-legend-boundary">Low</span>
-                <div class="process-explorer-legend-swatches">
-                    ${legendLevels.map((levelClassName) => `
-                        <div class="process-explorer-legend-item">
-                            <span class="process-explorer-legend-node ${levelClassName}"></span>
-                            <span class="process-explorer-legend-edge ${levelClassName}"></span>
-                        </div>
-                    `).join("")}
+            <div class="process-explorer-legend-body">
+                <p class="process-explorer-legend-copy">平均待ち時間ベースの Heatmap です。ノードは activity、線は transition の待ち時間を表します。</p>
+                <div class="process-explorer-legend-scale">
+                    <span class="process-explorer-legend-boundary">HIGH</span>
+                    <div class="process-explorer-legend-swatches">
+                        ${legendLevels.slice().reverse().map((levelClassName) => `
+                            <div class="process-explorer-legend-item">
+                                <span class="process-explorer-legend-node ${levelClassName}"></span>
+                                <span class="process-explorer-legend-edge ${levelClassName}"></span>
+                            </div>
+                        `).join("")}
+                    </div>
+                    <span class="process-explorer-legend-boundary">LOW</span>
                 </div>
-                <span class="process-explorer-legend-boundary">High</span>
             </div>
         </section>
     `;
 }
 
-async function initializePatternFlowExplorer(runId) {
+// -----------------------------------------------------------------------------
+// Detail page interactive flow explorer
+// -----------------------------------------------------------------------------
+
+async function initializePatternFlowExplorer(runId, impact = null) {
     const mapViewport = document.getElementById("process-map-viewport");
     const patternsSlider = document.getElementById("process-map-patterns-slider");
     const activitiesSlider = document.getElementById("process-map-activities-slider");
@@ -2000,22 +2145,13 @@ async function initializePatternFlowExplorer(runId) {
     const variantSelectionSequence = document.getElementById("variant-selection-sequence");
     const activityBottleneckList = document.getElementById("activity-bottleneck-list");
     const transitionBottleneckList = document.getElementById("transition-bottleneck-list");
+    const impactPanel = chartContainer.querySelector(".impact-panel");
     const transitionCasePanel = document.getElementById("transition-case-panel");
-    const filterForm = document.getElementById("detail-filter-form");
-    const filterDateFromInput = document.getElementById("detail-filter-date-from");
-    const filterDateToInput = document.getElementById("detail-filter-date-to");
-    const filterApplyButton = document.getElementById("detail-filter-apply");
-    const filterResetButton = document.getElementById("detail-filter-reset");
     const filterSummaryMeta = document.getElementById("detail-filter-summary");
     const filterCountMeta = document.getElementById("detail-filter-counts");
     const caseTraceForm = document.getElementById("case-trace-form");
     const caseTraceInput = document.getElementById("case-trace-input");
     const caseTraceResult = document.getElementById("case-trace-result");
-    const filterSlotRefs = FILTER_SLOT_KEYS.map((slot, index) => ({
-        slot,
-        labelElement: document.getElementById(`detail-filter-label-${index + 1}`),
-        selectElement: document.getElementById(`detail-filter-value-${index + 1}`),
-    }));
     let selectedVariantId = null;
     let selectedActivity = "";
     let selectedTransitionKey = "";
@@ -2030,7 +2166,7 @@ async function initializePatternFlowExplorer(runId) {
     let caseTracePayload = null;
     let caseTraceErrorMessage = "";
     let filterDefinitions = buildDefaultFilterDefinitions();
-    let defaultAppliedFilters = cloneDetailFilters(activeDetailFilters);
+    const impactSummary = impact || { has_data: false, rows: [] };
     let filteredCounts = {
         caseCount: 0,
         eventCount: 0,
@@ -2065,17 +2201,11 @@ async function initializePatternFlowExplorer(runId) {
         || !activityBottleneckList
         || !transitionBottleneckList
         || !transitionCasePanel
-        || !filterForm
-        || !filterDateFromInput
-        || !filterDateToInput
-        || !filterApplyButton
-        || !filterResetButton
         || !filterSummaryMeta
         || !filterCountMeta
         || !caseTraceForm
         || !caseTraceInput
         || !caseTraceResult
-        || filterSlotRefs.some((filterRef) => !filterRef.labelElement || !filterRef.selectElement)
     ) {
         return;
     }
@@ -2089,58 +2219,48 @@ async function initializePatternFlowExplorer(runId) {
         return String(transitionKey || "").replace("__TO__", " → ");
     }
 
-    function populateFilterSelect(selectElement, values, selectedValue = "") {
-        const optionsHtml = ['<option value="">全て</option>']
-            .concat(
-                (Array.isArray(values) ? values : []).map((value) => (
-                    `<option value="${escapeHtml(value)}"${value === selectedValue ? " selected" : ""}>${escapeHtml(value)}</option>`
-                ))
-            )
-            .join("");
+    function findSelectedTransitionDetails() {
+        if (!selectedTransitionKey) {
+            return null;
+        }
 
-        selectElement.innerHTML = optionsHtml;
-    }
-
-    function syncFilterControls() {
-        filterDateFromInput.value = activeDetailFilters.date_from || "";
-        filterDateToInput.value = activeDetailFilters.date_to || "";
-        populateFilterSelect(filterDepartmentSelect, filterOptions.department, activeDetailFilters.department);
-        populateFilterSelect(filterChannelSelect, filterOptions.channel, activeDetailFilters.channel);
-        populateFilterSelect(filterCategorySelect, filterOptions.category, activeDetailFilters.category);
-        filterResetButton.disabled = !hasActiveDetailFilters(activeDetailFilters);
-    }
-
-    function renderFilterSummary() {
-        filterSummaryMeta.textContent = buildFilterSelectionSummary(activeDetailFilters);
-        filterCountMeta.textContent = `対象ケース数 ${Number(filteredCounts.caseCount || 0).toLocaleString("ja-JP")} / 対象イベント数 ${Number(filteredCounts.eventCount || 0).toLocaleString("ja-JP")}`;
-    }
-
-    function readFilterFormState() {
-        return cloneDetailFilters({
-            date_from: filterDateFromInput.value,
-            date_to: filterDateToInput.value,
-            department: filterDepartmentSelect.value,
-            channel: filterChannelSelect.value,
-            category: filterCategorySelect.value,
+        const bottleneckTransition = (bottleneckSummary?.transition_bottlenecks || []).find((item) => {
+            const transitionKey = item.transition_key || buildTransitionKey(item.from_activity, item.to_activity);
+            return transitionKey === selectedTransitionKey;
         });
+        if (bottleneckTransition) {
+            return bottleneckTransition;
+        }
+
+        const impactTransition = (impactSummary?.rows || []).find((item) => {
+            const transitionKey = item.transition_key || buildTransitionKey(item.from_activity, item.to_activity);
+            return transitionKey === selectedTransitionKey;
+        });
+        if (impactTransition) {
+            return impactTransition;
+        }
+
+        return null;
     }
 
-    function syncFilterControls() {
-        filterDateFromInput.value = activeDetailFilters.date_from || "";
-        filterDateToInput.value = activeDetailFilters.date_to || "";
-        filterSlotRefs.forEach((filterRef) => {
-            const definition = filterDefinitions.find((item) => item.slot === filterRef.slot) || {
-                slot: filterRef.slot,
-                label: DEFAULT_FILTER_LABELS[filterRef.slot],
-                column_name: "",
-                options: [],
-            };
+    function getSelectableTransitionKeys() {
+        const transitionKeys = new Set();
 
-            filterRef.labelElement.textContent = definition.label;
-            populateFilterSelect(filterRef.selectElement, definition.options, activeDetailFilters[filterRef.slot]);
-            filterRef.selectElement.disabled = !definition.column_name;
+        (bottleneckSummary?.transition_bottlenecks || []).forEach((item) => {
+            const transitionKey = item.transition_key || buildTransitionKey(item.from_activity, item.to_activity);
+            if (transitionKey) {
+                transitionKeys.add(transitionKey);
+            }
         });
-        filterResetButton.disabled = !hasActiveDetailFilters(activeDetailFilters);
+
+        (impactSummary?.rows || []).forEach((item) => {
+            const transitionKey = item.transition_key || buildTransitionKey(item.from_activity, item.to_activity);
+            if (transitionKey) {
+                transitionKeys.add(transitionKey);
+            }
+        });
+
+        return transitionKeys;
     }
 
     function renderFilterSummary() {
@@ -2148,13 +2268,36 @@ async function initializePatternFlowExplorer(runId) {
         filterCountMeta.textContent = `対象ケース数 ${Number(filteredCounts.caseCount || 0).toLocaleString("ja-JP")} / 対象イベント数 ${Number(filteredCounts.eventCount || 0).toLocaleString("ja-JP")}`;
     }
 
-    function readFilterFormState() {
-        return cloneDetailFilters({
-            date_from: filterDateFromInput.value,
-            date_to: filterDateToInput.value,
-            filter_value_1: filterSlotRefs[0].selectElement.value,
-            filter_value_2: filterSlotRefs[1].selectElement.value,
-            filter_value_3: filterSlotRefs[2].selectElement.value,
+    function syncImpactPanel() {
+        if (!impactPanel) {
+            return;
+        }
+
+        const rowElements = Array.from(impactPanel.querySelectorAll("tbody tr"));
+        rowElements.forEach((rowElement, index) => {
+            const impactRow = (impactSummary?.rows || [])[index];
+            if (!impactRow) {
+                return;
+            }
+
+            const transitionKey = impactRow.transition_key || buildTransitionKey(impactRow.from_activity, impactRow.to_activity);
+            const isSelected = Boolean(selectedTransitionKey) && transitionKey === selectedTransitionKey;
+
+            rowElement.dataset.impactTransitionKey = transitionKey;
+            rowElement.classList.add("transition-step-row");
+            rowElement.classList.toggle("transition-step-row--selected", isSelected);
+            rowElement.setAttribute("tabindex", "0");
+            rowElement.setAttribute("aria-selected", isSelected ? "true" : "false");
+            rowElement.onclick = () => {
+                void applyTransitionSelection(transitionKey);
+            };
+            rowElement.onkeydown = (event) => {
+                if (event.key !== "Enter" && event.key !== " ") {
+                    return;
+                }
+                event.preventDefault();
+                void applyTransitionSelection(transitionKey);
+            };
         });
     }
 
@@ -2167,62 +2310,73 @@ async function initializePatternFlowExplorer(runId) {
         saveFlowSelection(runId, selectedVariantId, selectedActivity, selectedTransitionKey);
     }
 
-    async function applyFilters(nextFilters) {
-        filterApplyButton.disabled = true;
-        filterResetButton.disabled = true;
-        activeDetailFilters = cloneDetailFilters(nextFilters);
-        resetSelectionState();
-        syncFilterControls();
-        renderFilterSummary();
+    async function applyTransitionSelection(nextTransitionKey) {
+        selectedTransitionKey = selectedTransitionKey === nextTransitionKey ? "" : nextTransitionKey;
+        selectedActivity = "";
+        transitionCaseRows = [];
+        transitionCaseErrorMessage = "";
+        saveFlowSelection(runId, selectedVariantId, selectedActivity, selectedTransitionKey);
+        syncVariantPanel();
+        syncBottleneckPanel();
+        syncImpactPanel();
+        await updateProcessMap();
+        await loadSelectedTransitionCases();
+    }
 
-        try {
-            await refreshVariantSummary();
-            await refreshBottleneckSummary();
-            syncVariantPanel();
-            syncBottleneckPanel();
-            if (typeof detailPageAnalysisLoader === "function") {
-                await detailPageAnalysisLoader(0);
-            }
-            await updateProcessMap();
-        } finally {
-            filterApplyButton.disabled = false;
-            syncFilterControls();
+    function getDrilldownPanelConfig() {
+        if (selectedTransitionKey) {
+            const selectedTransition = findSelectedTransitionDetails();
+            return {
+                title: "Transition Case Drilldown",
+                meta: selectedTransition
+                    ? resolveTransitionLabel(selectedTransition, selectedTransitionKey)
+                    : resolveTransitionLabel(null, selectedTransitionKey),
+                emptyMessage: "遷移別ボトルネックを選択すると、時間の長いケースを表示します。",
+                note: "上位 20 件を表示します。duration 降順です。",
+            };
         }
+
+        if (selectedActivity) {
+            return {
+                title: "Activity Case Drilldown",
+                meta: `Activity ボトルネック「${selectedActivity}」の待ち時間が長いケースです。`,
+                emptyMessage: `Activity ボトルネック「${selectedActivity}」を選択すると、時間の長いケースを表示します。`,
+                note: "上位 20 件を表示します。duration 降順です。",
+            };
+        }
+
+        return {
+            title: "Bottleneck Case Drilldown",
+            meta: "Activity または Transition のボトルネックを選択すると、時間の長いケースを表示します。",
+            emptyMessage: "Activity または Transition のボトルネックを選択すると、時間の長いケースを表示します。",
+            note: "上位 20 件を表示します。duration 降順です。",
+        };
     }
 
     function renderTransitionCasePanel() {
-        const hasTransitionSelection = Boolean(selectedTransitionKey);
+        const drilldownConfig = getDrilldownPanelConfig();
+        const hasTransitionSelection = Boolean(selectedTransitionKey || selectedActivity);
         transitionCasePanel.className = "result-panel";
 
         if (!hasTransitionSelection) {
-            const hasActivitySelection = Boolean(selectedActivity);
-            const emptyMessage = hasActivitySelection
-                ? `Activity ボトルネック「${selectedActivity}」を選択中です。遷移別ボトルネックを選択するとケース一覧を表示します。`
-                : "遷移別ボトルネックを選択すると、時間の長いケースを表示します。";
             transitionCasePanel.innerHTML = `
                 <div class="result-header">
                     <div>
-                        <h2>Transition Case Drilldown</h2>
-                        <p class="result-meta">${escapeHtml(emptyMessage)}</p>
+                        <h2>${escapeHtml(drilldownConfig.title)}</h2>
+                        <p class="result-meta">${escapeHtml(drilldownConfig.meta)}</p>
                     </div>
                 </div>
-                <p class="empty-state">${escapeHtml(emptyMessage)}</p>
+                <p class="empty-state">${escapeHtml(drilldownConfig.emptyMessage)}</p>
             `;
             return;
         }
-
-        const selectedTransition = (bottleneckSummary?.transition_bottlenecks || []).find((item) => {
-            const transitionKey = item.transition_key || buildTransitionKey(item.from_activity, item.to_activity);
-            return transitionKey === selectedTransitionKey;
-        });
-        const transitionLabel = resolveTransitionLabel(selectedTransition, selectedTransitionKey);
 
         if (transitionCaseErrorMessage) {
             transitionCasePanel.innerHTML = `
                 <div class="result-header">
                     <div>
-                        <h2>Transition Case Drilldown</h2>
-                        <p class="result-meta">${escapeHtml(transitionLabel)}</p>
+                        <h2>${escapeHtml(drilldownConfig.title)}</h2>
+                        <p class="result-meta">${escapeHtml(drilldownConfig.meta)}</p>
                     </div>
                 </div>
                 <p class="empty-state">${escapeHtml(transitionCaseErrorMessage)}</p>
@@ -2233,31 +2387,19 @@ async function initializePatternFlowExplorer(runId) {
         transitionCasePanel.innerHTML = `
             <div class="result-header">
                 <div>
-                    <h2>Transition Case Drilldown</h2>
-                    <p class="result-meta">${escapeHtml(transitionLabel)}</p>
+                    <h2>${escapeHtml(drilldownConfig.title)}</h2>
+                    <p class="result-meta">${escapeHtml(drilldownConfig.meta)}</p>
                 </div>
             </div>
-            <p class="panel-note">上位 20 件を表示します。duration 降順です。</p>
+            <p class="panel-note">${escapeHtml(drilldownConfig.note)}</p>
             ${buildCaseDrilldownTable(transitionCaseRows)}
         `;
     }
 
     async function loadSelectedTransitionCases() {
-        if (!selectedTransitionKey) {
+        if (!selectedTransitionKey && !selectedActivity) {
             transitionCaseRows = [];
             transitionCaseErrorMessage = "";
-            renderTransitionCasePanel();
-            return;
-        }
-
-        const selectedTransition = (bottleneckSummary?.transition_bottlenecks || []).find((item) => {
-            const transitionKey = item.transition_key || buildTransitionKey(item.from_activity, item.to_activity);
-            return transitionKey === selectedTransitionKey;
-        });
-
-        if (!selectedTransition) {
-            transitionCaseRows = [];
-            transitionCaseErrorMessage = "Transition details are not available.";
             renderTransitionCasePanel();
             return;
         }
@@ -2265,26 +2407,47 @@ async function initializePatternFlowExplorer(runId) {
         transitionCaseRows = [];
         transitionCaseErrorMessage = "";
         transitionCasePanel.className = "result-panel";
+        const drilldownConfig = getDrilldownPanelConfig();
         transitionCasePanel.innerHTML = `
             <div class="result-header">
                 <div>
-                    <h2>Transition Case Drilldown</h2>
-                    <p class="result-meta">${escapeHtml(resolveTransitionLabel(selectedTransition))}</p>
+                    <h2>${escapeHtml(drilldownConfig.title)}</h2>
+                    <p class="result-meta">${escapeHtml(drilldownConfig.meta)}</p>
                 </div>
             </div>
             <p class="panel-note">読み込み中...</p>
         `;
 
         try {
-            const payload = await loadTransitionCases(
-                runId,
-                selectedTransition.from_activity,
-                selectedTransition.to_activity,
-                20,
-                selectedVariantId,
-                activeDetailFilters,
-            );
-            transitionCaseRows = Array.isArray(payload.cases) ? payload.cases : [];
+            if (selectedTransitionKey) {
+                const selectedTransition = findSelectedTransitionDetails();
+
+                if (!selectedTransition) {
+                    transitionCaseRows = [];
+                    transitionCaseErrorMessage = "Transition details are not available.";
+                    renderTransitionCasePanel();
+                    return;
+                }
+
+                const payload = await loadTransitionCases(
+                    runId,
+                    selectedTransition.from_activity,
+                    selectedTransition.to_activity,
+                    20,
+                    selectedVariantId,
+                    activeDetailFilters,
+                );
+                transitionCaseRows = Array.isArray(payload.cases) ? payload.cases : [];
+            } else if (selectedActivity) {
+                const payload = await loadActivityCases(
+                    runId,
+                    selectedActivity,
+                    20,
+                    selectedVariantId,
+                    activeDetailFilters,
+                );
+                transitionCaseRows = Array.isArray(payload.cases) ? payload.cases : [];
+            }
         } catch (error) {
             transitionCaseErrorMessage = error.message;
         }
@@ -2356,10 +2519,7 @@ async function initializePatternFlowExplorer(runId) {
             if (selectedActivity && !(bottleneckSummary.activity_bottlenecks || []).some((item) => item.activity === selectedActivity)) {
                 selectedActivity = "";
             }
-            if (selectedTransitionKey && !(bottleneckSummary.transition_bottlenecks || []).some((item) => {
-                const transitionKey = item.transition_key || buildTransitionKey(item.from_activity, item.to_activity);
-                return transitionKey === selectedTransitionKey;
-            })) {
+            if (selectedTransitionKey && !getSelectableTransitionKeys().has(selectedTransitionKey)) {
                 selectedTransitionKey = "";
                 transitionCaseRows = [];
                 transitionCaseErrorMessage = "";
@@ -2435,21 +2595,18 @@ async function initializePatternFlowExplorer(runId) {
                 transitionCaseRows = [];
                 transitionCaseErrorMessage = "";
                 saveFlowSelection(runId, selectedVariantId, selectedActivity, selectedTransitionKey);
+                syncVariantPanel();
                 syncBottleneckPanel();
+                syncImpactPanel();
                 await updateProcessMap();
-                renderTransitionCasePanel();
+                await loadSelectedTransitionCases();
             });
         });
 
         transitionBottleneckList.querySelectorAll("[data-bottleneck-kind='transition']").forEach((buttonElement) => {
             buttonElement.addEventListener("click", async () => {
                 const transitionKey = buttonElement.dataset.transitionKey || "";
-                selectedTransitionKey = selectedTransitionKey === transitionKey ? "" : transitionKey;
-                selectedActivity = "";
-                saveFlowSelection(runId, selectedVariantId, selectedActivity, selectedTransitionKey);
-                syncBottleneckPanel();
-                await updateProcessMap();
-                await loadSelectedTransitionCases();
+                await applyTransitionSelection(transitionKey);
             });
         });
 
@@ -2472,7 +2629,11 @@ async function initializePatternFlowExplorer(runId) {
         }
 
         variantList.innerHTML = buildVariantCardsHtml(variants, selectedVariantId);
-        variantResetButton.disabled = selectedVariantId === null;
+        variantResetButton.disabled = !(
+            selectedVariantId !== null
+            || Boolean(selectedActivity)
+            || Boolean(selectedTransitionKey)
+        );
         patternsSlider.disabled = selectedVariantId !== null;
         activitiesSlider.disabled = selectedVariantId !== null;
         connectionsSlider.disabled = selectedVariantId !== null;
@@ -2496,15 +2657,20 @@ async function initializePatternFlowExplorer(runId) {
     }
 
     async function applyVariantSelection(nextVariantId) {
-        selectedVariantId = nextVariantId;
-        selectedActivity = "";
-        selectedTransitionKey = "";
-        transitionCaseRows = [];
-        transitionCaseErrorMessage = "";
-        saveFlowSelection(runId, selectedVariantId, selectedActivity, selectedTransitionKey);
+        if (nextVariantId === null) {
+            resetSelectionState();
+        } else {
+            selectedVariantId = nextVariantId;
+            selectedActivity = "";
+            selectedTransitionKey = "";
+            transitionCaseRows = [];
+            transitionCaseErrorMessage = "";
+            saveFlowSelection(runId, selectedVariantId, selectedActivity, selectedTransitionKey);
+        }
         await refreshBottleneckSummary();
         syncVariantPanel();
         syncBottleneckPanel();
+        syncImpactPanel();
         await updateProcessMap();
     }
 
@@ -2663,30 +2829,7 @@ async function initializePatternFlowExplorer(runId) {
         void applyVariantSelection(null);
     });
 
-    filterForm.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        await applyFilters(readFilterFormState());
-    });
-
-    filterResetButton.addEventListener("click", async (event) => {
-        event.preventDefault();
-        await applyFilters(defaultAppliedFilters);
-    });
-
-    try {
-        const filterOptionsPayload = await loadFilterOptions(runId);
-        filterDefinitions = normalizeFilterDefinitions(
-            filterOptionsPayload.options?.filters,
-            filterOptionsPayload.column_settings,
-        );
-        defaultAppliedFilters = cloneDetailFilters(filterOptionsPayload.applied_filters || activeDetailFilters);
-        activeDetailFilters = cloneDetailFilters(filterOptionsPayload.applied_filters || activeDetailFilters);
-    } catch (error) {
-        filterDefinitions = buildDefaultFilterDefinitions();
-        defaultAppliedFilters = cloneDetailFilters(activeDetailFilters);
-    }
-
-    syncFilterControls();
+    filterDefinitions = buildDefaultFilterDefinitions(currentDetailColumnSettings);
     renderFilterSummary();
 
     try {
@@ -2717,6 +2860,7 @@ async function initializePatternFlowExplorer(runId) {
 
     syncVariantPanel();
     syncBottleneckPanel();
+    syncImpactPanel();
     renderCaseTracePanel();
     if (selectedTransitionKey) {
         await loadSelectedTransitionCases();
@@ -2857,243 +3001,7 @@ function attachProcessMapInteractions(viewportElement) {
     applyTransform();
 }
 
-function renderPatternChart(analysis, runId) {
-    const initialFlowSettings = getInitialPatternFlowSettings(analysis.row_count ?? analysis.rows.length);
-
-    if (!analysis.rows.length) {
-        chartPanel.className = "result-panel";
-        chartTitle.textContent = "処理順パターン図";
-        chartNote.textContent = "表示できるデータがありません。";
-        chartContainer.innerHTML = '<p class="empty-state">表示できるデータがありません。</p>';
-        return;
-    }
-
-    chartPanel.className = "result-panel";
-    chartTitle.textContent = "業務全体フロー図";
-    chartNote.textContent = "大量データでは初期表示を自動で絞っています。Variant を選ぶと、そのVariantに属するケースだけでフロー図を描き直します。";
-    chartContainer.innerHTML = `
-        <section class="detail-filter-panel">
-            <div class="result-header">
-                <div>
-                    <h2>フィルタ</h2>
-                    <p class="result-meta">期間と属性で絞り込み、フロー図と分析結果を再計算します。</p>
-                </div>
-            </div>
-            <form id="detail-filter-form" class="detail-filter-form">
-                <label class="detail-filter-field">
-                    <span>開始日</span>
-                    <input id="detail-filter-date-from" type="date" name="date_from">
-                </label>
-                <label class="detail-filter-field">
-                    <span>終了日</span>
-                    <input id="detail-filter-date-to" type="date" name="date_to">
-                </label>
-                <label class="detail-filter-field">
-                    <span>部署</span>
-                    <select id="detail-filter-department" name="department">
-                        <option value="">全て</option>
-                    </select>
-                </label>
-                <label class="detail-filter-field">
-                    <span>チャネル</span>
-                    <select id="detail-filter-channel" name="channel">
-                        <option value="">全て</option>
-                    </select>
-                </label>
-                <label class="detail-filter-field">
-                    <span>カテゴリ</span>
-                    <select id="detail-filter-category" name="category">
-                        <option value="">全て</option>
-                    </select>
-                </label>
-                <div class="detail-filter-actions">
-                    <button id="detail-filter-apply" type="submit" class="detail-link process-explorer-button process-explorer-button--primary">適用</button>
-                    <button id="detail-filter-reset" type="button" class="ghost-link process-explorer-button">リセット</button>
-                </div>
-            </form>
-            <div class="detail-filter-meta">
-                <p id="detail-filter-summary" class="panel-note">フィルタ未適用</p>
-                <p id="detail-filter-counts" class="panel-note">対象ケース数 0 / 対象イベント数 0</p>
-            </div>
-        </section>
-        <div class="process-explorer-shell">
-            <div class="process-explorer-map-panel">
-                <div id="process-map-viewport" class="process-map-viewport"></div>
-            </div>
-            <aside class="process-explorer-sidebar">
-                <div class="process-explorer-export">
-                    <button id="process-map-export-svg" type="button" class="detail-link process-explorer-button">SVG保存</button>
-                    <button id="process-map-export-png" type="button" class="detail-link process-explorer-button">PNG保存</button>
-                </div>
-                <section class="process-explorer-control">
-                    <div class="process-explorer-control-head">
-                        <span>Patterns</span>
-                        <strong id="process-map-patterns-value">${initialFlowSettings.patterns}%</strong>
-                    </div>
-                    <div class="process-explorer-slider-wrap">
-                        <span class="process-explorer-slider-top">100%</span>
-                        <input
-                            id="process-map-patterns-slider"
-                            class="process-explorer-slider"
-                            type="range"
-                            min="10"
-                            max="100"
-                            step="10"
-                            value="${initialFlowSettings.patterns}"
-                        >
-                        <span class="process-explorer-slider-bottom">10%</span>
-                    </div>
-                    <p id="process-map-patterns-meta" class="process-explorer-meta"></p>
-                </section>
-                <section class="process-explorer-control">
-                    <div class="process-explorer-control-head">
-                        <span>Activities</span>
-                        <strong id="process-map-activities-value">${initialFlowSettings.activities}%</strong>
-                    </div>
-                    <div class="process-explorer-slider-wrap">
-                        <span class="process-explorer-slider-top">100%</span>
-                        <input
-                            id="process-map-activities-slider"
-                            class="process-explorer-slider"
-                            type="range"
-                            min="10"
-                            max="100"
-                            step="10"
-                            value="${initialFlowSettings.activities}"
-                        >
-                        <span class="process-explorer-slider-bottom">10%</span>
-                    </div>
-                    <p id="process-map-activities-meta" class="process-explorer-meta"></p>
-                </section>
-                <section class="process-explorer-control">
-                    <div class="process-explorer-control-head">
-                        <span>Connections</span>
-                        <strong id="process-map-connections-value">${initialFlowSettings.connections}%</strong>
-                    </div>
-                    <div class="process-explorer-slider-wrap">
-                        <span class="process-explorer-slider-top">100%</span>
-                        <input
-                            id="process-map-connections-slider"
-                            class="process-explorer-slider"
-                            type="range"
-                            min="10"
-                            max="100"
-                            step="10"
-                            value="${initialFlowSettings.connections}"
-                        >
-                        <span class="process-explorer-slider-bottom">10%</span>
-                    </div>
-                    <p id="process-map-connections-meta" class="process-explorer-meta"></p>
-                </section>
-                <section class="process-explorer-control">
-                    <div class="process-explorer-control-head">
-                        <span>Labels</span>
-                        <strong id="process-map-labels-value">${initialFlowSettings.labels}%</strong>
-                    </div>
-                    <div class="process-explorer-slider-wrap">
-                        <span class="process-explorer-slider-top">100%</span>
-                        <input
-                            id="process-map-labels-slider"
-                            class="process-explorer-slider"
-                            type="range"
-                            min="0"
-                            max="100"
-                            step="10"
-                            value="${initialFlowSettings.labels}"
-                        >
-                        <span class="process-explorer-slider-bottom">0%</span>
-                    </div>
-                    <p id="process-map-labels-meta" class="process-explorer-meta"></p>
-                </section>
-                ${renderProcessHeatLegend()}
-            </aside>
-        </div>
-        <section class="variant-panel">
-            <div class="result-header variant-panel-header">
-                <div>
-                    <h3>Variant Analysis</h3>
-                    <p class="result-meta">Top 10 Variant を表示します。クリックすると対象 Variant のケースだけでフロー図を更新します。</p>
-                </div>
-                <button id="variant-reset-button" type="button" class="ghost-link process-explorer-button">全体表示</button>
-            </div>
-            <div class="variant-panel-summary">
-                <article id="variant-coverage-meta" class="variant-coverage-card">
-                    <span class="variant-coverage-label">Coverage</span>
-                    <strong class="variant-coverage-value">計算中...</strong>
-                </article>
-                <article class="variant-selection-card">
-                    <p id="variant-selection-title" class="variant-selection-title">全体表示中</p>
-                    <p id="variant-selection-meta" class="panel-note">Variant を選択すると、その Variant に属するケースだけでフロー図を再描画します。</p>
-                    <p id="variant-selection-sequence" class="variant-selection-sequence">現在は全ケースを使ったフロー図を表示しています。</p>
-                </article>
-            </div>
-            <div id="variant-list" class="variant-list"></div>
-        </section>
-        <section class="bottleneck-panel">
-            <div class="result-header variant-panel-header">
-                <div>
-                    <h3>Bottleneck Analysis</h3>
-                    <p class="result-meta">Top 5 waits ranked by average time to the next event.</p>
-                </div>
-            </div>
-            <div class="bottleneck-grid">
-                <article class="bottleneck-group">
-                    <div class="bottleneck-group-head">
-                        <h4>Activity Bottlenecks</h4>
-                        <p class="panel-note">Average wait by activity.</p>
-                    </div>
-                    <div id="activity-bottleneck-list" class="bottleneck-list">
-                        <p class="panel-note">Loading...</p>
-                    </div>
-                </article>
-                <article class="bottleneck-group">
-                    <div class="bottleneck-group-head">
-                        <h4>Transition Bottlenecks</h4>
-                        <p class="panel-note">Average wait by transition.</p>
-                    </div>
-                    <div id="transition-bottleneck-list" class="bottleneck-list">
-                        <p class="panel-note">Loading...</p>
-                    </div>
-                </article>
-            </div>
-        </section>
-        <section id="transition-case-panel" class="result-panel">
-            <div class="result-header">
-                <div>
-                    <h2>Transition Case Drilldown</h2>
-                    <p class="result-meta">Select a transition bottleneck to inspect the slowest cases.</p>
-                </div>
-            </div>
-            <p class="empty-state">No transition selected.</p>
-        </section>
-        <section id="case-trace-panel" class="result-panel">
-            <div class="result-header">
-                <div>
-                    <h2>Case ID 検索 / ケース追跡</h2>
-                    <p class="result-meta">run 全体から Case ID を検索し、通過イベントと待ち時間を確認します。</p>
-                </div>
-            </div>
-            <form id="case-trace-form" class="case-trace-form">
-                <input
-                    id="case-trace-input"
-                    class="case-trace-input"
-                    type="text"
-                    name="case_id"
-                    placeholder="Case ID を入力"
-                    autocomplete="off"
-                    spellcheck="false"
-                >
-                <button type="submit" class="detail-link process-explorer-button process-explorer-button--primary">検索</button>
-            </form>
-            <div id="case-trace-result" class="case-trace-result">
-                <p class="empty-state">Case ID を入力すると、ケースの通過順序と待ち時間を表示します。</p>
-            </div>
-        </section>
-    `;
-    return initializePatternFlowExplorer(runId);
-}
-
-function renderPatternChart(analysis, runId) {
+function renderPatternChart(analysis, runId, impact = null) {
     const initialFlowSettings = getInitialPatternFlowSettings(analysis.row_count ?? analysis.rows.length);
 
     if (!analysis.rows.length) {
@@ -3111,44 +3019,12 @@ function renderPatternChart(analysis, runId) {
         <section class="detail-filter-panel">
             <div class="result-header">
                 <div>
-                    <h2>フィルタ</h2>
-                    <p class="result-meta">期間と任意のグループ/カテゴリー条件で絞り込み、フロー図と分析結果を再計算します。</p>
+                    <h2>分析対象条件</h2>
+                    <p class="result-meta">TOP画面で設定した分析対象条件が、この画面のフロー図と分析結果にも適用されています。</p>
                 </div>
             </div>
-            <form id="detail-filter-form" class="detail-filter-form">
-                <label class="detail-filter-field">
-                    <span>開始日</span>
-                    <input id="detail-filter-date-from" type="date" name="date_from">
-                </label>
-                <label class="detail-filter-field">
-                    <span>終了日</span>
-                    <input id="detail-filter-date-to" type="date" name="date_to">
-                </label>
-                <label class="detail-filter-field">
-                    <span id="detail-filter-label-1">グループ/カテゴリー フィルター①</span>
-                    <select id="detail-filter-value-1" name="filter_value_1">
-                        <option value="">全て</option>
-                    </select>
-                </label>
-                <label class="detail-filter-field">
-                    <span id="detail-filter-label-2">グループ/カテゴリー フィルター②</span>
-                    <select id="detail-filter-value-2" name="filter_value_2">
-                        <option value="">全て</option>
-                    </select>
-                </label>
-                <label class="detail-filter-field">
-                    <span id="detail-filter-label-3">グループ/カテゴリー フィルター③</span>
-                    <select id="detail-filter-value-3" name="filter_value_3">
-                        <option value="">全て</option>
-                    </select>
-                </label>
-                <div class="detail-filter-actions">
-                    <button id="detail-filter-apply" type="submit" class="detail-link process-explorer-button process-explorer-button--primary">適用</button>
-                    <button id="detail-filter-reset" type="button" class="ghost-link process-explorer-button">リセット</button>
-                </div>
-            </form>
             <div class="detail-filter-meta">
-                <p id="detail-filter-summary" class="panel-note">フィルタ未適用</p>
+                <p id="detail-filter-summary" class="panel-note">分析対象条件未適用</p>
                 <p id="detail-filter-counts" class="panel-note">対象ケース数 0 / 対象イベント数 0</p>
             </div>
         </section>
@@ -3293,14 +3169,15 @@ function renderPatternChart(analysis, runId) {
                 </article>
             </div>
         </section>
+        ${buildImpactSectionHtml(impact)}
         <section id="transition-case-panel" class="result-panel">
             <div class="result-header">
                 <div>
-                    <h2>Transition Case Drilldown</h2>
-                    <p class="result-meta">遷移別ボトルネックを選択すると、時間の長いケースを表示します。</p>
+                    <h2>Bottleneck Case Drilldown</h2>
+                    <p class="result-meta">Activity または Transition のボトルネックを選択すると、時間の長いケースを表示します。</p>
                 </div>
             </div>
-            <p class="empty-state">遷移別ボトルネックを選択すると、時間の長いケースを表示します。</p>
+            <p class="empty-state">Activity または Transition のボトルネックを選択すると、時間の長いケースを表示します。</p>
         </section>
         <section id="case-trace-panel" class="result-panel">
             <div class="result-header">
@@ -3326,10 +3203,10 @@ function renderPatternChart(analysis, runId) {
             </div>
         </section>
     `;
-    return initializePatternFlowExplorer(runId);
+    return initializePatternFlowExplorer(runId, impact);
 }
 
-async function renderChart(analysis, runId) {
+async function renderChart(analysis, runId, detailData = null) {
     chartPanel.className = "result-panel hidden";
     chartContainer.innerHTML = "";
 
@@ -3344,15 +3221,20 @@ async function renderChart(analysis, runId) {
     }
 
     if (analysisKey === "pattern") {
-        await renderPatternChart(analysis, runId);
+        await renderPatternChart(analysis, runId, detailData?.impact || null);
     }
 }
+
+// -----------------------------------------------------------------------------
+// Page bootstrapping
+// -----------------------------------------------------------------------------
 
 async function renderDetailPage() {
     const latestResult = loadLatestResult();
     const runId = getRunId(latestResult);
     let detailRequestVersion = 0;
     activeDetailFilters = { ...DEFAULT_DETAIL_FILTERS };
+    currentDetailColumnSettings = {};
     detailPageAnalysisLoader = null;
 
     if (!analysisKey) {
@@ -3376,6 +3258,7 @@ async function renderDetailPage() {
         }
 
         activeDetailFilters = cloneDetailFilters(detailData.applied_filters || DEFAULT_DETAIL_FILTERS);
+        currentDetailColumnSettings = detailData.column_settings || {};
 
         const renderAnalysisPage = async (rowOffset) => {
             const currentVersion = detailRequestVersion + 1;
@@ -3410,7 +3293,7 @@ async function renderDetailPage() {
         detailPageTitle.textContent = analysis.analysis_name;
         detailPageCopy.textContent = "指定した分析実行の全件結果を表示しています。";
         renderSummary(detailData, analysis);
-        await renderChart(analysis, runId);
+        await renderChart(analysis, runId, detailData);
         renderResult(analysis, runId, renderAnalysisPage);
         hideStatus();
     } catch (error) {

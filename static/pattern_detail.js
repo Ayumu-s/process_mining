@@ -1,5 +1,3 @@
-const STORAGE_KEY = "processMiningLastResult";
-
 const patternIndex = Number(document.body.dataset.patternIndex);
 const statusPanel = document.getElementById("pattern-status-panel");
 const summaryPanel = document.getElementById("pattern-summary-panel");
@@ -15,70 +13,28 @@ let currentRunId = "";
 let drilldownRows = [];
 let drilldownErrorMessage = "";
 
-function setStatus(message, type = "info") {
-    statusPanel.textContent = message;
-    statusPanel.className = `status-panel ${type}`;
-}
+// -----------------------------------------------------------------------------
+// Shared utilities
+// -----------------------------------------------------------------------------
+const sharedUi = window.ProcessMiningShared;
+const {
+    buildTable,
+    buildTransitionKey,
+    escapeHtml,
+    fetchJson,
+    formatDateTime,
+    formatDurationSeconds,
+    formatNumber,
+    getRunId,
+    loadLatestResult,
+} = sharedUi;
+const setStatus = (message, type = "info") => sharedUi.setStatus(statusPanel, message, type);
+const hideStatus = () => sharedUi.hideStatus(statusPanel);
 
-function hideStatus() {
-    statusPanel.className = "status-panel hidden";
-    statusPanel.textContent = "";
-}
-
-function escapeHtml(value) {
-    return String(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
-}
-
-function loadLatestResult() {
-    const storedValue = sessionStorage.getItem(STORAGE_KEY);
-
-    if (!storedValue) {
-        return null;
-    }
-
-    try {
-        return JSON.parse(storedValue);
-    } catch {
-        sessionStorage.removeItem(STORAGE_KEY);
-        return null;
-    }
-}
-
-function formatNumber(value) {
-    return Number(value || 0).toLocaleString("ja-JP", {
-        maximumFractionDigits: 2,
-    });
-}
-
-function formatDateTime(value) {
-    if (!value) {
-        return "";
-    }
-
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) {
-        return escapeHtml(value);
-    }
-
-    return date.toLocaleString("ja-JP");
-}
-
-function formatDurationSeconds(value) {
-    return Number(value || 0).toLocaleString("ja-JP", {
-        maximumFractionDigits: 2,
-    });
-}
-
-function buildTransitionKey(fromActivity, toActivity) {
-    return `${fromActivity}__TO__${toActivity}`;
-}
-
-async function loadPatternTransitionCases(runId, fromActivity, toActivity, limit = 20) {
+// -----------------------------------------------------------------------------
+// Pattern detail API helpers
+// -----------------------------------------------------------------------------
+function buildPatternTransitionCasesApiUrl(runId, fromActivity, toActivity, limit = 20) {
     const params = new URLSearchParams({
         from_activity: String(fromActivity || ""),
         to_activity: String(toActivity || ""),
@@ -86,69 +42,30 @@ async function loadPatternTransitionCases(runId, fromActivity, toActivity, limit
         limit: String(Math.max(0, Number(limit) || 0)),
     });
 
-    const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/transition-cases?${params.toString()}`);
-    const payload = await response.json();
-
-    if (!response.ok) {
-        throw new Error(payload.detail || payload.error || "Transition cases could not be loaded.");
-    }
-
-    return payload;
+    return `/api/runs/${encodeURIComponent(runId)}/transition-cases?${params.toString()}`;
 }
 
-function buildTable(rows) {
-    if (!rows.length) {
-        return '<p class="empty-state">表示できるデータがありません。</p>';
-    }
-
-    const headers = Object.keys(rows[0]);
-    const headHtml = headers
-        .map((header) => `<th>${escapeHtml(header)}</th>`)
-        .join("");
-
-    const bodyHtml = rows
-        .map((row) => {
-            const cells = headers
-                .map((header) => {
-                    const cellValue = escapeHtml(row[header]);
-                    const isWideHeader = (
-                        header === "処理順パターン" || 
-                        header === "アクティビティ名" || 
-                        header === "アクティビティ" ||
-                        header === "前処理アクティビティ名" ||
-                        header === "後処理アクティビティ名"
-                    );
-
-                    if (isWideHeader) {
-                        return `
-                            <td class="table-cell--wide">
-                                <div class="cell-scroll-wrapper">${cellValue}</div>
-                            </td>
-                        `;
-                    }
-
-                    return `<td>${cellValue}</td>`;
-                })
-                .join("");
-            return `<tr>${cells}</tr>`;
-        })
-        .join("");
-
-    return `
-        <div class="table-wrap">
-            <table>
-                <thead><tr>${headHtml}</tr></thead>
-                <tbody>${bodyHtml}</tbody>
-            </table>
-        </div>
-    `;
+function loadPatternTransitionCases(runId, fromActivity, toActivity, limit = 20) {
+    return fetchJson(
+        buildPatternTransitionCasesApiUrl(runId, fromActivity, toActivity, limit),
+        "Transition cases could not be loaded."
+    );
 }
 
-function getRunId(latestResult) {
-    const params = new URLSearchParams(window.location.search);
-    return params.get("run_id") || latestResult?.run_id || "";
+function buildPatternDetailApiUrl(runId) {
+    return `/api/runs/${encodeURIComponent(runId)}/patterns/${encodeURIComponent(String(patternIndex))}`;
 }
 
+function loadPatternDetail(runId) {
+    return fetchJson(
+        buildPatternDetailApiUrl(runId),
+        "処理順パターン詳細の取得に失敗しました。"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Transition selection helpers
+// -----------------------------------------------------------------------------
 function getStepMetrics(detail) {
     return Array.isArray(detail?.step_metrics) ? detail.step_metrics : [];
 }
@@ -249,6 +166,9 @@ function bindTransitionSelection(detail) {
     });
 }
 
+// -----------------------------------------------------------------------------
+// Pattern detail panel renderers
+// -----------------------------------------------------------------------------
 function renderSummary(detail) {
     const bottleneckLabel = detail.bottleneck_transition
         ? detail.bottleneck_transition.transition_label
@@ -284,71 +204,6 @@ function renderPatternSteps(patternSteps) {
                     <span>${escapeHtml(step)}</span>
                 </div>
             `).join("")}
-        </div>
-    `;
-}
-
-function renderBottleneckPanelLegacy(detail) {
-    const stepMetrics = detail.step_metrics || [];
-    const maxAverage = Math.max(...stepMetrics.map((row) => Number(row.avg_duration_min) || 0), 1);
-    const bottleneck = detail.bottleneck_transition;
-
-    const calloutHtml = bottleneck
-        ? `
-            <div class="bottleneck-callout">
-                <strong>最も待ち時間が大きい遷移: ${escapeHtml(bottleneck.transition_label)}</strong>
-                <p class="panel-note">
-                    平均 ${escapeHtml(formatNumber(bottleneck.avg_duration_min))} 分、
-                    中央値 ${escapeHtml(formatNumber(bottleneck.median_duration_min))} 分、
-                    最大 ${escapeHtml(formatNumber(bottleneck.max_duration_min))} 分、
-                    全待ち時間の ${escapeHtml(formatNumber(bottleneck.wait_share_pct))}% を占めています。
-                </p>
-            </div>
-        `
-        : `
-            <div class="bottleneck-callout">
-                <strong>ボトルネックを算出できませんでした。</strong>
-            </div>
-        `;
-
-    const barsHtml = stepMetrics.map((row) => {
-        const isBottleneck = bottleneck && row.sequence_no === bottleneck.sequence_no;
-        const widthPercent = maxAverage > 0
-            ? Math.max(6, (Number(row.avg_duration_min) / maxAverage) * 100)
-            : 0;
-
-        return `
-            <article class="bottleneck-bar-card${isBottleneck ? " bottleneck-bar-card--highlight" : ""}">
-                <div class="bottleneck-bar-head">
-                    <p class="bottleneck-bar-label">${escapeHtml(row.transition_label)}</p>
-                    <span class="bottleneck-bar-value">平均 ${escapeHtml(formatNumber(row.avg_duration_min))} 分</span>
-                </div>
-                <div class="bottleneck-bar-track">
-                    <div class="bottleneck-bar-fill" style="width: ${widthPercent}%"></div>
-                </div>
-                <p class="bottleneck-bar-meta">
-                    ケース数 ${escapeHtml(row.case_count)} /
-                    中央値 ${escapeHtml(formatNumber(row.median_duration_min))} 分 /
-                    最大 ${escapeHtml(formatNumber(row.max_duration_min))} 分 /
-                    待ち時間比率 ${escapeHtml(formatNumber(row.wait_share_pct))}%
-                </p>
-            </article>
-        `;
-    }).join("");
-
-    bottleneckPanel.className = "result-panel";
-    bottleneckPanel.innerHTML = `
-        <div class="result-header">
-            <div>
-                <h2>ボトルネック確認</h2>
-                <p class="result-meta">このパターンの各遷移で、次工程に進むまでの待ち時間を比較しています。</p>
-            </div>
-        </div>
-        <p class="panel-note">${escapeHtml(detail.pattern)}</p>
-        ${renderPatternSteps(detail.pattern_steps)}
-        ${calloutHtml}
-        <div class="bottleneck-bars">
-            ${barsHtml}
         </div>
     `;
 }
@@ -552,6 +407,10 @@ async function renderDrilldownPanel(detail) {
     `;
 }
 
+// -----------------------------------------------------------------------------
+// Page bootstrapping
+// -----------------------------------------------------------------------------
+
 async function renderPatternDetailPage() {
     const latestResult = loadLatestResult();
     const runId = getRunId(latestResult);
@@ -570,12 +429,7 @@ async function renderPatternDetailPage() {
     setStatus("処理順パターンの詳細を読み込んでいます...", "info");
 
     try {
-        const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/patterns/${encodeURIComponent(String(patternIndex))}`);
-        const detail = await response.json();
-
-        if (!response.ok) {
-            throw new Error(detail.detail || detail.error || "処理順パターン詳細の取得に失敗しました。");
-        }
+        const detail = await loadPatternDetail(runId);
 
         document.title = `${detail.analysis_name} 詳細 | Process Mining Workbench`;
         pageTitle.textContent = `処理順パターン ${patternIndex + 1} の詳細`;

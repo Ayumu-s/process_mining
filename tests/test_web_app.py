@@ -64,9 +64,20 @@ class WebAppTestCase(unittest.TestCase):
 
         payload = detail_response.json()
         frequency_analysis = payload["analyses"]["frequency"]
+        dashboard = payload["dashboard"]
+        impact = payload["impact"]
 
         self.assertGreater(frequency_analysis["row_count"], 0)
         self.assertEqual(frequency_analysis["row_count"], len(frequency_analysis["rows"]))
+        self.assertTrue(dashboard["has_data"])
+        self.assertGreater(dashboard["total_cases"], 0)
+        self.assertGreater(dashboard["total_records"], 0)
+        self.assertGreater(dashboard["activity_type_count"], 0)
+        self.assertIn("top10_variant_coverage_pct", dashboard)
+        self.assertIn("top_bottleneck_transition_label", dashboard)
+        self.assertTrue(impact["has_data"])
+        self.assertTrue(impact["rows"])
+        self.assertIn("impact_score", impact["rows"][0])
 
     def test_analysis_detail_api_supports_row_limit(self):
         analyze_response = self.client.post(
@@ -271,6 +282,29 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(1020.0, payload["cases"][0]["duration_sec"])
         self.assertEqual("17m 0s", payload["cases"][0]["duration_text"])
 
+    def test_activity_case_drilldown_api_returns_slowest_cases(self):
+        analyze_response = self.client.post(
+            "/api/analyze",
+            data={"analysis_keys": ["pattern"]},
+        )
+        self.assertEqual(200, analyze_response.status_code)
+
+        run_id = analyze_response.json()["run_id"]
+        response = self.client.get(
+            f"/api/runs/{run_id}/activity-cases"
+            "?activity=確認&limit=5"
+        )
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertEqual(run_id, payload["run_id"])
+        self.assertEqual("確認", payload["activity"])
+        self.assertEqual(5, payload["returned_case_count"])
+        self.assertEqual(5, len(payload["cases"]))
+        self.assertEqual("C002", payload["cases"][0]["case_id"])
+        self.assertEqual(1020.0, payload["cases"][0]["duration_sec"])
+        self.assertEqual("差戻し", payload["cases"][0]["next_activity"])
+
     def test_case_trace_api_returns_case_timeline(self):
         analyze_response = self.client.post(
             "/api/analyze",
@@ -369,6 +403,11 @@ class WebAppTestCase(unittest.TestCase):
         payload = response.json()
         self.assertEqual(2, payload["case_count"])
         self.assertEqual(3, payload["event_count"])
+        self.assertEqual(2, payload["dashboard"]["total_cases"])
+        self.assertEqual(3, payload["dashboard"]["total_records"])
+        self.assertTrue(payload["impact"]["rows"])
+        self.assertEqual(3, payload["root_cause"]["configured_group_count"])
+        self.assertTrue(payload["root_cause"]["groups"][0]["rows"])
         self.assertEqual("Sales", payload["applied_filters"]["filter_value_1"])
         self.assertEqual("2024-01-02", payload["applied_filters"]["date_from"])
 
@@ -443,7 +482,8 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual("case_id", payload["default_selection"]["case_id_column"])
         self.assertEqual("case_id", payload["column_settings"]["case_id_column"])
         self.assertEqual(3, len(payload["column_settings"]["filters"]))
-        self.assertIn("diagnostics", payload)
+        self.assertEqual(3, len(payload["filter_options"]["filters"]))
+        self.assertIsNone(payload["diagnostics"])
 
     def test_csv_headers_api_returns_uploaded_headers(self):
         csv_bytes = "申請ID,処理名,日時\nA001,受付,2024-01-01 09:00:00\n".encode("utf-8")
@@ -458,6 +498,28 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual("custom_log.csv", payload["source_file_name"])
         self.assertEqual(["申請ID", "処理名", "日時"], payload["headers"])
         self.assertEqual("", payload["default_selection"]["case_id_column"])
+
+    def test_csv_headers_api_returns_filter_values_without_diagnostics(self):
+        csv_bytes = "\n".join(
+            [
+                "case_no,step_name,event_at,division",
+                "A001,Submit,2024-01-01 09:00:00,Sales",
+                "A002,Approve,2024-01-02 10:00:00,HR",
+                "A003,Review,2024-01-03 11:00:00,Sales",
+            ]
+        ).encode("utf-8")
+
+        response = self.client.post(
+            "/api/csv-headers",
+            files={"csv_file": ("custom_log.csv", BytesIO(csv_bytes), "text/csv")},
+            data={"filter_column_1": "division"},
+        )
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertIsNone(payload["diagnostics"])
+        self.assertEqual("division", payload["filter_options"]["filters"][0]["column_name"])
+        self.assertEqual(["HR", "Sales"], payload["filter_options"]["filters"][0]["options"])
 
     def test_analyze_api_rejects_duplicate_selected_columns(self):
         response = self.client.post(
@@ -475,19 +537,37 @@ class WebAppTestCase(unittest.TestCase):
         self.assertIn("異なる列", payload["error"])
 
 
-    def test_csv_headers_api_returns_uploaded_headers(self):
-        csv_bytes = "case_no,step_name,event_at,division\nA001,Submit,2024-01-01 09:00:00,Sales\n".encode("utf-8")
+    def test_log_diagnostics_api_returns_uploaded_summary(self):
+        csv_bytes = "\n".join(
+            [
+                "case_no,step_name,event_at,division",
+                "A001,Submit,2024-01-01 09:00:00,Sales",
+                "A001,Submit,2024-01-01 09:00:00,Sales",
+                "A002,Approve,2024-01-02 10:00:00,HR",
+            ]
+        ).encode("utf-8")
 
         response = self.client.post(
-            "/api/csv-headers",
+            "/api/log-diagnostics",
             files={"csv_file": ("custom_log.csv", BytesIO(csv_bytes), "text/csv")},
+            data={
+                "case_id_column": "case_no",
+                "activity_column": "step_name",
+                "timestamp_column": "event_at",
+            },
         )
 
         self.assertEqual(200, response.status_code)
         payload = response.json()
         self.assertEqual("custom_log.csv", payload["source_file_name"])
         self.assertEqual(["case_no", "step_name", "event_at", "division"], payload["headers"])
-        self.assertEqual(1, payload["diagnostics"]["event_count"])
+        self.assertEqual(3, payload["diagnostics"]["record_count"])
+        self.assertEqual(2, payload["diagnostics"]["activity_type_count"])
+        self.assertEqual(3, payload["diagnostics"]["event_count"])
+        self.assertEqual(1, payload["diagnostics"]["duplicate_row_count"])
+        self.assertEqual("あり", payload["diagnostics"]["duplicate_status"])
+        self.assertEqual(2, payload["diagnostics"]["deduplicated_record_count"])
+        self.assertEqual(0.3333, payload["diagnostics"]["duplicate_rate"])
         self.assertEqual("", payload["default_selection"]["case_id_column"])
 
 
