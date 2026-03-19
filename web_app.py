@@ -1,5 +1,6 @@
 ﻿from collections import OrderedDict
 from io import BytesIO
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
@@ -11,6 +12,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from openpyxl import Workbook
+from openpyxl.styles import Font
 
 from 共通スクリプト.Excel出力.excel_exporter import build_excel_bytes
 from 共通スクリプト.analysis_service import (
@@ -24,6 +27,7 @@ from 共通スクリプト.analysis_service import (
     create_impact_summary,
     create_log_diagnostics,
     create_pattern_index_entries,
+    create_rule_based_insights,
     create_root_cause_summary,
     create_transition_case_drilldown,
     filter_prepared_df,
@@ -47,9 +51,68 @@ MAX_STORED_RUNS = 5
 PREVIEW_ROW_COUNT = 10
 PROCESS_FLOW_PATTERN_CAP = 300
 MAX_PATTERN_FLOW_CACHE = 24
-FILTER_PARAM_NAMES = ("date_from", "date_to", "filter_value_1", "filter_value_2", "filter_value_3")
+FILTER_PARAM_NAMES = (
+    "date_from",
+    "date_to",
+    "filter_value_1",
+    "filter_value_2",
+    "filter_value_3",
+    "activity_mode",
+    "activity_values",
+)
 FILTER_COLUMN_NAMES = ("filter_column_1", "filter_column_2", "filter_column_3")
 FILTER_LABEL_NAMES = ("filter_label_1", "filter_label_2", "filter_label_3")
+REPORT_SHEET_NAMES = {
+    "summary": "サマリー",
+    "frequency": "頻度分析",
+    "pattern": "処理順パターン分析",
+    "variant": "Variant分析",
+    "bottleneck": "ボトルネック分析",
+    "impact": "改善インパクト分析",
+    "drilldown": "ドリルダウン",
+    "case_trace": "ケース追跡",
+}
+REPORT_HEADER_LABELS = {
+    "run_id": "実行ID",
+    "analysis_key": "分析種別",
+    "analysis_name": "分析名",
+    "source_file_name": "元ファイル名",
+    "analysis_executed_at": "分析実行日時",
+    "exported_at": "出力日時",
+    "case_count": "対象ケース数",
+    "event_count": "対象イベント数",
+    "applied_filters": "適用フィルタ条件",
+    "selected_variant": "選択中Variant",
+    "selected_activity": "選択中Activity",
+    "selected_transition": "選択中遷移",
+    "selected_case_id": "選択中Case ID",
+    "rank": "順位",
+    "variant_id": "Variant ID",
+    "count": "件数",
+    "case_count": "対象ケース数",
+    "ratio": "比率",
+    "pattern": "パターン",
+    "activity_count": "Activity数",
+    "avg_case_duration": "平均所要時間",
+    "avg_duration": "平均待ち時間",
+    "avg_duration_text": "平均待ち時間",
+    "median_duration_text": "中央値待ち時間",
+    "max_duration": "最大待ち時間",
+    "max_duration_text": "最大待ち時間",
+    "impact_score": "改善インパクト",
+    "impact_share_pct": "改善インパクト比率(%)",
+    "case_id": "ケースID",
+    "from_time": "開始時刻",
+    "to_time": "終了時刻",
+    "activity": "Activity",
+    "next_activity": "次Activity",
+    "transition": "遷移",
+    "transition_label": "遷移",
+    "duration_text": "所要時間",
+    "total_duration": "総所要時間",
+    "start_time": "開始時刻",
+    "end_time": "終了時刻",
+}
 
 DEFAULT_HEADERS = {
     "case_id_column": "case_id",
@@ -151,6 +214,7 @@ def save_run_data(
 ):
     run_id = uuid4().hex
     RUN_STORE[run_id] = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "source_file_name": source_file_name,
         "selected_analysis_keys": selected_analysis_keys,
         "prepared_df": prepared_df,
@@ -164,6 +228,7 @@ def save_run_data(
         "dashboard_cache": {},
         "root_cause_cache": {},
         "impact_cache": {},
+        "insights_cache": {},
         "analysis_cache": {},
         "filter_options": None,
     }
@@ -301,8 +366,12 @@ def build_variant_response_item(variant_item):
     return {
         "variant_id": variant_item["variant_id"],
         "activities": variant_item["activities"],
+        "activity_count": variant_item.get("activity_count", len(variant_item["activities"])),
+        "pattern": variant_item.get("pattern", ""),
         "count": variant_item["count"],
         "ratio": variant_item["ratio"],
+        "avg_case_duration_sec": variant_item.get("avg_case_duration_sec", 0.0),
+        "avg_case_duration_text": variant_item.get("avg_case_duration_text", "0s"),
     }
 
 
@@ -314,6 +383,364 @@ def build_variant_coverage_payload(total_case_count, variant_items):
         "total_case_count": int(total_case_count),
         "ratio": round(covered_case_count / total_case_count, 4) if total_case_count else 0.0,
     }
+
+
+def sanitize_workbook_sheet_name(sheet_name):
+    invalid_characters = set('[]:*?/\\')
+    normalized_name = "".join("_" if character in invalid_characters else character for character in str(sheet_name or "").strip())
+    normalized_name = normalized_name or "Sheet"
+    return normalized_name[:31]
+
+
+def normalize_excel_cell_value(value):
+    if value is None:
+        return ""
+
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+
+    if isinstance(value, (list, tuple, set)):
+        return " / ".join(str(item) for item in value)
+
+    if isinstance(value, dict):
+        return ", ".join(f"{key}={normalize_excel_cell_value(item_value)}" for key, item_value in value.items())
+
+    try:
+        if pd.isna(value):
+            return ""
+    except TypeError:
+        pass
+
+    return value
+
+
+def autosize_worksheet_columns(worksheet, min_width=10, max_width=48):
+    for column_cells in worksheet.columns:
+        column_letter = column_cells[0].column_letter
+        measured_width = max(
+            len(str(normalize_excel_cell_value(cell.value)))
+            for cell in column_cells
+        ) if column_cells else min_width
+        worksheet.column_dimensions[column_letter].width = max(min_width, min(max_width, measured_width + 2))
+
+
+def append_table_to_worksheet(worksheet, title, rows, headers, start_row=1):
+    current_row = start_row
+    worksheet.cell(row=current_row, column=1, value=title).font = Font(bold=True)
+    current_row += 1
+
+    for column_index, header in enumerate(headers, start=1):
+        worksheet.cell(row=current_row, column=column_index, value=header).font = Font(bold=True)
+    current_row += 1
+
+    if not rows:
+        worksheet.cell(row=current_row, column=1, value="表示できるデータがありません。")
+        return current_row + 2
+
+    for row in rows:
+        for column_index, header in enumerate(headers, start=1):
+            worksheet.cell(
+                row=current_row,
+                column=column_index,
+                value=normalize_excel_cell_value(row.get(header)),
+            )
+        current_row += 1
+
+    return current_row + 1
+
+
+def append_key_value_rows(worksheet, title, rows, start_row=1):
+    current_row = start_row
+    worksheet.cell(row=current_row, column=1, value=title).font = Font(bold=True)
+    current_row += 1
+    worksheet.cell(row=current_row, column=1, value="項目").font = Font(bold=True)
+    worksheet.cell(row=current_row, column=2, value="値").font = Font(bold=True)
+    current_row += 1
+
+    for label, value in rows:
+        worksheet.cell(row=current_row, column=1, value=label)
+        worksheet.cell(row=current_row, column=2, value=normalize_excel_cell_value(value))
+        current_row += 1
+
+    return current_row + 1
+
+
+def build_ranked_rows(rows, rank_key="rank"):
+    ranked_rows = []
+    for index, row in enumerate(rows, start=1):
+        ranked_rows.append({
+            rank_key: index,
+            **row,
+        })
+    return ranked_rows
+
+
+def localize_report_headers(headers):
+    return [REPORT_HEADER_LABELS.get(header, header) for header in headers]
+
+
+def localize_report_rows(rows, headers):
+    localized_headers = localize_report_headers(headers)
+    localized_rows = []
+
+    for row in rows:
+        localized_rows.append(
+            {
+                localized_header: row.get(header)
+                for header, localized_header in zip(headers, localized_headers)
+            }
+        )
+
+    return localized_rows, localized_headers
+
+
+def build_filter_summary_text(filter_params, column_settings):
+    normalized_filters = normalize_filter_params(**(filter_params or {}))
+    column_payload = build_column_settings_payload(column_settings)
+    filter_label_map = {
+        filter_item["slot"]: filter_item["label"]
+        for filter_item in column_payload.get("filters", [])
+    }
+    summary_items = []
+
+    if normalized_filters.get("date_from"):
+        summary_items.append(f"開始日: {normalized_filters['date_from']}")
+    if normalized_filters.get("date_to"):
+        summary_items.append(f"終了日: {normalized_filters['date_to']}")
+
+    for filter_slot in ("filter_value_1", "filter_value_2", "filter_value_3"):
+        if normalized_filters.get(filter_slot):
+            summary_items.append(
+                f"{filter_label_map.get(filter_slot, filter_slot)}: {normalized_filters[filter_slot]}"
+            )
+
+    activity_values = normalized_filters.get("activity_values")
+    if activity_values:
+        activity_label = "Activity 含む" if normalized_filters.get("activity_mode") != "exclude" else "Activity 除外"
+        summary_items.append(f"{activity_label}: {activity_values}")
+
+    return " / ".join(summary_items) if summary_items else "未適用"
+
+
+def parse_transition_selection(selected_transition_key):
+    normalized_key = str(selected_transition_key or "").strip()
+    if "__TO__" not in normalized_key:
+        return "", ""
+    from_activity, to_activity = normalized_key.split("__TO__", 1)
+    return from_activity.strip(), to_activity.strip()
+
+
+def build_detail_export_workbook_bytes(
+    run_id,
+    run_data,
+    analysis_key,
+    filter_params,
+    variant_id=None,
+    selected_activity="",
+    selected_transition_key="",
+    case_id="",
+    drilldown_limit=20,
+):
+    analysis_definitions = get_available_analysis_definitions()
+    analysis_name = analysis_definitions.get(analysis_key, {}).get("config", {}).get("analysis_name", analysis_key)
+    workbook = Workbook()
+    summary_sheet = workbook.active
+    summary_sheet.title = sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["summary"])
+
+    filtered_df = filter_prepared_df(
+        run_data["prepared_df"],
+        filter_params,
+        filter_column_settings=run_data.get("column_settings"),
+    )
+    filtered_meta = build_filtered_meta(filtered_df)
+    frequency_analysis = get_analysis_data(run_data, "frequency", filter_params=filter_params)
+    pattern_analysis = get_analysis_data(run_data, "pattern", filter_params=filter_params)
+
+    from_activity, to_activity = parse_transition_selection(selected_transition_key)
+    selected_transition_label = f"{from_activity} → {to_activity}" if from_activity and to_activity else str(selected_transition_key or "").strip()
+    summary_rows = [
+        (REPORT_HEADER_LABELS["run_id"], run_id),
+        (REPORT_HEADER_LABELS["analysis_key"], analysis_key),
+        (REPORT_HEADER_LABELS["analysis_name"], analysis_name),
+        (REPORT_HEADER_LABELS["source_file_name"], run_data["source_file_name"]),
+        (REPORT_HEADER_LABELS["analysis_executed_at"], run_data.get("created_at", "")),
+        (REPORT_HEADER_LABELS["exported_at"], datetime.now(timezone.utc).isoformat()),
+        (REPORT_HEADER_LABELS["case_count"], filtered_meta["case_count"]),
+        (REPORT_HEADER_LABELS["event_count"], filtered_meta["event_count"]),
+        (REPORT_HEADER_LABELS["applied_filters"], build_filter_summary_text(filter_params, run_data.get("column_settings"))),
+        (REPORT_HEADER_LABELS["selected_variant"], f"Variant #{variant_id}" if variant_id else "未選択"),
+        (REPORT_HEADER_LABELS["selected_activity"], selected_activity or "未選択"),
+        (REPORT_HEADER_LABELS["selected_transition"], selected_transition_label or "未選択"),
+        (REPORT_HEADER_LABELS["selected_case_id"], case_id or "未選択"),
+    ]
+    append_key_value_rows(summary_sheet, REPORT_SHEET_NAMES["summary"], summary_rows)
+
+    frequency_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["frequency"]))
+    frequency_rows = build_ranked_rows(frequency_analysis["rows"], rank_key=REPORT_HEADER_LABELS["rank"])
+    frequency_headers = list(frequency_rows[0].keys()) if frequency_rows else [REPORT_HEADER_LABELS["rank"]]
+    append_table_to_worksheet(
+        frequency_sheet,
+        REPORT_SHEET_NAMES["frequency"],
+        frequency_rows,
+        frequency_headers,
+    )
+
+    pattern_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["pattern"]))
+    pattern_rows = build_ranked_rows(pattern_analysis["rows"], rank_key=REPORT_HEADER_LABELS["rank"])
+    pattern_headers = list(pattern_rows[0].keys()) if pattern_rows else [REPORT_HEADER_LABELS["rank"]]
+    append_table_to_worksheet(
+        pattern_sheet,
+        REPORT_SHEET_NAMES["pattern"],
+        pattern_rows,
+        pattern_headers,
+    )
+
+    variant_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["variant"]))
+    variant_rows, variant_headers = localize_report_rows(
+        build_ranked_rows([
+            {
+                "variant_id": variant_item["variant_id"],
+                "count": variant_item["count"],
+                "ratio": variant_item["ratio"],
+                "avg_case_duration": variant_item.get("avg_case_duration_text", "0s"),
+                "pattern": variant_item.get("pattern", ""),
+            }
+            for variant_item in get_variant_items(run_data, filter_params=filter_params)
+        ]),
+        ["rank", "variant_id", "count", "ratio", "avg_case_duration", "pattern"],
+    )
+    append_table_to_worksheet(
+        variant_sheet,
+        REPORT_SHEET_NAMES["variant"],
+        variant_rows,
+        variant_headers,
+    )
+
+    bottleneck_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["bottleneck"]))
+    bottleneck_summary = get_bottleneck_summary(
+        run_data,
+        variant_id=variant_id,
+        filter_params=filter_params,
+    )
+    activity_bottleneck_rows, activity_bottleneck_headers = localize_report_rows(
+        bottleneck_summary["activity_bottlenecks"],
+        ["rank", "activity", "count", "case_count", "avg_duration_text", "median_duration_text", "max_duration_text"],
+    )
+    next_row = append_table_to_worksheet(
+        bottleneck_sheet,
+        "Activityボトルネック",
+        activity_bottleneck_rows,
+        activity_bottleneck_headers,
+    )
+    transition_bottleneck_rows, transition_bottleneck_headers = localize_report_rows(
+        bottleneck_summary["transition_bottlenecks"],
+        ["rank", "transition_label", "count", "case_count", "avg_duration_text", "median_duration_text", "max_duration_text"],
+    )
+    append_table_to_worksheet(
+        bottleneck_sheet,
+        "Transitionボトルネック",
+        transition_bottleneck_rows,
+        transition_bottleneck_headers,
+        start_row=next_row,
+    )
+
+    impact_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["impact"]))
+    impact_summary = get_impact_summary(
+        run_data,
+        filter_params=filter_params,
+    )
+    impact_rows, impact_headers = localize_report_rows(
+        [
+            {
+                "rank": impact_row["rank"],
+                "transition": impact_row["transition_label"],
+                "case_count": impact_row["case_count"],
+                "avg_duration": impact_row["avg_duration_text"],
+                "max_duration": impact_row["max_duration_text"],
+                "impact_score": impact_row["impact_score"],
+                "impact_share_pct": impact_row["impact_share_pct"],
+            }
+            for impact_row in impact_summary["rows"]
+        ],
+        ["rank", "transition", "case_count", "avg_duration", "max_duration", "impact_score", "impact_share_pct"],
+    )
+    append_table_to_worksheet(
+        impact_sheet,
+        REPORT_SHEET_NAMES["impact"],
+        impact_rows,
+        impact_headers,
+    )
+
+    selected_activity_name = str(selected_activity or "").strip()
+    drilldown_df = get_filtered_prepared_df(
+        run_data,
+        variant_id=variant_id,
+        filter_params=filter_params,
+    )
+    drilldown_rows = []
+    drilldown_title = REPORT_SHEET_NAMES["drilldown"]
+    if from_activity and to_activity:
+        drilldown_title = f"遷移ドリルダウン: {from_activity} → {to_activity}"
+        drilldown_rows = create_transition_case_drilldown(
+            drilldown_df,
+            from_activity=from_activity,
+            to_activity=to_activity,
+            limit=max(0, int(drilldown_limit)),
+        )
+    elif selected_activity_name:
+        drilldown_title = f"Activityドリルダウン: {selected_activity_name}"
+        drilldown_rows = create_activity_case_drilldown(
+            drilldown_df,
+            activity=selected_activity_name,
+            limit=max(0, int(drilldown_limit)),
+        )
+    if drilldown_rows:
+        drilldown_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["drilldown"]))
+        drilldown_rows, drilldown_headers = localize_report_rows(
+            drilldown_rows,
+            ["case_id", "activity", "next_activity", "duration_text", "from_time", "to_time"],
+        )
+        append_table_to_worksheet(
+            drilldown_sheet,
+            drilldown_title,
+            drilldown_rows,
+            drilldown_headers,
+        )
+
+    normalized_case_id = str(case_id or "").strip()
+    if normalized_case_id:
+        case_trace = create_case_trace_details(run_data["prepared_df"], normalized_case_id)
+        if case_trace.get("found"):
+            case_trace_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["case_trace"]))
+            next_row = append_key_value_rows(
+                case_trace_sheet,
+                "ケース概要",
+                [
+                    (REPORT_HEADER_LABELS["case_id"], case_trace["case_id"]),
+                    (REPORT_HEADER_LABELS["event_count"], case_trace["summary"]["event_count"]),
+                    (REPORT_HEADER_LABELS["total_duration"], case_trace["summary"]["total_duration_text"]),
+                    (REPORT_HEADER_LABELS["start_time"], case_trace["summary"]["start_time"]),
+                    (REPORT_HEADER_LABELS["end_time"], case_trace["summary"]["end_time"]),
+                ],
+            )
+            case_trace_event_rows, case_trace_event_headers = localize_report_rows(
+                case_trace["events"],
+                ["case_id", "activity", "next_activity", "start_time", "end_time", "duration_text"],
+            )
+            append_table_to_worksheet(
+                case_trace_sheet,
+                "通過イベント",
+                case_trace_event_rows,
+                case_trace_event_headers,
+                start_row=next_row,
+            )
+
+    for worksheet in workbook.worksheets:
+        autosize_worksheet_columns(worksheet)
+
+    output_buffer = BytesIO()
+    workbook.save(output_buffer)
+    return output_buffer.getvalue()
 
 
 def get_filter_options_payload(run_data):
@@ -508,7 +935,52 @@ def get_impact_summary(run_data, filter_params=None, prepared_df=None):
 
         cache[cache_key] = create_impact_summary(
             filtered_df,
-            limit=10,
+            limit=None,
+        )
+
+    return cache[cache_key]
+
+
+def get_rule_based_insights_summary(
+    run_data,
+    analysis_key,
+    analysis_rows=None,
+    filter_params=None,
+    prepared_df=None,
+    dashboard_summary=None,
+    impact_summary=None,
+):
+    cache_key = (str(analysis_key or "").strip().lower(), build_filter_cache_key(filter_params))
+    cache = run_data.setdefault("insights_cache", {})
+
+    if cache_key not in cache:
+        filtered_df = prepared_df
+        if filtered_df is None:
+            filtered_df = filter_prepared_df(
+                run_data["prepared_df"],
+                filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+            )
+
+        cache[cache_key] = create_rule_based_insights(
+            filtered_df,
+            analysis_key=analysis_key,
+            analysis_rows=analysis_rows,
+            dashboard_summary=dashboard_summary or get_dashboard_summary(
+                run_data,
+                filter_params=filter_params,
+                prepared_df=filtered_df,
+            ),
+            bottleneck_summary=get_bottleneck_summary(
+                run_data,
+                filter_params=filter_params,
+            ),
+            impact_summary=impact_summary or get_impact_summary(
+                run_data,
+                filter_params=filter_params,
+                prepared_df=filtered_df,
+            ),
+            max_items=5,
         )
 
     return cache[cache_key]
@@ -755,6 +1227,21 @@ def analysis_detail_api(
             row_offset=row_offset,
         )
     }
+    dashboard_summary = get_dashboard_summary(
+        run_data,
+        filter_params=filter_params,
+        prepared_df=filtered_df,
+    )
+    impact_summary = get_impact_summary(
+        run_data,
+        filter_params=filter_params,
+        prepared_df=filtered_df,
+    )
+    root_cause_summary = get_root_cause_summary(
+        run_data,
+        filter_params=filter_params,
+        prepared_df=filtered_df,
+    )
 
     return JSONResponse(
         content={
@@ -763,21 +1250,18 @@ def analysis_detail_api(
             "selected_analysis_keys": run_data["selected_analysis_keys"],
             "case_count": filtered_meta["case_count"],
             "event_count": filtered_meta["event_count"],
-            "dashboard": get_dashboard_summary(
+            "dashboard": dashboard_summary,
+            "impact": impact_summary,
+            "insights": get_rule_based_insights_summary(
                 run_data,
+                analysis_key=analysis_key,
+                analysis_rows=analysis.get("rows"),
                 filter_params=filter_params,
                 prepared_df=filtered_df,
+                dashboard_summary=dashboard_summary,
+                impact_summary=impact_summary,
             ),
-            "impact": get_impact_summary(
-                run_data,
-                filter_params=filter_params,
-                prepared_df=filtered_df,
-            ),
-            "root_cause": get_root_cause_summary(
-                run_data,
-                filter_params=filter_params,
-                prepared_df=filtered_df,
-            ),
+            "root_cause": root_cause_summary,
             "applied_filters": filter_params,
             "column_settings": build_column_settings_payload(run_data.get("column_settings")),
             "analyses": response_analyses,
@@ -827,6 +1311,42 @@ def analysis_excel_archive_api(run_id: str):
         media_type="application/zip",
         headers={
             "Content-Disposition": f"attachment; filename*=UTF-8''{quote(archive_file_name)}",
+        },
+    )
+
+
+@app.get("/api/runs/{run_id}/detail-excel")
+@app.get("/api/runs/{run_id}/report-excel")
+def detail_excel_export_api(
+    request: Request,
+    run_id: str,
+    analysis_key: str,
+    variant_id: int | None = None,
+    selected_activity: str = "",
+    selected_transition_key: str = "",
+    case_id: str = "",
+    drilldown_limit: int = 20,
+):
+    run_data = get_run_data(run_id)
+    filter_params = get_effective_filter_params(run_data, get_request_filter_params(request))
+    excel_bytes = build_detail_export_workbook_bytes(
+        run_id=run_id,
+        run_data=run_data,
+        analysis_key=analysis_key,
+        filter_params=filter_params,
+        variant_id=variant_id,
+        selected_activity=selected_activity,
+        selected_transition_key=selected_transition_key,
+        case_id=case_id,
+        drilldown_limit=drilldown_limit,
+    )
+    output_file_name = f"{Path(run_data['source_file_name']).stem}_{analysis_key}_detail.xlsx"
+
+    return Response(
+        content=excel_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(output_file_name)}",
         },
     )
 
@@ -900,7 +1420,8 @@ def variant_list_api(request: Request, run_id: str, limit: int = 10):
         filter_params,
         filter_column_settings=run_data.get("column_settings"),
     )
-    variant_items = get_variant_items(run_data, filter_params=filter_params)[:safe_limit]
+    all_variant_items = get_variant_items(run_data, filter_params=filter_params)
+    variant_items = all_variant_items if safe_limit == 0 else all_variant_items[:safe_limit]
 
     return JSONResponse(
         content={

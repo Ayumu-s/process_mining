@@ -42,11 +42,17 @@ DEFAULT_ANALYSIS_KEYS = ["frequency", "transition", "pattern"]
 FLOW_FREQUENCY_ACTIVITY_COLUMN = "アクティビティ"
 FLOW_FREQUENCY_EVENT_COUNT_COLUMN = "イベント件数"
 FLOW_FREQUENCY_CASE_COUNT_COLUMN = "ケース数"
+FLOW_FREQUENCY_AVG_DURATION_COLUMN = "平均時間(分)"
+FLOW_FREQUENCY_RATIO_COLUMN = "イベント比率(%)"
 FLOW_TRANSITION_FROM_COLUMN = "前処理アクティビティ名"
 FLOW_TRANSITION_TO_COLUMN = "後処理アクティビティ名"
 FLOW_TRANSITION_COUNT_COLUMN = "遷移件数"
+FLOW_TRANSITION_AVG_WAIT_COLUMN = "平均待ち時間(分)"
+FLOW_TRANSITION_RATIO_COLUMN = "遷移比率(%)"
 FLOW_PATTERN_CASE_COUNT_COLUMN = "ケース数"
 FLOW_PATTERN_COLUMN = "処理順パターン"
+FLOW_PATTERN_CASE_RATIO_COLUMN = "ケース比率(%)"
+FLOW_PATTERN_AVG_CASE_DURATION_COLUMN = "平均ケース時間(分)"
 FLOW_PATH_SEPARATOR = "→"
 FLOW_PATTERN_CAP = 500
 FLOW_LAYOUT_SWEEP_ITERATIONS = 4
@@ -57,6 +63,14 @@ DEFAULT_FILTER_LABELS = {
     "filter_value_2": "グループ/カテゴリー フィルター②",
     "filter_value_3": "グループ/カテゴリー フィルター③",
 }
+INSIGHT_ATTENTION_ACTIVITY_KEYWORDS = (
+    "差戻し",
+    "差し戻し",
+    "再提出",
+    "再申請",
+    "手戻り",
+    "再確認",
+)
 
 # -----------------------------------------------------------------------------
 # Analysis execution
@@ -190,14 +204,27 @@ def create_variant_summary(prepared_df, limit=10):
     case_variant_df["pattern"] = case_variant_df["activities"].apply(
         lambda activities: FLOW_PATH_SEPARATOR.join(activities)
     )
+    case_duration_df = (
+        prepared_df.groupby("case_id", as_index=False)
+        .agg(case_duration_sec=("duration_sec", "sum"))
+    )
+    case_variant_df = case_variant_df.merge(case_duration_df, on="case_id", how="left")
 
     total_cases = int(case_variant_df["case_id"].nunique())
     variant_summary_df = (
         case_variant_df.groupby(["activities", "pattern"])
-        .agg(count=("case_id", "count"))
+        .agg(
+            count=("case_id", "count"),
+            avg_case_duration_sec=("case_duration_sec", "mean"),
+        )
         .reset_index()
         .sort_values(["count", "pattern"], ascending=[False, True])
         .reset_index(drop=True)
+    )
+    variant_summary_df["avg_case_duration_sec"] = (
+        variant_summary_df["avg_case_duration_sec"]
+        .fillna(0)
+        .round(2)
     )
 
     if limit is not None:
@@ -207,9 +234,12 @@ def create_variant_summary(prepared_df, limit=10):
         {
             "variant_id": index + 1,
             "activities": list(row["activities"]),
+            "activity_count": int(len(row["activities"])),
             "pattern": row["pattern"],
             "count": int(row["count"]),
             "ratio": round(float(row["count"]) / total_cases, 4) if total_cases else 0.0,
+            "avg_case_duration_sec": float(row["avg_case_duration_sec"]),
+            "avg_case_duration_text": _format_duration_text(row["avg_case_duration_sec"]),
         }
         for index, row in enumerate(variant_summary_df.to_dict(orient="records"))
     ]
@@ -238,14 +268,31 @@ def normalize_filter_params(
     filter_value_1=None,
     filter_value_2=None,
     filter_value_3=None,
+    activity_mode=None,
+    activity_values=None,
     **_,
 ):
+    normalized_activity_mode = str(activity_mode or "").strip().lower()
+    if normalized_activity_mode not in {"include", "exclude"}:
+        normalized_activity_mode = None
+
+    if isinstance(activity_values, (list, tuple, set)):
+        raw_activity_values = [str(value or "").strip() for value in activity_values]
+    else:
+        raw_activity_values = [
+            value.strip()
+            for value in str(activity_values or "").split(",")
+        ]
+    normalized_activity_values = list(dict.fromkeys([value for value in raw_activity_values if value]))
+
     raw_params = {
         "date_from": date_from,
         "date_to": date_to,
         "filter_value_1": filter_value_1,
         "filter_value_2": filter_value_2,
         "filter_value_3": filter_value_3,
+        "activity_mode": normalized_activity_mode,
+        "activity_values": ",".join(normalized_activity_values) if normalized_activity_values else None,
     }
 
     return {
@@ -361,6 +408,17 @@ def filter_prepared_df(prepared_df, filter_params=None, filter_column_settings=N
         filtered_df = filtered_df[
             filtered_df[column_name].astype(str).str.strip() == filter_value
         ]
+
+    activity_mode = normalized_filters.get("activity_mode")
+    activity_values = [
+        value.strip()
+        for value in str(normalized_filters.get("activity_values") or "").split(",")
+        if value.strip()
+    ]
+    if activity_mode in {"include", "exclude"} and activity_values and "activity" in filtered_df.columns:
+        activity_mask = filtered_df["activity"].astype(str).str.strip().isin(activity_values)
+        # Phase 1 keeps matching event rows even if a case becomes partial after filtering.
+        filtered_df = filtered_df[activity_mask] if activity_mode == "include" else filtered_df[~activity_mask]
 
     return filtered_df.copy()
 
@@ -653,7 +711,7 @@ def _append_duration_metrics(summary_df):
     return summary_df
 
 
-def build_transition_impact_rows(prepared_df, limit=10):
+def build_transition_impact_rows(prepared_df, limit=None):
     interval_df = build_duration_interval_table(prepared_df)
 
     if interval_df.empty:
@@ -748,7 +806,7 @@ def build_transition_impact_rows(prepared_df, limit=10):
     }
 
 
-def create_impact_summary(prepared_df, limit=10):
+def create_impact_summary(prepared_df, limit=None):
     impact_rows_payload = build_transition_impact_rows(prepared_df, limit=limit)
     return {
         "has_data": not prepared_df.empty,
@@ -933,6 +991,343 @@ def create_dashboard_summary(prepared_df, variant_items=None, bottleneck_summary
             else ""
         ),
     }
+
+
+def _append_insight(items, max_items, insight_id, text, source_keys):
+    if not text or len(items) >= max_items:
+        return
+    items.append(
+        {
+            "id": insight_id,
+            "text": text,
+            "source_keys": list(source_keys),
+        }
+    )
+
+
+def _collect_attention_activities(prepared_df):
+    if prepared_df.empty or "activity" not in prepared_df.columns:
+        return []
+
+    activity_values = [
+        str(activity_name).strip()
+        for activity_name in prepared_df["activity"].dropna().tolist()
+        if str(activity_name).strip()
+    ]
+    attention_activities = []
+    for activity_name in activity_values:
+        if (
+            any(keyword in activity_name for keyword in INSIGHT_ATTENTION_ACTIVITY_KEYWORDS)
+            and activity_name not in attention_activities
+        ):
+            attention_activities.append(activity_name)
+
+    return attention_activities
+
+
+def _build_frequency_insights(items, analysis_rows, max_items):
+    if not analysis_rows:
+        return
+
+    top_activity_row = analysis_rows[0]
+    top_activity = str(top_activity_row.get(FLOW_FREQUENCY_ACTIVITY_COLUMN) or "").strip()
+    top_event_count = int(top_activity_row.get(FLOW_FREQUENCY_EVENT_COUNT_COLUMN) or 0)
+    top_ratio = float(top_activity_row.get(FLOW_FREQUENCY_RATIO_COLUMN) or 0.0)
+    _append_insight(
+        items,
+        max_items,
+        "top_activity",
+        f"最も件数が多い activity は「{top_activity}」で、{top_event_count:,} 件（全イベントの {top_ratio:.1f}%）を占めています。",
+        ["analysis"],
+    )
+
+    top3_ratio = sum(float(row.get(FLOW_FREQUENCY_RATIO_COLUMN) or 0.0) for row in analysis_rows[:3])
+    _append_insight(
+        items,
+        max_items,
+        "event_distribution",
+        f"上位3 activity で全イベントの {top3_ratio:.1f}% を占めており、イベント分布の偏りを確認できます。",
+        ["analysis"],
+    )
+
+    if top_ratio >= 40.0:
+        _append_insight(
+            items,
+            max_items,
+            "activity_concentration",
+            f"「{top_activity}」への集中度が高く、単一 activity への依存が大きい構成です。",
+            ["analysis"],
+        )
+        return
+
+    longest_avg_row = max(
+        analysis_rows,
+        key=lambda row: float(row.get(FLOW_FREQUENCY_AVG_DURATION_COLUMN) or 0.0),
+    )
+    longest_activity = str(longest_avg_row.get(FLOW_FREQUENCY_ACTIVITY_COLUMN) or "").strip()
+    longest_avg_duration = float(longest_avg_row.get(FLOW_FREQUENCY_AVG_DURATION_COLUMN) or 0.0)
+    _append_insight(
+        items,
+        max_items,
+        "slowest_activity",
+        f"平均処理時間が最も長い activity は「{longest_activity}」で、平均 {longest_avg_duration:.2f} 分です。",
+        ["analysis"],
+    )
+
+
+def _build_transition_insights(items, analysis_rows, max_items):
+    if not analysis_rows:
+        return
+
+    top_transition_row = analysis_rows[0]
+    top_transition_label = (
+        f"{top_transition_row.get(FLOW_TRANSITION_FROM_COLUMN, '')} {FLOW_PATH_SEPARATOR} "
+        f"{top_transition_row.get(FLOW_TRANSITION_TO_COLUMN, '')}"
+    ).strip()
+    top_transition_ratio = float(top_transition_row.get(FLOW_TRANSITION_RATIO_COLUMN) or 0.0)
+    _append_insight(
+        items,
+        max_items,
+        "top_transition",
+        f"最も多い前後関係は「{top_transition_label}」で、全遷移の {top_transition_ratio:.1f}% を占めています。",
+        ["analysis"],
+    )
+
+    loop_row = next(
+        (
+            row for row in analysis_rows
+            if str(row.get(FLOW_TRANSITION_FROM_COLUMN) or "").strip()
+            == str(row.get(FLOW_TRANSITION_TO_COLUMN) or "").strip()
+            and str(row.get(FLOW_TRANSITION_FROM_COLUMN) or "").strip()
+        ),
+        None,
+    )
+    if loop_row:
+        activity_name = str(loop_row.get(FLOW_TRANSITION_FROM_COLUMN) or "").strip()
+        _append_insight(
+            items,
+            max_items,
+            "loop_transition",
+            f"「{activity_name}」の自己遷移が見つかっており、ループが発生している可能性があります。",
+            ["analysis"],
+        )
+    else:
+        return_like_row = next(
+            (
+                row for row in analysis_rows
+                if any(
+                    keyword in str(row.get(FLOW_TRANSITION_FROM_COLUMN) or "").strip()
+                    or keyword in str(row.get(FLOW_TRANSITION_TO_COLUMN) or "").strip()
+                    for keyword in INSIGHT_ATTENTION_ACTIVITY_KEYWORDS
+                )
+            ),
+            None,
+        )
+        if return_like_row:
+            transition_label = (
+                f"{return_like_row.get(FLOW_TRANSITION_FROM_COLUMN, '')} {FLOW_PATH_SEPARATOR} "
+                f"{return_like_row.get(FLOW_TRANSITION_TO_COLUMN, '')}"
+            ).strip()
+            _append_insight(
+                items,
+                max_items,
+                "return_transition",
+                f"「{transition_label}」が含まれており、差戻しや再提出を含む前後関係が見られます。",
+                ["analysis"],
+            )
+
+    longest_wait_row = max(
+        analysis_rows,
+        key=lambda row: float(row.get(FLOW_TRANSITION_AVG_WAIT_COLUMN) or 0.0),
+    )
+    longest_wait_value = float(longest_wait_row.get(FLOW_TRANSITION_AVG_WAIT_COLUMN) or 0.0)
+    if longest_wait_value > 0:
+        transition_label = (
+            f"{longest_wait_row.get(FLOW_TRANSITION_FROM_COLUMN, '')} {FLOW_PATH_SEPARATOR} "
+            f"{longest_wait_row.get(FLOW_TRANSITION_TO_COLUMN, '')}"
+        ).strip()
+        _append_insight(
+            items,
+            max_items,
+            "slowest_transition_wait",
+            f"平均待ち時間が最も長い遷移は「{transition_label}」で、平均 {longest_wait_value:.2f} 分です。",
+            ["analysis"],
+        )
+
+
+def _build_pattern_insights(items, analysis_rows, max_items):
+    if not analysis_rows:
+        return
+
+    top_pattern_row = analysis_rows[0]
+    top_pattern = str(top_pattern_row.get(FLOW_PATTERN_COLUMN) or "").strip()
+    top_pattern_case_count = int(top_pattern_row.get(FLOW_PATTERN_CASE_COUNT_COLUMN) or 0)
+    top_pattern_ratio = float(top_pattern_row.get(FLOW_PATTERN_CASE_RATIO_COLUMN) or 0.0)
+    _append_insight(
+        items,
+        max_items,
+        "top_pattern",
+        f"最頻出パターンは「{top_pattern}」で、{top_pattern_case_count:,} ケース（{top_pattern_ratio:.1f}%）です。",
+        ["analysis"],
+    )
+
+    pattern_count = len(analysis_rows)
+    if pattern_count >= 5:
+        _append_insight(
+            items,
+            max_items,
+            "pattern_variability",
+            f"処理順パターンは {pattern_count} 種類あり、標準フローから外れる例外パターンが一定数存在します。",
+            ["analysis"],
+        )
+    else:
+        _append_insight(
+            items,
+            max_items,
+            "pattern_variability",
+            f"処理順パターンは {pattern_count} 種類に収まっており、比較的まとまったフロー構成です。",
+            ["analysis"],
+        )
+
+    if top_pattern_ratio >= 60.0:
+        _append_insight(
+            items,
+            max_items,
+            "standard_vs_exception",
+            "最頻出パターンの占有率が高く、標準フローが比較的明確です。",
+            ["analysis"],
+        )
+        return
+
+    longest_pattern_row = max(
+        analysis_rows,
+        key=lambda row: float(row.get(FLOW_PATTERN_AVG_CASE_DURATION_COLUMN) or 0.0),
+    )
+    longest_pattern = str(longest_pattern_row.get(FLOW_PATTERN_COLUMN) or "").strip()
+    longest_pattern_duration = float(longest_pattern_row.get(FLOW_PATTERN_AVG_CASE_DURATION_COLUMN) or 0.0)
+    _append_insight(
+        items,
+        max_items,
+        "standard_vs_exception",
+        f"最頻出パターンへの集中は限定的で、例外寄りの「{longest_pattern}」は平均 {longest_pattern_duration:.2f} 分かかっています。",
+        ["analysis"],
+    )
+
+
+def create_rule_based_insights(
+    prepared_df,
+    analysis_key=None,
+    analysis_rows=None,
+    dashboard_summary=None,
+    bottleneck_summary=None,
+    impact_summary=None,
+    max_items=5,
+):
+    safe_max_items = max(0, int(max_items or 0))
+    resolved_dashboard_summary = dashboard_summary or create_dashboard_summary(prepared_df)
+    resolved_bottleneck_summary = bottleneck_summary or create_bottleneck_summary(prepared_df, limit=10)
+    resolved_impact_summary = impact_summary or create_impact_summary(prepared_df, limit=10)
+    normalized_analysis_key = str(analysis_key or "").strip().lower()
+    analysis_rows = list(analysis_rows or [])
+    insights_payload = {
+        "mode": "rule_based",
+        "title": "自動インサイト",
+        "description": "既存集計から重要ポイントを自動で要約しています。",
+        "has_data": bool(resolved_dashboard_summary.get("has_data")),
+        "items": [],
+    }
+
+    if safe_max_items == 0 or not insights_payload["has_data"]:
+        return insights_payload
+
+    _append_insight(
+        insights_payload["items"],
+        safe_max_items,
+        "scope",
+        f"対象は {int(resolved_dashboard_summary['total_cases']):,} ケース / {int(resolved_dashboard_summary['total_records']):,} イベントです。",
+        ["dashboard"],
+    )
+
+    if normalized_analysis_key == "frequency":
+        insights_payload["description"] = "頻度分析の上位 activity とイベント分布の偏りを要約しています。"
+        _build_frequency_insights(insights_payload["items"], analysis_rows, safe_max_items)
+    elif normalized_analysis_key == "transition":
+        insights_payload["description"] = "前後処理分析から、ループ・差戻し・遷移の特徴を要約しています。"
+        _build_transition_insights(insights_payload["items"], analysis_rows, safe_max_items)
+    elif normalized_analysis_key == "pattern":
+        insights_payload["description"] = "処理順パターン分析から、主要パターンと標準フロー / 例外の傾向を要約しています。"
+        _build_pattern_insights(insights_payload["items"], analysis_rows, safe_max_items)
+    else:
+        top_impact_row = resolved_impact_summary["rows"][0] if resolved_impact_summary.get("rows") else None
+        top_activity_bottleneck = (
+            resolved_bottleneck_summary["activity_bottlenecks"][0]
+            if resolved_bottleneck_summary.get("activity_bottlenecks")
+            else None
+        )
+        top_transition_bottleneck = (
+            resolved_bottleneck_summary["transition_bottlenecks"][0]
+            if resolved_bottleneck_summary.get("transition_bottlenecks")
+            else None
+        )
+        if top_impact_row:
+            _append_insight(
+                insights_payload["items"],
+                safe_max_items,
+                "top_impact_transition",
+                (
+                    f"改善インパクトが最大の遷移は「{str(top_impact_row['transition_label'])}」で、"
+                    f"平均待ち時間 {top_impact_row['avg_duration_text']}、"
+                    f"{int(top_impact_row['case_count']):,} ケースに発生しています。"
+                ),
+                ["impact"],
+            )
+        if top_activity_bottleneck:
+            _append_insight(
+                insights_payload["items"],
+                safe_max_items,
+                "top_activity_bottleneck",
+                (
+                    f"平均待ち時間が最大の Activity bottleneck は「{top_activity_bottleneck['activity']}」で、"
+                    f"平均待ち時間 {_format_duration_text(top_activity_bottleneck['avg_duration_sec'])} です。"
+                ),
+                ["bottleneck"],
+            )
+        if top_transition_bottleneck:
+            _append_insight(
+                insights_payload["items"],
+                safe_max_items,
+                "top_transition_bottleneck",
+                (
+                    f"平均待ち時間が最大の Transition bottleneck は"
+                    f"「{top_transition_bottleneck['from_activity']} {FLOW_PATH_SEPARATOR} {top_transition_bottleneck['to_activity']}」で、"
+                    f"平均待ち時間 {_format_duration_text(top_transition_bottleneck['avg_duration_sec'])} です。"
+                ),
+                ["bottleneck"],
+            )
+
+    if len(insights_payload["items"]) < safe_max_items:
+        _append_insight(
+            insights_payload["items"],
+            safe_max_items,
+            "top10_variant_coverage",
+            f"上位10 Variant で全ケースの {float(resolved_dashboard_summary['top10_variant_coverage_pct']):.1f}% をカバーしています。",
+            ["dashboard", "variant"],
+        )
+
+    if len(insights_payload["items"]) < safe_max_items:
+        attention_activities = _collect_attention_activities(prepared_df)
+        if attention_activities:
+            display_names = "、".join(attention_activities[:3])
+            suffix = " など" if len(attention_activities) > 3 else ""
+            _append_insight(
+                insights_payload["items"],
+                safe_max_items,
+                "attention_activities",
+                f"「{display_names}」{suffix} の activity が含まれており、差戻しや再提出が発生している可能性があります。",
+                ["prepared_df"],
+            )
+
+    return insights_payload
 
 
 def create_bottleneck_summary(prepared_df, limit=10):

@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
@@ -12,8 +12,8 @@
             <p class="eyebrow">Process Mining</p>
             <h1>イベントログをブラウザで分析</h1>
             <p class="hero-copy">
-                CSV をアップロードし、列マッピングと任意のグループ/カテゴリー条件を設定して分析します。
-                ファイル未指定の場合は <code>{{ sample_file_name }}</code> を使います。
+                CSV をアップロードし、列マッピングと分析条件を設定して分析します。
+                ファイル未選択の場合は <code>{{ sample_file_name }}</code> を使います。
             </p>
         </section>
 
@@ -145,14 +145,6 @@
                             <span>{{ option.label }}</span>
                         </label>
                         {% endfor %}
-                    </div>
-
-                    <label class="checkbox-row">
-                        <input type="checkbox" name="export_excel" id="export-excel-toggle">
-                        <span>分析後の Excel ZIP をダウンロードする</span>
-                    </label>
-                    <div id="excel-export-settings" class="excel-export-settings hidden">
-                        <p class="hint">分析完了後に、選択した各分析結果の Excel ファイルを ZIP にまとめてダウンロードします。</p>
                     </div>
                 </div>
 

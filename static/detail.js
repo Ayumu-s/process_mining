@@ -23,6 +23,7 @@ const chartTitle = document.getElementById("detail-chart-title");
 const chartNote = document.getElementById("detail-chart-note");
 const chartContainer = document.getElementById("detail-chart");
 const resultPanel = document.getElementById("detail-result-panel");
+const detailExportExcelButton = document.getElementById("detail-export-excel-button");
 const detailPageTitle = document.getElementById("detail-page-title");
 const detailPageCopy = document.getElementById("detail-page-copy");
 const FILTER_SLOT_KEYS = ["filter_value_1", "filter_value_2", "filter_value_3"];
@@ -37,6 +38,8 @@ const DEFAULT_DETAIL_FILTERS = Object.freeze({
     filter_value_1: "",
     filter_value_2: "",
     filter_value_3: "",
+    activity_mode: "include",
+    activity_values: Object.freeze([]),
 });
 let activeDetailFilters = { ...DEFAULT_DETAIL_FILTERS };
 let detailPageAnalysisLoader = null;
@@ -52,12 +55,23 @@ const hideStatus = () => sharedUi.hideStatus(statusPanel);
 // -----------------------------------------------------------------------------
 
 function cloneDetailFilters(filters = {}) {
+    const rawActivityValues = Array.isArray(filters.activity_values)
+        ? filters.activity_values
+        : String(filters.activity_values || "").split(",");
+    const activityValues = [...new Set(
+        rawActivityValues
+            .map((value) => String(value || "").trim())
+            .filter(Boolean)
+    )];
+
     return {
         date_from: String(filters.date_from || "").trim(),
         date_to: String(filters.date_to || "").trim(),
         filter_value_1: String(filters.filter_value_1 || "").trim(),
         filter_value_2: String(filters.filter_value_2 || "").trim(),
         filter_value_3: String(filters.filter_value_3 || "").trim(),
+        activity_mode: String(filters.activity_mode || "include").trim() === "exclude" ? "exclude" : "include",
+        activity_values: activityValues,
     };
 }
 
@@ -102,12 +116,37 @@ function buildFilterQueryParams(filters = {}) {
     const params = new URLSearchParams();
 
     Object.entries(normalizedFilters).forEach(([filterName, filterValue]) => {
+        if (filterName === "activity_values") {
+            if (Array.isArray(filterValue) && filterValue.length) {
+                params.set(filterName, filterValue.join(","));
+            }
+            return;
+        }
+
+        if (filterName === "activity_mode") {
+            if (Array.isArray(normalizedFilters.activity_values) && normalizedFilters.activity_values.length) {
+                params.set(filterName, filterValue);
+            }
+            return;
+        }
+
         if (filterValue) {
             params.set(filterName, filterValue);
         }
     });
 
     return params;
+}
+
+function buildFilterOptionsApiUrl(runId) {
+    return `/api/runs/${encodeURIComponent(runId)}/filter-options`;
+}
+
+function loadDetailFilterOptions(runId) {
+    return fetchJson(
+        buildFilterOptionsApiUrl(runId),
+        "フィルタ候補を読み込めませんでした。"
+    );
 }
 
 function buildPatternDetailHref(runId, patternIndex) {
@@ -260,6 +299,55 @@ function loadCaseTrace(runId, caseId) {
     );
 }
 
+function getDownloadFileName(response, fallbackFileName) {
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    if (utf8Match?.[1]) {
+        try {
+            return decodeURIComponent(utf8Match[1]);
+        } catch {
+            return utf8Match[1];
+        }
+    }
+
+    const asciiMatch = disposition.match(/filename="?([^";]+)"?/i);
+    return asciiMatch?.[1] || fallbackFileName;
+}
+
+function buildDetailExcelExportUrl(runId, options = {}) {
+    const {
+        analysisKeyName = analysisKey,
+        filters = activeDetailFilters,
+        variantId = null,
+        selectedActivity = "",
+        selectedTransitionKey = "",
+        caseId = "",
+        drilldownLimit = 20,
+    } = options;
+    const params = new URLSearchParams({
+        analysis_key: String(analysisKeyName || ""),
+        drilldown_limit: String(Math.max(0, Number(drilldownLimit) || 0)),
+    });
+
+    if (variantId !== null && variantId !== undefined) {
+        params.set("variant_id", String(variantId));
+    }
+    if (selectedActivity) {
+        params.set("selected_activity", String(selectedActivity));
+    }
+    if (selectedTransitionKey) {
+        params.set("selected_transition_key", String(selectedTransitionKey));
+    }
+    if (caseId) {
+        params.set("case_id", String(caseId));
+    }
+    buildFilterQueryParams(filters).forEach((value, key) => {
+        params.set(key, value);
+    });
+
+    return `/api/runs/${encodeURIComponent(runId)}/report-excel?${params.toString()}`;
+}
+
 // -----------------------------------------------------------------------------
 // Formatting helpers
 // -----------------------------------------------------------------------------
@@ -377,6 +465,136 @@ function formatImpactScore(score) {
     });
 }
 
+
+function buildInsightsSectionHtml(insights) {
+    const items = Array.isArray(insights?.items) ? insights.items : [];
+    const description = insights?.description || "既存集計から重要ポイントを自動で要約しています。";
+
+    if (!items.length) {
+        return `
+            <section class="summary-panel-insights">
+                <div class="dashboard-header">
+                    <h2 class="dashboard-title">自動インサイト</h2>
+                    <p class="dashboard-copy">${escapeHtml(description)}</p>
+                </div>
+                <p class="empty-state">条件に一致するデータがないため、インサイトを表示できません。</p>
+            </section>
+        `;
+    }
+
+    return `
+        <section class="summary-panel-insights">
+            <div class="dashboard-header">
+                <h2 class="dashboard-title">自動インサイト</h2>
+                <p class="dashboard-copy">${escapeHtml(description)}</p>
+            </div>
+            <ul class="insight-list">
+                ${items.map((item) => `<li>${escapeHtml(item.text || "")}</li>`).join("")}
+            </ul>
+        </section>
+    `;
+}
+
+
+function buildImpactSortLabel(sortKey) {
+    switch (sortKey) {
+        case "impact_share_pct":
+            return "改善インパクト比率";
+        case "avg_duration_sec":
+            return "平均待ち時間";
+        case "case_count":
+            return "ケース数";
+        case "max_duration_sec":
+            return "最大待ち時間";
+        case "impact_score":
+        default:
+            return "改善インパクト";
+    }
+}
+
+function getDefaultImpactViewState() {
+    return {
+        sortKey: "impact_score",
+        minCaseCount: "",
+        minAvgDurationHours: "",
+        displayLimit: 10,
+    };
+}
+
+function getFilteredImpactRows(impact, viewState = getDefaultImpactViewState()) {
+    const rows = Array.isArray(impact?.rows) ? impact.rows : [];
+    const minimumCaseCount = Math.max(0, Number(viewState.minCaseCount) || 0);
+    const minimumAvgDurationSec = Math.max(0, (Number(viewState.minAvgDurationHours) || 0) * 3600);
+    const safeSortKey = viewState.sortKey || "impact_score";
+    const safeDisplayLimit = Math.max(1, Number(viewState.displayLimit) || 10);
+
+    const filteredRows = rows.filter((row) => (
+        Number(row.case_count || 0) >= minimumCaseCount
+        && Number(row.avg_duration_sec || 0) >= minimumAvgDurationSec
+    ));
+
+    filteredRows.sort((leftRow, rightRow) => {
+        const primaryDiff = Number(rightRow[safeSortKey] || 0) - Number(leftRow[safeSortKey] || 0);
+        if (primaryDiff !== 0) {
+            return primaryDiff;
+        }
+
+        const impactDiff = Number(rightRow.impact_score || 0) - Number(leftRow.impact_score || 0);
+        if (impactDiff !== 0) {
+            return impactDiff;
+        }
+
+        return String(leftRow.transition_label || "").localeCompare(String(rightRow.transition_label || ""), "ja");
+    });
+
+    return filteredRows.slice(0, safeDisplayLimit).map((row, index) => ({
+        ...row,
+        rank: index + 1,
+    }));
+}
+
+function buildImpactTableHtml(rows) {
+    if (!rows.length) {
+        return '<p class="empty-state">条件に一致する遷移がありません。</p>';
+    }
+
+    const headerLabels = [
+        "順位",
+        "遷移",
+        "ケース数",
+        "平均待ち時間",
+        "最大待ち時間",
+        "待ち時間シェア(%)",
+        "改善インパクト",
+        "改善インパクト比率(%)",
+    ];
+    const headHtml = headerLabels.map((headerLabel) => `<th>${escapeHtml(headerLabel)}</th>`).join("");
+    const bodyHtml = rows.map((row) => {
+        const transitionKey = row.transition_key || buildTransitionKey(row.from_activity, row.to_activity);
+        return `
+            <tr data-impact-transition-key="${escapeHtml(transitionKey)}" tabindex="0" aria-selected="false">
+                <td>${escapeHtml(row.rank)}</td>
+                <td class="table-cell--wide"><div class="cell-scroll-wrapper">${escapeHtml(row.transition_label)}</div></td>
+                <td>${escapeHtml(formatDashboardMetricNumber(row.case_count))}</td>
+                <td>${escapeHtml(row.avg_duration_text)}</td>
+                <td>${escapeHtml(row.max_duration_text)}</td>
+                <td>${escapeHtml(formatRootCauseRatio(row.wait_share_pct))}</td>
+                <td>${escapeHtml(formatImpactScore(row.impact_score))}</td>
+                <td>${escapeHtml(formatRootCauseRatio(row.impact_share_pct))}</td>
+            </tr>
+        `;
+    }).join("");
+
+    return `
+        <div class="table-wrap">
+            <table>
+                <thead><tr>${headHtml}</tr></thead>
+                <tbody>${bodyHtml}</tbody>
+            </table>
+        </div>
+    `;
+}
+
 function buildRootCauseGroupHtml(group) {
     const rows = Array.isArray(group?.rows) ? group.rows : [];
     const metaParts = [`対象列: ${group.column_name || "-"}`];
@@ -467,7 +685,7 @@ function buildRootCauseSectionHtml(rootCause) {
     `;
 }
 
-function buildImpactSectionHtml(impact) {
+function buildImpactSectionHtml(impact, viewState = getDefaultImpactViewState()) {
     if (!impact?.has_data) {
         return `
             <section class="impact-panel">
@@ -497,20 +715,14 @@ function buildImpactSectionHtml(impact) {
         `;
     }
 
-    const tableRows = rows.map((row) => ({
-        "順位": row.rank,
-        "遷移": row.transition_label,
-        "ケース数": formatDashboardMetricNumber(row.case_count),
-        "平均待ち時間": row.avg_duration_text,
-        "最大待ち時間": row.max_duration_text,
-        "待ち時間シェア(%)": formatRootCauseRatio(row.wait_share_pct),
-        "改善インパクト": formatImpactScore(row.impact_score),
-        "改善インパクト比率(%)": formatRootCauseRatio(row.impact_share_pct),
-    }));
-
-    const metaText = impact.total_transition_count > impact.returned_transition_count
-        ? `改善インパクト指標の高い順に上位 ${impact.returned_transition_count} 件を表示しています。`
-        : "改善インパクト指標の高い順に表示しています。";
+    const safeSortKey = viewState.sortKey || "impact_score";
+    const safeMinCaseCount = String(viewState.minCaseCount || "");
+    const safeMinAvgDurationHours = String(viewState.minAvgDurationHours || "");
+    const safeDisplayLimit = String(viewState.displayLimit || 10);
+    const filteredRows = getFilteredImpactRows(impact, viewState);
+    const metaText = filteredRows.length
+        ? `${buildImpactSortLabel(safeSortKey)}の高い順に ${filteredRows.length} 件を表示しています。`
+        : "条件に一致する遷移がありません。";
 
     return `
         <section class="impact-panel">
@@ -520,8 +732,37 @@ function buildImpactSectionHtml(impact) {
                     <p class="result-meta">平均待ち時間 × 件数をもとに、改善効果の大きい遷移を表示しています。</p>
                 </div>
             </div>
+            <div class="impact-controls" role="group" aria-label="改善インパクト分析 controls">
+                <label class="field">
+                    <span>並び順</span>
+                    <select id="impact-sort-select">
+                        <option value="impact_score"${safeSortKey === "impact_score" ? " selected" : ""}>改善インパクト順</option>
+                        <option value="impact_share_pct"${safeSortKey === "impact_share_pct" ? " selected" : ""}>改善インパクト比率順</option>
+                        <option value="avg_duration_sec"${safeSortKey === "avg_duration_sec" ? " selected" : ""}>平均待ち時間順</option>
+                        <option value="case_count"${safeSortKey === "case_count" ? " selected" : ""}>ケース数順</option>
+                        <option value="max_duration_sec"${safeSortKey === "max_duration_sec" ? " selected" : ""}>最大待ち時間順</option>
+                    </select>
+                </label>
+                <label class="field">
+                    <span>最低ケース数</span>
+                    <input id="impact-min-case-count-input" type="number" min="0" step="1" value="${escapeHtml(safeMinCaseCount)}" placeholder="0">
+                </label>
+                <label class="field">
+                    <span>最低平均待ち時間(h)</span>
+                    <input id="impact-min-avg-hours-input" type="number" min="0" step="0.1" value="${escapeHtml(safeMinAvgDurationHours)}" placeholder="0">
+                </label>
+                <label class="field">
+                    <span>表示件数</span>
+                    <select id="impact-display-limit-select">
+                        <option value="10"${safeDisplayLimit === "10" ? " selected" : ""}>Top 10</option>
+                        <option value="20"${safeDisplayLimit === "20" ? " selected" : ""}>Top 20</option>
+                        <option value="50"${safeDisplayLimit === "50" ? " selected" : ""}>Top 50</option>
+                    </select>
+                </label>
+            </div>
             <p class="panel-note">${escapeHtml(metaText)}</p>
-            ${buildTable(tableRows, { wideHeaders: new Set(["遷移"]) })}
+            <p class="panel-note">対象遷移 ${escapeHtml(formatDashboardMetricNumber(rows.length))} 件 / 表示遷移 ${escapeHtml(formatDashboardMetricNumber(filteredRows.length))} 件</p>
+            ${buildImpactTableHtml(filteredRows)}
         </section>
     `;
 }
@@ -551,6 +792,313 @@ function buildVariantCoverageHtml(coverage) {
     `;
 }
 
+function getDefaultVariantViewState() {
+    return {
+        searchTerm: "",
+        sortKey: "count",
+        displayLimit: "10",
+    };
+}
+
+function buildVariantSearchText(variant) {
+    return [
+        `Variant #${variant?.variant_id || ""}`,
+        variant?.pattern || "",
+        getVariantSequenceText(variant),
+    ]
+        .join(" ")
+        .toLocaleLowerCase("ja-JP");
+}
+
+function buildVariantCoveragePayload(variantItems, totalCaseCount, displayLimit = 10) {
+    const safeLimit = Math.max(0, Number(displayLimit) || 0);
+    const coveredItems = safeLimit > 0
+        ? variantItems.slice(0, safeLimit)
+        : variantItems.slice();
+    const coveredCaseCount = coveredItems.reduce(
+        (sum, variant) => sum + Number(variant.count || 0),
+        0,
+    );
+
+    return {
+        displayed_variant_count: coveredItems.length,
+        covered_case_count: coveredCaseCount,
+        total_case_count: Number(totalCaseCount || 0),
+        ratio: totalCaseCount
+            ? coveredCaseCount / Number(totalCaseCount)
+            : 0,
+    };
+}
+
+function getVisibleVariants(variants, viewState = getDefaultVariantViewState()) {
+    const normalizedSearchTerm = String(viewState.searchTerm || "").trim().toLocaleLowerCase("ja-JP");
+    const safeSortKey = viewState.sortKey || "count";
+    const safeDisplayLimit = String(viewState.displayLimit || "10").trim().toLowerCase();
+    const filteredVariants = variants.filter((variant) => (
+        !normalizedSearchTerm || buildVariantSearchText(variant).includes(normalizedSearchTerm)
+    ));
+
+    filteredVariants.sort((leftVariant, rightVariant) => {
+        const numericDiff = Number(rightVariant[safeSortKey] || 0) - Number(leftVariant[safeSortKey] || 0);
+        if (numericDiff !== 0) {
+            return numericDiff;
+        }
+
+        const countDiff = Number(rightVariant.count || 0) - Number(leftVariant.count || 0);
+        if (countDiff !== 0) {
+            return countDiff;
+        }
+
+        return String(leftVariant.pattern || "").localeCompare(String(rightVariant.pattern || ""), "ja");
+    });
+
+    if (safeDisplayLimit === "all") {
+        return filteredVariants;
+    }
+
+    return filteredVariants.slice(0, Math.max(1, Number(safeDisplayLimit) || 10));
+}
+
+function buildVariantSortLabel(sortKey) {
+    switch (sortKey) {
+    case "ratio":
+        return "比率順";
+    case "avg_case_duration_sec":
+        return "平均所要時間順";
+    case "activity_count":
+        return "activity数順";
+    case "count":
+    default:
+        return "件数順";
+    }
+}
+
+function buildVariantTransitionKeys(activities = []) {
+    const transitionKeys = [];
+
+    for (let index = 0; index < activities.length - 1; index += 1) {
+        const fromActivity = String(activities[index] || "").trim();
+        const toActivity = String(activities[index + 1] || "").trim();
+        if (!fromActivity || !toActivity) {
+            continue;
+        }
+        transitionKeys.push(buildTransitionKey(fromActivity, toActivity));
+    }
+
+    return transitionKeys;
+}
+
+function buildLcsMatchPairs(baseActivities = [], targetActivities = []) {
+    const baseLength = baseActivities.length;
+    const targetLength = targetActivities.length;
+    const dp = Array.from({ length: baseLength + 1 }, () => Array(targetLength + 1).fill(0));
+
+    for (let baseIndex = baseLength - 1; baseIndex >= 0; baseIndex -= 1) {
+        for (let targetIndex = targetLength - 1; targetIndex >= 0; targetIndex -= 1) {
+            if (baseActivities[baseIndex] === targetActivities[targetIndex]) {
+                dp[baseIndex][targetIndex] = dp[baseIndex + 1][targetIndex + 1] + 1;
+            } else {
+                dp[baseIndex][targetIndex] = Math.max(
+                    dp[baseIndex + 1][targetIndex],
+                    dp[baseIndex][targetIndex + 1],
+                );
+            }
+        }
+    }
+
+    const matches = [];
+    let baseIndex = 0;
+    let targetIndex = 0;
+    while (baseIndex < baseLength && targetIndex < targetLength) {
+        if (baseActivities[baseIndex] === targetActivities[targetIndex]) {
+            matches.push({
+                baseIndex,
+                targetIndex,
+                activity: baseActivities[baseIndex],
+            });
+            baseIndex += 1;
+            targetIndex += 1;
+        } else if (dp[baseIndex + 1][targetIndex] >= dp[baseIndex][targetIndex + 1]) {
+            baseIndex += 1;
+        } else {
+            targetIndex += 1;
+        }
+    }
+
+    return matches;
+}
+
+function buildVariantDiffState(variants, selectedVariantId) {
+    const emptyState = {
+        enabled: false,
+        selectedIsBaseline: false,
+        baselineVariantId: null,
+        addedActivities: [],
+        skippedActivities: [],
+        branchPoints: [],
+        addedActivityNames: new Set(),
+        addedTransitionKeys: new Set(),
+        commonTransitionKeys: new Set(),
+    };
+
+    if (selectedVariantId === null || !Array.isArray(variants) || !variants.length) {
+        return emptyState;
+    }
+
+    const baselineVariant = variants[0];
+    const selectedVariant = variants.find(
+        (variant) => Number(variant.variant_id) === Number(selectedVariantId),
+    );
+
+    if (!baselineVariant || !selectedVariant) {
+        return emptyState;
+    }
+
+    if (Number(baselineVariant.variant_id) === Number(selectedVariant.variant_id)) {
+        return {
+            ...emptyState,
+            selectedIsBaseline: true,
+            baselineVariantId: baselineVariant.variant_id,
+        };
+    }
+
+    const baselineActivities = Array.isArray(baselineVariant.activities) ? baselineVariant.activities : [];
+    const selectedActivities = Array.isArray(selectedVariant.activities) ? selectedVariant.activities : [];
+    const matches = buildLcsMatchPairs(baselineActivities, selectedActivities);
+    const matchedBaseIndices = new Set(matches.map((item) => item.baseIndex));
+    const matchedTargetIndices = new Set(matches.map((item) => item.targetIndex));
+    const addedActivities = selectedActivities.filter((_, index) => !matchedTargetIndices.has(index));
+    const skippedActivities = baselineActivities.filter((_, index) => !matchedBaseIndices.has(index));
+    const baselineTransitionKeys = new Set(buildVariantTransitionKeys(baselineActivities));
+    const selectedTransitionKeys = buildVariantTransitionKeys(selectedActivities);
+    const selectedActivityNames = new Set(selectedActivities.map((activity) => String(activity || "").trim()).filter(Boolean));
+    const baselineActivityNames = new Set(baselineActivities.map((activity) => String(activity || "").trim()).filter(Boolean));
+    const branchPoints = [];
+    let previousBaseIndex = -1;
+    let previousTargetIndex = -1;
+
+    [...matches, { baseIndex: baselineActivities.length, targetIndex: selectedActivities.length }].forEach((match) => {
+        const skippedSlice = baselineActivities.slice(previousBaseIndex + 1, match.baseIndex);
+        const addedSlice = selectedActivities.slice(previousTargetIndex + 1, match.targetIndex);
+
+        if (skippedSlice.length || addedSlice.length) {
+            const focusActivities = [];
+            const previousAnchor = previousBaseIndex >= 0
+                ? baselineActivities[previousBaseIndex]
+                : "";
+            const nextAnchor = match.baseIndex < baselineActivities.length
+                ? baselineActivities[match.baseIndex]
+                : "";
+
+            if (previousAnchor) {
+                focusActivities.push(previousAnchor);
+            }
+            focusActivities.push(...addedSlice.filter(Boolean));
+            if (nextAnchor) {
+                focusActivities.push(nextAnchor);
+            }
+            branchPoints.push({
+                focusId: `branch-${branchPoints.length + 1}`,
+                anchor: `${previousBaseIndex >= 0 ? baselineActivities[previousBaseIndex] : "開始"} → ${match.baseIndex < baselineActivities.length ? baselineActivities[match.baseIndex] : "終了"}`,
+                addedActivities: [...new Set(addedSlice.filter(Boolean))],
+                skippedActivities: [...new Set(skippedSlice.filter(Boolean))],
+                focusActivities,
+                focusTransitions: buildVariantTransitionKeys(focusActivities),
+            });
+        }
+
+        previousBaseIndex = match.baseIndex;
+        previousTargetIndex = match.targetIndex;
+    });
+
+    return {
+        enabled: true,
+        selectedIsBaseline: false,
+        baselineVariantId: baselineVariant.variant_id,
+        addedActivities: [...new Set(addedActivities.filter(Boolean))],
+        skippedActivities: [...new Set(skippedActivities.filter(Boolean))],
+        branchPoints,
+        addedActivityNames: new Set(
+            [...selectedActivityNames].filter((activityName) => !baselineActivityNames.has(activityName)),
+        ),
+        addedTransitionKeys: new Set(
+            selectedTransitionKeys.filter((transitionKey) => !baselineTransitionKeys.has(transitionKey)),
+        ),
+        commonTransitionKeys: new Set(
+            selectedTransitionKeys.filter((transitionKey) => baselineTransitionKeys.has(transitionKey)),
+        ),
+    };
+}
+
+function buildVariantDiffBadgeList(items, toneClass, emptyText) {
+    if (!Array.isArray(items) || !items.length) {
+        return `<span class="variant-diff-empty">${escapeHtml(emptyText)}</span>`;
+    }
+
+    return items.slice(0, 5).map((item) => `
+        <span class="variant-diff-badge ${toneClass}">${escapeHtml(item)}</span>
+    `).join("") + (items.length > 5
+        ? `<span class="variant-diff-badge variant-diff-badge--more">+${escapeHtml(items.length - 5)}</span>`
+        : "");
+}
+
+function buildVariantBranchBadgeList(branchPoints, activeFocusId = "") {
+    if (!Array.isArray(branchPoints) || !branchPoints.length) {
+        return '<span class="variant-diff-empty">分岐ポイントはありません。</span>';
+    }
+
+    return branchPoints.slice(0, 4).map((branchPoint) => `
+        <button
+            type="button"
+            class="variant-diff-badge variant-diff-badge--branch${branchPoint.focusId === activeFocusId ? " variant-diff-badge--branch-active" : ""}"
+            data-branch-focus-id="${escapeHtml(branchPoint.focusId || "")}"
+            title="${escapeHtml(branchPoint.anchor || "")}"
+        >${escapeHtml(branchPoint.anchor)}</button>
+    `).join("") + (branchPoints.length > 4
+        ? `<span class="variant-diff-badge variant-diff-badge--more">+${escapeHtml(branchPoints.length - 4)}</span>`
+        : "");
+}
+
+function buildVariantDiffHtml(diffState, activeFocusId = "") {
+    if (!diffState?.selectedIsBaseline && !diffState?.enabled) {
+        return "";
+    }
+
+    if (diffState.selectedIsBaseline) {
+        return `
+            <div class="variant-diff-summary">
+                <p class="panel-note">この Variant が比較基準です。全体で最も多い Variant を基準フローとして扱います。</p>
+            </div>
+        `;
+    }
+
+    return `
+        <div class="variant-diff-summary">
+            <p class="panel-note">Variant #${escapeHtml(diffState.baselineVariantId)} を基準に差分を比較しています。</p>
+            <div class="variant-diff-grid">
+                <div class="variant-diff-group">
+                    <span class="variant-diff-label">追加 activity</span>
+                    <div class="variant-diff-badges">
+                        ${buildVariantDiffBadgeList(diffState.addedActivities, "variant-diff-badge--added", "追加 activity はありません。")}
+                    </div>
+                </div>
+                <div class="variant-diff-group">
+                    <span class="variant-diff-label">スキップ activity</span>
+                    <div class="variant-diff-badges">
+                        ${buildVariantDiffBadgeList(diffState.skippedActivities, "variant-diff-badge--skipped", "スキップ activity はありません。")}
+                    </div>
+                </div>
+                <div class="variant-diff-group">
+                    <span class="variant-diff-label">分岐ポイント</span>
+                    <div class="variant-diff-badges">
+                        ${buildVariantBranchBadgeList(diffState.branchPoints, activeFocusId)}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
 function buildFilterSelectionSummary(filters = {}, filterDefinitions = []) {
     const normalizedFilters = cloneDetailFilters(filters);
     const filterLabelMap = new Map(filterDefinitions.map((definition) => [definition.slot, definition.label]));
@@ -569,9 +1117,90 @@ function buildFilterSelectionSummary(filters = {}, filterDefinitions = []) {
         }
     });
 
+    if (normalizedFilters.activity_values.length) {
+        appliedItems.push(
+            `Activity ${normalizedFilters.activity_mode === "exclude" ? "除外" : "含む"}: ${normalizedFilters.activity_values.join(", ")}`
+        );
+    }
+
     return appliedItems.length
         ? appliedItems.join(" / ")
         : "分析対象条件未適用";
+}
+
+function replaceSingleSelectOptions(selectElement, options, selectedValue = "", emptyLabel = "全て") {
+    if (!selectElement) {
+        return;
+    }
+
+    const normalizedSelectedValue = String(selectedValue || "").trim();
+    const normalizedOptions = [...new Set(
+        (Array.isArray(options) ? options : [])
+            .map((value) => String(value || "").trim())
+            .filter(Boolean)
+    )];
+    if (normalizedSelectedValue && !normalizedOptions.includes(normalizedSelectedValue)) {
+        normalizedOptions.unshift(normalizedSelectedValue);
+    }
+
+    selectElement.innerHTML = `
+        <option value="">${escapeHtml(emptyLabel)}</option>
+        ${normalizedOptions.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}
+    `;
+    selectElement.value = normalizedSelectedValue;
+}
+
+function replaceMultiSelectOptions(selectElement, options, selectedValues = []) {
+    if (!selectElement) {
+        return;
+    }
+
+    const normalizedSelectedValues = [...new Set(
+        (Array.isArray(selectedValues) ? selectedValues : [])
+            .map((value) => String(value || "").trim())
+            .filter(Boolean)
+    )];
+    const normalizedOptions = [...new Set(
+        [
+            ...(Array.isArray(options) ? options : []),
+            ...normalizedSelectedValues,
+        ]
+            .map((value) => String(value || "").trim())
+            .filter(Boolean)
+    )];
+
+    selectElement.innerHTML = normalizedOptions.map((value) => `
+        <option value="${escapeHtml(value)}">${escapeHtml(value)}</option>
+    `).join("");
+
+    Array.from(selectElement.options).forEach((optionElement) => {
+        optionElement.selected = normalizedSelectedValues.includes(optionElement.value);
+    });
+}
+
+function readMultiSelectValues(selectElement) {
+    return Array.from(selectElement?.selectedOptions || [])
+        .map((optionElement) => String(optionElement.value || "").trim())
+        .filter(Boolean);
+}
+
+function buildActivityFilterOptions(variantItems = [], selectedValues = []) {
+    const optionSet = new Set(
+        (Array.isArray(selectedValues) ? selectedValues : [])
+            .map((value) => String(value || "").trim())
+            .filter(Boolean)
+    );
+
+    (Array.isArray(variantItems) ? variantItems : []).forEach((variant) => {
+        (Array.isArray(variant.activities) ? variant.activities : []).forEach((activityName) => {
+            const normalizedActivityName = String(activityName || "").trim();
+            if (normalizedActivityName) {
+                optionSet.add(normalizedActivityName);
+            }
+        });
+    });
+
+    return [...optionSet].sort((leftValue, rightValue) => leftValue.localeCompare(rightValue, "ja"));
 }
 
 function buildVariantSelectionState(variants, selectedVariantId) {
@@ -606,9 +1235,9 @@ function buildVariantSelectionState(variants, selectedVariantId) {
     };
 }
 
-function buildVariantCardsHtml(variants, selectedVariantId = null) {
+function buildVariantCardsHtml(variants, selectedVariantId = null, emptyMessage = "表示できる Variant がありません。") {
     if (!variants.length) {
-        return '<p class="empty-state">表示できるVariantがありません。</p>';
+        return `<p class="empty-state">${escapeHtml(emptyMessage)}</p>`;
     }
 
     return variants
@@ -803,6 +1432,10 @@ function applyProcessMapDecorators(viewportElement, options = {}) {
         transitionHeatmap = {},
         selectedActivity = "",
         selectedTransitionKey = "",
+        caseTraceActivities = new Set(),
+        caseTraceTransitions = new Set(),
+        variantDiffState = null,
+        variantBranchFocusState = null,
     } = options;
     const svgElement = viewportElement.querySelector("svg.process-map-svg");
 
@@ -810,33 +1443,59 @@ function applyProcessMapDecorators(viewportElement, options = {}) {
         return;
     }
 
-    const hasSelection = Boolean(selectedActivity || selectedTransitionKey);
+    const hasCaseTraceSelection = caseTraceActivities.size > 0 || caseTraceTransitions.size > 0;
+    const hasBranchFocus = Boolean(
+        (variantBranchFocusState?.focusActivities || []).length
+        || (variantBranchFocusState?.focusTransitions || []).length
+    );
+    const branchFocusActivities = new Set(variantBranchFocusState?.focusActivities || []);
+    const branchFocusTransitions = new Set(variantBranchFocusState?.focusTransitions || []);
+    const hasSelection = Boolean(selectedActivity || selectedTransitionKey || hasCaseTraceSelection || hasBranchFocus);
     const selectedTransitionActivities = collectSelectedTransitionActivities(svgElement, selectedTransitionKey);
+    const hasVariantDiff = Boolean(variantDiffState?.enabled);
+    const addedActivityNames = variantDiffState?.addedActivityNames || new Set();
+    const addedTransitionKeys = variantDiffState?.addedTransitionKeys || new Set();
+    const commonTransitionKeys = variantDiffState?.commonTransitionKeys || new Set();
 
     svgElement.querySelectorAll(".process-map-node-group").forEach((nodeGroupElement) => {
         const nodeRectElement = nodeGroupElement.querySelector(".process-map-node");
         const activityName = nodeRectElement?.dataset.activity || "";
         const isSelected = (Boolean(selectedActivity) && activityName === selectedActivity)
-            || selectedTransitionActivities.has(activityName);
+            || selectedTransitionActivities.has(activityName)
+            || caseTraceActivities.has(activityName);
 
         applyHeatClass(nodeRectElement, activityHeatmap[activityName]);
+        nodeGroupElement.classList.toggle("variant-diff-added", hasVariantDiff && addedActivityNames.has(activityName));
+        nodeGroupElement.classList.toggle("variant-diff-common", hasVariantDiff && !addedActivityNames.has(activityName));
+        nodeGroupElement.classList.toggle("branch-focus-selected", hasBranchFocus && branchFocusActivities.has(activityName));
+        nodeGroupElement.classList.toggle("branch-focus-dimmed", hasBranchFocus && !branchFocusActivities.has(activityName));
         nodeGroupElement.classList.toggle("is-selected", isSelected);
         nodeGroupElement.classList.toggle("is-dimmed", hasSelection && !isSelected);
     });
 
     svgElement.querySelectorAll(".process-map-edge").forEach((edgePathElement) => {
         const transitionKey = edgePathElement.dataset.transitionKey || "";
-        const isSelected = Boolean(selectedTransitionKey) && transitionKey === selectedTransitionKey;
+        const isSelected = (Boolean(selectedTransitionKey) && transitionKey === selectedTransitionKey)
+            || caseTraceTransitions.has(transitionKey);
 
         applyHeatClass(edgePathElement, transitionHeatmap[transitionKey]);
+        edgePathElement.classList.toggle("variant-diff-added", hasVariantDiff && addedTransitionKeys.has(transitionKey));
+        edgePathElement.classList.toggle("variant-diff-common", hasVariantDiff && commonTransitionKeys.has(transitionKey));
+        edgePathElement.classList.toggle("branch-focus-selected", hasBranchFocus && branchFocusTransitions.has(transitionKey));
+        edgePathElement.classList.toggle("branch-focus-dimmed", hasBranchFocus && !branchFocusTransitions.has(transitionKey));
         edgePathElement.classList.toggle("is-selected", isSelected);
         edgePathElement.classList.toggle("is-dimmed", hasSelection && !isSelected);
     });
 
     svgElement.querySelectorAll(".process-map-edge-label").forEach((edgeLabelElement) => {
         const transitionKey = edgeLabelElement.dataset.transitionKey || "";
-        const isSelected = Boolean(selectedTransitionKey) && transitionKey === selectedTransitionKey;
+        const isSelected = (Boolean(selectedTransitionKey) && transitionKey === selectedTransitionKey)
+            || caseTraceTransitions.has(transitionKey);
 
+        edgeLabelElement.classList.toggle("variant-diff-added", hasVariantDiff && addedTransitionKeys.has(transitionKey));
+        edgeLabelElement.classList.toggle("variant-diff-common", hasVariantDiff && commonTransitionKeys.has(transitionKey));
+        edgeLabelElement.classList.toggle("branch-focus-selected", hasBranchFocus && branchFocusTransitions.has(transitionKey));
+        edgeLabelElement.classList.toggle("branch-focus-dimmed", hasBranchFocus && !branchFocusTransitions.has(transitionKey));
         edgeLabelElement.classList.toggle("is-selected", isSelected);
         edgeLabelElement.classList.toggle("is-dimmed", hasSelection && !isSelected);
     });
@@ -872,6 +1531,7 @@ function renderSummary(data, analysis) {
 
     summaryPanel.innerHTML = `
         ${summaryCardsHtml}
+        ${buildInsightsSectionHtml(data.insights)}
         ${buildDashboardCardsHtml(data.dashboard)}
         ${buildRootCauseSectionHtml(data.root_cause)}
     `;
@@ -1671,6 +2331,43 @@ function downloadBlob(blob, fileName) {
     URL.revokeObjectURL(objectUrl);
 }
 
+async function downloadDetailExcelExport(runId, options = {}) {
+    const exportUrl = buildDetailExcelExportUrl(runId, options);
+    const fallbackFileName = `process_mining_${analysisKey || "detail"}.xlsx`;
+
+    if (detailExportExcelButton) {
+        detailExportExcelButton.disabled = true;
+    }
+    setStatus("Excel を生成しています...", "info");
+
+    try {
+        const response = await fetch(exportUrl);
+
+        if (!response.ok) {
+            let errorMessage = "Excel 出力に失敗しました。";
+            const contentType = response.headers.get("Content-Type") || "";
+            if (contentType.includes("application/json")) {
+                const payload = await response.json();
+                errorMessage = payload.detail || payload.error || errorMessage;
+            } else {
+                const responseText = await response.text();
+                errorMessage = responseText || errorMessage;
+            }
+            throw new Error(errorMessage);
+        }
+
+        const exportBlob = await response.blob();
+        downloadBlob(exportBlob, getDownloadFileName(response, fallbackFileName));
+        setStatus("Excel をダウンロードしました。", "success");
+    } catch (error) {
+        setStatus(error.message, "error");
+    } finally {
+        if (detailExportExcelButton) {
+            detailExportExcelButton.disabled = false;
+        }
+    }
+}
+
 function buildProcessMapExportSvg() {
     const svgElement = document.querySelector("#process-map-viewport svg");
 
@@ -2117,6 +2814,65 @@ function renderProcessHeatLegend() {
     `;
 }
 
+function renderProcessRuleLegend() {
+    const ruleItems = [
+        {
+            key: "selected",
+            label: "選択強調 (外枠 / シャドウ)",
+            description: "Activity / Transition / Case trace で選択中の対象です。",
+            toneClass: "process-rule-legend-visual--selected",
+        },
+        {
+            key: "dimmed",
+            label: "非選択 (dimmed)",
+            description: "選択中以外の activity / transition を薄く表示します。",
+            toneClass: "process-rule-legend-visual--dimmed",
+        },
+        {
+            key: "variant-added",
+            label: "Variant 固有ルート (差分色)",
+            description: "比較基準 Variant に無い activity / transition を差分色で示します。",
+            toneClass: "process-rule-legend-visual--variant-added",
+        },
+        {
+            key: "variant-common",
+            label: "Variant 共通ルート (共通色)",
+            description: "比較基準 Variant と共通するルートです。",
+            toneClass: "process-rule-legend-visual--variant-common",
+        },
+        {
+            key: "branch-focus",
+            label: "分岐ポイント focus (専用色)",
+            description: "差分サマリーの分岐ポイント chip で選択した区間です。",
+            toneClass: "process-rule-legend-visual--branch-focus",
+        },
+    ];
+
+    return `
+        <section class="process-rule-legend" aria-label="Process map display rules">
+            <div class="process-explorer-control-head">
+                <span>表示ルール</span>
+                <strong>Map guide</strong>
+            </div>
+            <div class="process-rule-legend-grid">
+                ${ruleItems.map((item) => `
+                    <article class="process-rule-legend-item" data-process-rule-key="${escapeHtml(item.key)}">
+                        <div class="process-rule-legend-visual ${escapeHtml(item.toneClass)}" aria-hidden="true">
+                            <span class="process-rule-legend-node"></span>
+                            <span class="process-rule-legend-edge"></span>
+                        </div>
+                        <div class="process-rule-legend-copy">
+                            <strong>${escapeHtml(item.label)}</strong>
+                            <p>${escapeHtml(item.description)}</p>
+                        </div>
+                    </article>
+                `).join("")}
+            </div>
+            <p class="process-rule-legend-note">待ち時間の色分けは Heatmap、外枠と差分色の意味はこの凡例を参照してください。</p>
+        </section>
+    `;
+}
+
 // -----------------------------------------------------------------------------
 // Detail page interactive flow explorer
 // -----------------------------------------------------------------------------
@@ -2143,21 +2899,43 @@ async function initializePatternFlowExplorer(runId, impact = null) {
     const variantSelectionTitle = document.getElementById("variant-selection-title");
     const variantSelectionMeta = document.getElementById("variant-selection-meta");
     const variantSelectionSequence = document.getElementById("variant-selection-sequence");
+    const variantSelectionDiff = document.getElementById("variant-selection-diff");
+    const variantSearchInput = document.getElementById("variant-search-input");
+    const variantSortSelect = document.getElementById("variant-sort-select");
+    const variantDisplayLimitSelect = document.getElementById("variant-display-limit-select");
+    const variantResultsMeta = document.getElementById("variant-results-meta");
     const activityBottleneckList = document.getElementById("activity-bottleneck-list");
     const transitionBottleneckList = document.getElementById("transition-bottleneck-list");
     const impactPanel = chartContainer.querySelector(".impact-panel");
     const transitionCasePanel = document.getElementById("transition-case-panel");
+    const detailFilterForm = document.getElementById("detail-light-filter-form");
+    const detailFilterDateFromInput = document.getElementById("detail-light-date-from");
+    const detailFilterDateToInput = document.getElementById("detail-light-date-to");
+    const detailFilterActivityModeSelect = document.getElementById("detail-light-activity-mode");
+    const detailFilterActivityValuesSelect = document.getElementById("detail-light-activity-values");
+    const detailFilterResetButton = document.getElementById("detail-light-filter-reset");
     const filterSummaryMeta = document.getElementById("detail-filter-summary");
     const filterCountMeta = document.getElementById("detail-filter-counts");
+    const currentSelectionState = document.getElementById("current-selection-state");
+    const currentSelectionStateTitle = document.getElementById("current-selection-state-title");
+    const currentSelectionStateMeta = document.getElementById("current-selection-state-meta");
     const caseTraceForm = document.getElementById("case-trace-form");
     const caseTraceInput = document.getElementById("case-trace-input");
     const caseTraceResult = document.getElementById("case-trace-result");
+    const detailFilterValueSelects = FILTER_SLOT_KEYS.map((_, index) => document.getElementById(`detail-light-filter-value-${index + 1}`));
+    const detailFilterLabelElements = FILTER_SLOT_KEYS.map((_, index) => document.getElementById(`detail-light-filter-label-${index + 1}`));
     let selectedVariantId = null;
     let selectedActivity = "";
     let selectedTransitionKey = "";
+    let caseTraceActivities = new Set();
+    let caseTraceTransitions = new Set();
     let variants = [];
     let variantCoverage = null;
     let variantErrorMessage = "";
+    let variantViewState = getDefaultVariantViewState();
+    let variantDiffState = buildVariantDiffState([], null);
+    let variantBranchFocusState = null;
+    let currentSelectionSource = "";
     let bottleneckSummary = null;
     let bottleneckErrorMessage = "";
     let transitionCaseRows = [];
@@ -2166,7 +2944,10 @@ async function initializePatternFlowExplorer(runId, impact = null) {
     let caseTracePayload = null;
     let caseTraceErrorMessage = "";
     let filterDefinitions = buildDefaultFilterDefinitions();
-    const impactSummary = impact || { has_data: false, rows: [] };
+    let impactSummary = impact || { has_data: false, rows: [] };
+    let impactViewState = getDefaultImpactViewState();
+    let draftDetailFilters = cloneDetailFilters(activeDetailFilters);
+    let filterOptionsPayload = null;
     let filteredCounts = {
         caseCount: 0,
         eventCount: 0,
@@ -2198,19 +2979,48 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         || !variantSelectionTitle
         || !variantSelectionMeta
         || !variantSelectionSequence
+        || !variantSelectionDiff
+        || !variantSearchInput
+        || !variantSortSelect
+        || !variantDisplayLimitSelect
+        || !variantResultsMeta
         || !activityBottleneckList
         || !transitionBottleneckList
         || !transitionCasePanel
+        || !detailFilterForm
+        || !detailFilterDateFromInput
+        || !detailFilterDateToInput
+        || !detailFilterActivityModeSelect
+        || !detailFilterActivityValuesSelect
+        || !detailFilterResetButton
         || !filterSummaryMeta
         || !filterCountMeta
+        || !currentSelectionState
+        || !currentSelectionStateTitle
+        || !currentSelectionStateMeta
         || !caseTraceForm
         || !caseTraceInput
         || !caseTraceResult
+        || detailFilterValueSelects.some((selectElement) => !selectElement)
+        || detailFilterLabelElements.some((labelElement) => !labelElement)
     ) {
         return;
     }
 
     let requestVersion = 0;
+
+    if (detailExportExcelButton) {
+        detailExportExcelButton.onclick = () => {
+            void downloadDetailExcelExport(runId, {
+                analysisKeyName: analysisKey,
+                filters: activeDetailFilters,
+                variantId: selectedVariantId,
+                selectedActivity,
+                selectedTransitionKey,
+                caseId: caseTracePayload?.found ? caseTracePayload.case_id : "",
+            });
+        };
+    }
 
     function resolveTransitionLabel(transitionItem, transitionKey = "") {
         if (transitionItem) {
@@ -2268,35 +3078,405 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         filterCountMeta.textContent = `対象ケース数 ${Number(filteredCounts.caseCount || 0).toLocaleString("ja-JP")} / 対象イベント数 ${Number(filteredCounts.eventCount || 0).toLocaleString("ja-JP")}`;
     }
 
-    function syncImpactPanel() {
-        if (!impactPanel) {
+    function syncDetailFilterControls() {
+        const nextDraftFilters = cloneDetailFilters(draftDetailFilters);
+
+        if (detailFilterDateFromInput.value !== nextDraftFilters.date_from) {
+            detailFilterDateFromInput.value = nextDraftFilters.date_from;
+        }
+        if (detailFilterDateToInput.value !== nextDraftFilters.date_to) {
+            detailFilterDateToInput.value = nextDraftFilters.date_to;
+        }
+        if (detailFilterActivityModeSelect.value !== nextDraftFilters.activity_mode) {
+            detailFilterActivityModeSelect.value = nextDraftFilters.activity_mode;
+        }
+
+        const activityOptions = buildActivityFilterOptions(variants, nextDraftFilters.activity_values);
+        replaceMultiSelectOptions(detailFilterActivityValuesSelect, activityOptions, nextDraftFilters.activity_values);
+        detailFilterActivityModeSelect.disabled = activityOptions.length === 0 && nextDraftFilters.activity_values.length === 0;
+        detailFilterActivityValuesSelect.disabled = activityOptions.length === 0 && nextDraftFilters.activity_values.length === 0;
+
+        filterDefinitions.forEach((definition, index) => {
+            const detailFilterLabelElement = detailFilterLabelElements[index];
+            const detailFilterValueSelect = detailFilterValueSelects[index];
+            const selectedValue = nextDraftFilters[definition.slot] || "";
+
+            if (detailFilterLabelElement) {
+                detailFilterLabelElement.textContent = definition.label || DEFAULT_FILTER_LABELS[definition.slot];
+            }
+            replaceSingleSelectOptions(
+                detailFilterValueSelect,
+                definition.options || [],
+                selectedValue,
+                "全て"
+            );
+            detailFilterValueSelect.disabled = !definition.column_name && !selectedValue;
+        });
+    }
+
+    function readDraftDetailFilters() {
+        const nextDraftFilters = cloneDetailFilters({
+            date_from: detailFilterDateFromInput.value,
+            date_to: detailFilterDateToInput.value,
+            filter_value_1: detailFilterValueSelects[0]?.value || "",
+            filter_value_2: detailFilterValueSelects[1]?.value || "",
+            filter_value_3: detailFilterValueSelects[2]?.value || "",
+            activity_mode: detailFilterActivityModeSelect.value,
+            activity_values: readMultiSelectValues(detailFilterActivityValuesSelect),
+        });
+
+        draftDetailFilters = nextDraftFilters;
+        return nextDraftFilters;
+    }
+
+    async function refreshDetailAnalysisPanels() {
+        const detailData = await loadAnalysisPage(runId, 0, activeDetailFilters);
+        const analysis = detailData.analyses[analysisKey];
+
+        if (!analysis) {
+            throw new Error("指定した分析結果が見つかりません。");
+        }
+
+        currentDetailColumnSettings = detailData.column_settings || currentDetailColumnSettings;
+        filterDefinitions = normalizeFilterDefinitions(
+            filterOptionsPayload?.options?.filters || [],
+            currentDetailColumnSettings
+        );
+        activeDetailFilters = cloneDetailFilters(detailData.applied_filters || DEFAULT_DETAIL_FILTERS);
+        draftDetailFilters = cloneDetailFilters(activeDetailFilters);
+        impactSummary = detailData.impact || { has_data: false, rows: [] };
+        filteredCounts = {
+            caseCount: Number(detailData.case_count || 0),
+            eventCount: Number(detailData.event_count || 0),
+        };
+
+        renderSummary(detailData, analysis);
+        renderResult(analysis, runId, detailPageAnalysisLoader);
+        renderFilterSummary();
+        syncDetailFilterControls();
+        return detailData;
+    }
+
+    async function applyDetailFilters() {
+        readDraftDetailFilters();
+        activeDetailFilters = cloneDetailFilters(draftDetailFilters);
+        resetSelectionState();
+        setStatus("分析対象条件を適用しています...", "info");
+
+        try {
+            await refreshDetailAnalysisPanels();
+            await refreshVariantSummary();
+            await refreshBottleneckSummary();
+            syncDetailFilterControls();
+            syncVariantPanel();
+            syncBottleneckPanel();
+            syncImpactPanel();
+            renderCaseTracePanel();
+            renderTransitionCasePanel();
+            await updateProcessMap();
+            hideStatus();
+        } catch (error) {
+            setStatus(error.message, "error");
+        }
+    }
+
+    async function resetDetailFilters() {
+        draftDetailFilters = cloneDetailFilters(DEFAULT_DETAIL_FILTERS);
+        syncDetailFilterControls();
+        await applyDetailFilters();
+    }
+
+    function getFallbackSelectionSource() {
+        if (caseTraceActivities.size > 0 || caseTraceTransitions.size > 0) {
+            return "case-trace";
+        }
+        if (variantBranchFocusState?.focusId) {
+            return "branch-focus";
+        }
+        if (selectedTransitionKey) {
+            return "transition";
+        }
+        if (selectedActivity) {
+            return "activity-bottleneck";
+        }
+        if (selectedVariantId !== null) {
+            return "variant";
+        }
+        return "";
+    }
+
+    function getActiveSelectionSource() {
+        switch (currentSelectionSource) {
+        case "case-trace":
+            return (caseTraceActivities.size > 0 || caseTraceTransitions.size > 0)
+                ? currentSelectionSource
+                : getFallbackSelectionSource();
+        case "branch-focus":
+            return variantBranchFocusState?.focusId
+                ? currentSelectionSource
+                : getFallbackSelectionSource();
+        case "transition-bottleneck":
+        case "impact":
+        case "transition":
+            return selectedTransitionKey
+                ? currentSelectionSource
+                : getFallbackSelectionSource();
+        case "activity-bottleneck":
+            return selectedActivity
+                ? currentSelectionSource
+                : getFallbackSelectionSource();
+        case "variant":
+            return selectedVariantId !== null
+                ? currentSelectionSource
+                : getFallbackSelectionSource();
+        default:
+            return getFallbackSelectionSource();
+        }
+    }
+
+    function buildCurrentSelectionState() {
+        const activeSource = getActiveSelectionSource();
+        const selectedVariant = variants.find((variant) => Number(variant.variant_id) === Number(selectedVariantId));
+        const selectedTransition = selectedTransitionKey
+            ? findSelectedTransitionDetails()
+            : null;
+        const transitionLabel = selectedTransition
+            ? resolveTransitionLabel(selectedTransition, selectedTransitionKey)
+            : resolveTransitionLabel(null, selectedTransitionKey);
+        const branchLabel = variantBranchFocusState?.anchor || "差分区間";
+        const caseTraceCaseId = caseTracePayload?.case_id || searchedCaseId || "";
+
+        switch (activeSource) {
+        case "case-trace":
+            return {
+                source: activeSource,
+                title: `Case trace: ${caseTraceCaseId || "-"}`,
+                meta: "Case ID検索で見つかったケース経路を強調しています。全体表示で解除できます。",
+            };
+        case "branch-focus":
+            return {
+                source: activeSource,
+                title: `分岐ポイント focus: ${branchLabel}`,
+                meta: "Variant差分サマリーで選択した差分区間を強調しています。全体表示で解除できます。",
+            };
+        case "impact":
+            return {
+                source: activeSource,
+                title: `改善インパクト: ${transitionLabel}`,
+                meta: "改善インパクト分析で選択した遷移を強調しています。全体表示で解除できます。",
+            };
+        case "transition-bottleneck":
+            return {
+                source: activeSource,
+                title: `Transition bottleneck: ${transitionLabel}`,
+                meta: "Bottleneck Analysis で選択した遷移を強調しています。全体表示で解除できます。",
+            };
+        case "transition":
+            return {
+                source: activeSource,
+                title: `遷移選択: ${transitionLabel}`,
+                meta: "選択した遷移を強調しています。全体表示で解除できます。",
+            };
+        case "activity-bottleneck":
+            return {
+                source: activeSource,
+                title: `Activity bottleneck: ${selectedActivity || "-"}`,
+                meta: "Bottleneck Analysis で選択した activity を強調しています。全体表示で解除できます。",
+            };
+        case "variant":
+            return {
+                source: activeSource,
+                title: selectedVariant
+                    ? `Variant #${selectedVariant.variant_id} 選択中`
+                    : `Variant #${selectedVariantId} 選択中`,
+                meta: "選択した Variant に属するケースでフロー図と分析結果を表示しています。全体表示で解除できます。",
+            };
+        default:
+            return {
+                source: "none",
+                title: "全体表示中",
+                meta: "現在は全ケースを使ったフロー図を表示しています。Variant Analysis の全体表示で解除できます。",
+            };
+        }
+    }
+
+    function renderCurrentSelectionState() {
+        const selectionState = buildCurrentSelectionState();
+        currentSelectionState.dataset.selectionSource = selectionState.source || "none";
+        currentSelectionStateTitle.textContent = selectionState.title;
+        currentSelectionStateMeta.textContent = selectionState.meta;
+    }
+
+    function getActiveProcessRuleKeys() {
+        const activeKeys = new Set();
+        const hasCaseTraceSelection = caseTraceActivities.size > 0 || caseTraceTransitions.size > 0;
+        const hasTransitionSelection = Boolean(selectedActivity || selectedTransitionKey);
+
+        if (variantDiffState?.enabled) {
+            activeKeys.add("variant-added");
+            activeKeys.add("variant-common");
+        }
+
+        if (variantBranchFocusState?.focusId) {
+            activeKeys.add("branch-focus");
+            activeKeys.add("dimmed");
+            return activeKeys;
+        }
+
+        if (hasCaseTraceSelection || hasTransitionSelection) {
+            activeKeys.add("selected");
+            activeKeys.add("dimmed");
+        }
+
+        return activeKeys;
+    }
+
+    function syncProcessRuleLegend() {
+        const activeKeys = getActiveProcessRuleKeys();
+        chartContainer.querySelectorAll("[data-process-rule-key]").forEach((legendItemElement) => {
+            const ruleKey = legendItemElement.dataset.processRuleKey || "";
+            legendItemElement.classList.toggle("is-active", activeKeys.has(ruleKey));
+        });
+    }
+
+    function syncVariantControls() {
+        if (variantSearchInput.value !== variantViewState.searchTerm) {
+            variantSearchInput.value = variantViewState.searchTerm;
+        }
+        if (variantSortSelect.value !== variantViewState.sortKey) {
+            variantSortSelect.value = variantViewState.sortKey;
+        }
+        if (variantDisplayLimitSelect.value !== String(variantViewState.displayLimit)) {
+            variantDisplayLimitSelect.value = String(variantViewState.displayLimit);
+        }
+    }
+
+    function resetVariantBranchFocusState() {
+        variantBranchFocusState = null;
+    }
+
+    function findVariantBranchFocusState(focusId) {
+        if (!focusId || !Array.isArray(variantDiffState?.branchPoints)) {
+            return null;
+        }
+
+        return variantDiffState.branchPoints.find((branchPoint) => branchPoint.focusId === focusId) || null;
+    }
+
+    function scrollVariantBranchFocusIntoView(viewportElement, focusState) {
+        if (!focusState) {
             return;
         }
 
-        const rowElements = Array.from(impactPanel.querySelectorAll("tbody tr"));
-        rowElements.forEach((rowElement, index) => {
-            const impactRow = (impactSummary?.rows || [])[index];
-            if (!impactRow) {
+        const firstActivity = Array.isArray(focusState.focusActivities)
+            ? focusState.focusActivities.find(Boolean)
+            : "";
+        const processMapWrap = viewportElement.querySelector(".process-map-wrap");
+        const nodeElement = firstActivity
+            ? viewportElement.querySelector(`.process-map-node-group[data-node="${CSS.escape(firstActivity)}"]`)
+            : null;
+
+        if (processMapWrap && nodeElement) {
+            const wrapRect = processMapWrap.getBoundingClientRect();
+            const nodeRect = nodeElement.getBoundingClientRect();
+            const nextTop = processMapWrap.scrollTop
+                + (nodeRect.top - wrapRect.top)
+                - Math.max(0, (wrapRect.height - nodeRect.height) / 2);
+            const nextLeft = processMapWrap.scrollLeft
+                + (nodeRect.left - wrapRect.left)
+                - Math.max(0, (wrapRect.width - nodeRect.width) / 2);
+
+            processMapWrap.scrollTo({
+                top: Math.max(0, nextTop),
+                left: Math.max(0, nextLeft),
+                behavior: "smooth",
+            });
+        }
+    }
+
+    async function applyVariantBranchFocus(nextFocusId) {
+        const nextFocusState = variantBranchFocusState?.focusId === nextFocusId
+            ? null
+            : findVariantBranchFocusState(nextFocusId);
+
+        variantBranchFocusState = nextFocusState;
+        currentSelectionSource = nextFocusState
+            ? "branch-focus"
+            : (selectedVariantId !== null ? "variant" : "");
+        selectedActivity = "";
+        selectedTransitionKey = "";
+        resetCaseTraceHighlightState();
+        transitionCaseRows = [];
+        transitionCaseErrorMessage = "";
+        saveFlowSelection(runId, selectedVariantId, selectedActivity, selectedTransitionKey);
+        syncVariantPanel();
+        syncBottleneckPanel();
+        syncImpactPanel();
+        renderTransitionCasePanel();
+        await updateProcessMap();
+    }
+
+    function bindImpactNumberInput(inputElement, stateKey) {
+        if (!inputElement) {
+            return;
+        }
+
+        const applyInputValue = () => {
+            impactViewState[stateKey] = String(inputElement.value || "").trim();
+            syncImpactPanel();
+        };
+
+        inputElement.addEventListener("change", applyInputValue);
+        inputElement.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter") {
                 return;
             }
+            event.preventDefault();
+            applyInputValue();
+        });
+    }
 
-            const transitionKey = impactRow.transition_key || buildTransitionKey(impactRow.from_activity, impactRow.to_activity);
+    function syncImpactPanel() {
+        let currentImpactPanel = chartContainer.querySelector(".impact-panel");
+        if (!currentImpactPanel) {
+            return;
+        }
+
+        currentImpactPanel.outerHTML = buildImpactSectionHtml(impactSummary, impactViewState);
+        currentImpactPanel = chartContainer.querySelector(".impact-panel");
+
+        currentImpactPanel.querySelector("#impact-sort-select")?.addEventListener("change", (event) => {
+            impactViewState.sortKey = event.target.value || "impact_score";
+            syncImpactPanel();
+        });
+        bindImpactNumberInput(currentImpactPanel.querySelector("#impact-min-case-count-input"), "minCaseCount");
+        bindImpactNumberInput(currentImpactPanel.querySelector("#impact-min-avg-hours-input"), "minAvgDurationHours");
+        currentImpactPanel.querySelector("#impact-display-limit-select")?.addEventListener("change", (event) => {
+            impactViewState.displayLimit = Number(event.target.value || 10);
+            syncImpactPanel();
+        });
+
+        const rowElements = Array.from(currentImpactPanel.querySelectorAll("tbody tr"));
+        rowElements.forEach((rowElement) => {
+            const transitionKey = rowElement.dataset.impactTransitionKey || "";
+            if (!transitionKey) {
+                return;
+            }
             const isSelected = Boolean(selectedTransitionKey) && transitionKey === selectedTransitionKey;
 
-            rowElement.dataset.impactTransitionKey = transitionKey;
             rowElement.classList.add("transition-step-row");
             rowElement.classList.toggle("transition-step-row--selected", isSelected);
             rowElement.setAttribute("tabindex", "0");
             rowElement.setAttribute("aria-selected", isSelected ? "true" : "false");
             rowElement.onclick = () => {
-                void applyTransitionSelection(transitionKey);
+                void applyTransitionSelection(transitionKey, "impact");
             };
             rowElement.onkeydown = (event) => {
                 if (event.key !== "Enter" && event.key !== " ") {
                     return;
                 }
                 event.preventDefault();
-                void applyTransitionSelection(transitionKey);
+                void applyTransitionSelection(transitionKey, "impact");
             };
         });
     }
@@ -2305,14 +3485,49 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         selectedVariantId = null;
         selectedActivity = "";
         selectedTransitionKey = "";
+        caseTraceActivities = new Set();
+        caseTraceTransitions = new Set();
+        resetVariantBranchFocusState();
+        currentSelectionSource = "";
         transitionCaseRows = [];
         transitionCaseErrorMessage = "";
         saveFlowSelection(runId, selectedVariantId, selectedActivity, selectedTransitionKey);
     }
 
-    async function applyTransitionSelection(nextTransitionKey) {
+    function resetCaseTraceHighlightState() {
+        caseTraceActivities = new Set();
+        caseTraceTransitions = new Set();
+    }
+
+    function applyCaseTraceHighlight(payload) {
+        const activitySet = new Set();
+        const transitionSet = new Set();
+        const events = Array.isArray(payload?.events) ? payload.events : [];
+
+        events.forEach((eventRow) => {
+            const activityName = String(eventRow.activity || "").trim();
+            const nextActivityName = String(eventRow.next_activity || "").trim();
+
+            if (activityName) {
+                activitySet.add(activityName);
+            }
+            if (activityName && nextActivityName) {
+                transitionSet.add(buildTransitionKey(activityName, nextActivityName));
+            }
+        });
+
+        caseTraceActivities = activitySet;
+        caseTraceTransitions = transitionSet;
+    }
+
+    async function applyTransitionSelection(nextTransitionKey, selectionSource = "transition") {
         selectedTransitionKey = selectedTransitionKey === nextTransitionKey ? "" : nextTransitionKey;
+        currentSelectionSource = selectedTransitionKey
+            ? selectionSource
+            : (selectedVariantId !== null ? "variant" : "");
         selectedActivity = "";
+        resetCaseTraceHighlightState();
+        resetVariantBranchFocusState();
         transitionCaseRows = [];
         transitionCaseErrorMessage = "";
         saveFlowSelection(runId, selectedVariantId, selectedActivity, selectedTransitionKey);
@@ -2491,7 +3706,11 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         caseTraceErrorMessage = "";
 
         if (!normalizedCaseId) {
+            resetCaseTraceHighlightState();
+            currentSelectionSource = getFallbackSelectionSource();
             renderCaseTracePanel();
+            syncVariantPanel();
+            await updateProcessMap();
             return;
         }
 
@@ -2505,6 +3724,30 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         }
 
         renderCaseTracePanel();
+
+        if (!caseTracePayload?.found) {
+            resetCaseTraceHighlightState();
+            resetVariantBranchFocusState();
+            currentSelectionSource = getFallbackSelectionSource();
+            syncVariantPanel();
+            await updateProcessMap();
+            return;
+        }
+
+        selectedVariantId = null;
+        selectedActivity = "";
+        selectedTransitionKey = "";
+        resetVariantBranchFocusState();
+        currentSelectionSource = "case-trace";
+        transitionCaseRows = [];
+        transitionCaseErrorMessage = "";
+        applyCaseTraceHighlight(caseTracePayload);
+        saveFlowSelection(runId, selectedVariantId, selectedActivity, selectedTransitionKey);
+        syncVariantPanel();
+        syncBottleneckPanel();
+        syncImpactPanel();
+        renderTransitionCasePanel();
+        await updateProcessMap();
     }
 
     async function refreshBottleneckSummary() {
@@ -2539,13 +3782,13 @@ async function initializePatternFlowExplorer(runId, impact = null) {
     async function refreshVariantSummary() {
         try {
             variantErrorMessage = "";
-            const variantPayload = await loadVariantList(runId, 10, activeDetailFilters);
+            const variantPayload = await loadVariantList(runId, 0, activeDetailFilters);
             variants = Array.isArray(variantPayload.variants) ? variantPayload.variants : [];
-            variantCoverage = variantPayload.coverage || null;
             filteredCounts = {
                 caseCount: Number(variantPayload.filtered_case_count || 0),
                 eventCount: Number(variantPayload.filtered_event_count || 0),
             };
+            variantCoverage = buildVariantCoveragePayload(variants, filteredCounts.caseCount, 10);
             renderFilterSummary();
 
             if (selectedVariantId !== null && !variants.some((variant) => Number(variant.variant_id) === Number(selectedVariantId))) {
@@ -2556,6 +3799,7 @@ async function initializePatternFlowExplorer(runId, impact = null) {
                 transitionCaseErrorMessage = "";
                 saveFlowSelection(runId, selectedVariantId, selectedActivity, selectedTransitionKey);
             }
+            syncDetailFilterControls();
         } catch (error) {
             variantErrorMessage = error.message;
             variants = [];
@@ -2565,6 +3809,7 @@ async function initializePatternFlowExplorer(runId, impact = null) {
                 eventCount: 0,
             };
             renderFilterSummary();
+            syncDetailFilterControls();
         }
     }
 
@@ -2591,7 +3836,12 @@ async function initializePatternFlowExplorer(runId, impact = null) {
             buttonElement.addEventListener("click", async () => {
                 const activityName = buttonElement.dataset.activity || "";
                 selectedActivity = selectedActivity === activityName ? "" : activityName;
+                currentSelectionSource = selectedActivity
+                    ? "activity-bottleneck"
+                    : (selectedVariantId !== null ? "variant" : "");
                 selectedTransitionKey = "";
+                resetCaseTraceHighlightState();
+                resetVariantBranchFocusState();
                 transitionCaseRows = [];
                 transitionCaseErrorMessage = "";
                 saveFlowSelection(runId, selectedVariantId, selectedActivity, selectedTransitionKey);
@@ -2606,7 +3856,7 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         transitionBottleneckList.querySelectorAll("[data-bottleneck-kind='transition']").forEach((buttonElement) => {
             buttonElement.addEventListener("click", async () => {
                 const transitionKey = buttonElement.dataset.transitionKey || "";
-                await applyTransitionSelection(transitionKey);
+                await applyTransitionSelection(transitionKey, "transition-bottleneck");
             });
         });
 
@@ -2615,35 +3865,70 @@ async function initializePatternFlowExplorer(runId, impact = null) {
 
     function syncVariantPanel() {
         if (variantErrorMessage) {
+            variantDiffState = buildVariantDiffState([], null);
             variantList.innerHTML = `<p class="empty-state">${escapeHtml(variantErrorMessage)}</p>`;
             variantCoverageMeta.innerHTML = '<p class="panel-note">Coverage could not be loaded.</p>';
             variantSelectionTitle.textContent = "Variant data is unavailable";
             variantSelectionMeta.textContent = "Variant list could not be loaded.";
             variantSelectionSequence.textContent = "";
             variantSelectionSequence.title = "";
+            variantSelectionDiff.innerHTML = "";
+            variantResultsMeta.textContent = "";
+            variantSearchInput.disabled = true;
+            variantSortSelect.disabled = true;
+            variantDisplayLimitSelect.disabled = true;
             variantResetButton.disabled = true;
             patternsSlider.disabled = false;
             activitiesSlider.disabled = false;
             connectionsSlider.disabled = false;
+            renderCurrentSelectionState();
+            syncProcessRuleLegend();
             return;
         }
 
-        variantList.innerHTML = buildVariantCardsHtml(variants, selectedVariantId);
+        const visibleVariants = getVisibleVariants(variants, variantViewState);
+        const hasSearchTerm = Boolean(String(variantViewState.searchTerm || "").trim());
+        const emptyMessage = hasSearchTerm
+            ? "検索条件に一致する Variant がありません。"
+            : "表示できる Variant がありません。";
+        variantDiffState = buildVariantDiffState(variants, selectedVariantId);
+        if (variantBranchFocusState && !findVariantBranchFocusState(variantBranchFocusState.focusId)) {
+            resetVariantBranchFocusState();
+        }
+
+        syncVariantControls();
+        variantSearchInput.disabled = false;
+        variantSortSelect.disabled = false;
+        variantDisplayLimitSelect.disabled = false;
+        variantList.innerHTML = buildVariantCardsHtml(visibleVariants, selectedVariantId, emptyMessage);
         variantResetButton.disabled = !(
             selectedVariantId !== null
             || Boolean(selectedActivity)
             || Boolean(selectedTransitionKey)
+            || Boolean(variantBranchFocusState?.focusId)
+            || caseTraceActivities.size > 0
+            || caseTraceTransitions.size > 0
         );
         patternsSlider.disabled = selectedVariantId !== null;
         activitiesSlider.disabled = selectedVariantId !== null;
         connectionsSlider.disabled = selectedVariantId !== null;
         variantCoverageMeta.innerHTML = buildVariantCoverageHtml(variantCoverage);
+        variantResultsMeta.textContent = `対象 Variant ${Number(variants.length || 0).toLocaleString("ja-JP")} 件 / 表示 ${Number(visibleVariants.length || 0).toLocaleString("ja-JP")} 件 / ${buildVariantSortLabel(variantViewState.sortKey)}`;
 
         const selectionState = buildVariantSelectionState(variants, selectedVariantId);
         variantSelectionTitle.textContent = selectionState.title;
         variantSelectionMeta.textContent = selectionState.meta;
         variantSelectionSequence.textContent = selectionState.sequence;
         variantSelectionSequence.title = selectionState.titleAttribute;
+        variantSelectionDiff.innerHTML = buildVariantDiffHtml(variantDiffState, variantBranchFocusState?.focusId || "");
+        renderCurrentSelectionState();
+        syncProcessRuleLegend();
+        variantSelectionDiff.querySelectorAll("[data-branch-focus-id]").forEach((buttonElement) => {
+            buttonElement.addEventListener("click", async () => {
+                const focusId = buttonElement.dataset.branchFocusId || "";
+                await applyVariantBranchFocus(focusId);
+            });
+        });
 
         variantList.querySelectorAll("[data-variant-id]").forEach((buttonElement) => {
             buttonElement.addEventListener("click", async () => {
@@ -2661,8 +3946,11 @@ async function initializePatternFlowExplorer(runId, impact = null) {
             resetSelectionState();
         } else {
             selectedVariantId = nextVariantId;
+            currentSelectionSource = "variant";
             selectedActivity = "";
             selectedTransitionKey = "";
+            resetCaseTraceHighlightState();
+            resetVariantBranchFocusState();
             transitionCaseRows = [];
             transitionCaseErrorMessage = "";
             saveFlowSelection(runId, selectedVariantId, selectedActivity, selectedTransitionKey);
@@ -2764,7 +4052,12 @@ async function initializePatternFlowExplorer(runId, impact = null) {
                 transitionHeatmap: bottleneckSummary?.transition_heatmap || {},
                 selectedActivity,
                 selectedTransitionKey,
+                caseTraceActivities,
+                caseTraceTransitions,
+                variantDiffState,
+                variantBranchFocusState,
             });
+            scrollVariantBranchFocusIntoView(mapViewport, variantBranchFocusState);
             attachProcessMapInteractions(mapViewport);
         } catch (error) {
             if (currentVersion !== requestVersion) {
@@ -2825,21 +4118,56 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         await searchCaseTrace(caseTraceInput.value);
     });
 
+    detailFilterForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        void applyDetailFilters();
+    });
+
+    detailFilterResetButton.addEventListener("click", () => {
+        void resetDetailFilters();
+    });
+
+    variantSearchInput.addEventListener("input", () => {
+        variantViewState.searchTerm = String(variantSearchInput.value || "").trim();
+        syncVariantPanel();
+    });
+
+    variantSortSelect.addEventListener("change", () => {
+        variantViewState.sortKey = variantSortSelect.value || "count";
+        syncVariantPanel();
+    });
+
+    variantDisplayLimitSelect.addEventListener("change", () => {
+        variantViewState.displayLimit = variantDisplayLimitSelect.value || "10";
+        syncVariantPanel();
+    });
+
     variantResetButton.addEventListener("click", () => {
         void applyVariantSelection(null);
     });
 
     filterDefinitions = buildDefaultFilterDefinitions(currentDetailColumnSettings);
+    draftDetailFilters = cloneDetailFilters(activeDetailFilters);
+    try {
+        filterOptionsPayload = await loadDetailFilterOptions(runId);
+    } catch {
+        filterOptionsPayload = null;
+    }
+    filterDefinitions = normalizeFilterDefinitions(
+        filterOptionsPayload?.options?.filters || [],
+        filterOptionsPayload?.column_settings || currentDetailColumnSettings
+    );
+    syncDetailFilterControls();
     renderFilterSummary();
 
     try {
-        const variantPayload = await loadVariantList(runId, 10, activeDetailFilters);
+        const variantPayload = await loadVariantList(runId, 0, activeDetailFilters);
         variants = Array.isArray(variantPayload.variants) ? variantPayload.variants : [];
-        variantCoverage = variantPayload.coverage || null;
         filteredCounts = {
             caseCount: Number(variantPayload.filtered_case_count || 0),
             eventCount: Number(variantPayload.filtered_event_count || 0),
         };
+        variantCoverage = buildVariantCoveragePayload(variants, filteredCounts.caseCount, 10);
         renderFilterSummary();
         if (selectedVariantId !== null && !variants.some((variant) => Number(variant.variant_id) === Number(selectedVariantId))) {
             selectedVariantId = null;
@@ -3020,12 +4348,60 @@ function renderPatternChart(analysis, runId, impact = null) {
             <div class="result-header">
                 <div>
                     <h2>分析対象条件</h2>
-                    <p class="result-meta">TOP画面で設定した分析対象条件が、この画面のフロー図と分析結果にも適用されています。</p>
+                    <p class="result-meta">TOP画面で設定した分析対象条件を引き継いだうえで、この画面内で日付・属性・Activity 条件を軽く絞り込めます。</p>
                 </div>
             </div>
+            <form id="detail-light-filter-form" class="detail-filter-form">
+                <label class="detail-filter-field">
+                    <span>開始日</span>
+                    <input id="detail-light-date-from" type="date">
+                </label>
+                <label class="detail-filter-field">
+                    <span>終了日</span>
+                    <input id="detail-light-date-to" type="date">
+                </label>
+                <label class="detail-filter-field">
+                    <span id="detail-light-filter-label-1">グループ/カテゴリー フィルター①</span>
+                    <select id="detail-light-filter-value-1">
+                        <option value="">全て</option>
+                    </select>
+                </label>
+                <label class="detail-filter-field">
+                    <span id="detail-light-filter-label-2">グループ/カテゴリー フィルター②</span>
+                    <select id="detail-light-filter-value-2">
+                        <option value="">全て</option>
+                    </select>
+                </label>
+                <label class="detail-filter-field">
+                    <span id="detail-light-filter-label-3">グループ/カテゴリー フィルター③</span>
+                    <select id="detail-light-filter-value-3">
+                        <option value="">全て</option>
+                    </select>
+                </label>
+                <label class="detail-filter-field">
+                    <span>Activity 条件</span>
+                    <select id="detail-light-activity-mode">
+                        <option value="include">含む</option>
+                        <option value="exclude">除外</option>
+                    </select>
+                </label>
+                <label class="detail-filter-field detail-filter-field--wide">
+                    <span>Activity 絞り込み</span>
+                    <select id="detail-light-activity-values" multiple size="4"></select>
+                </label>
+                <div class="detail-filter-actions">
+                    <button type="submit" class="detail-link process-explorer-button process-explorer-button--primary">適用</button>
+                    <button id="detail-light-filter-reset" type="button" class="detail-link process-explorer-button">リセット</button>
+                </div>
+            </form>
             <div class="detail-filter-meta">
                 <p id="detail-filter-summary" class="panel-note">分析対象条件未適用</p>
                 <p id="detail-filter-counts" class="panel-note">対象ケース数 0 / 対象イベント数 0</p>
+            </div>
+            <div id="current-selection-state" class="selection-state-banner" data-selection-source="none">
+                <span class="selection-state-label">現在の選択状態</span>
+                <strong id="current-selection-state-title" class="selection-state-title">全体表示中</strong>
+                <p id="current-selection-state-meta" class="selection-state-meta">Variant Analysis の全体表示で解除できます。</p>
             </div>
         </section>
         <div class="process-explorer-shell">
@@ -3117,6 +4493,7 @@ function renderPatternChart(analysis, runId, impact = null) {
                     </div>
                     <p id="process-map-labels-meta" class="process-explorer-meta"></p>
                 </section>
+                ${renderProcessRuleLegend()}
                 ${renderProcessHeatLegend()}
             </aside>
         </div>
@@ -3124,7 +4501,7 @@ function renderPatternChart(analysis, runId, impact = null) {
             <div class="result-header variant-panel-header">
                 <div>
                     <h3>Variant Analysis</h3>
-                    <p class="result-meta">Top 10 Variant を表示します。クリックすると対象 Variant のケースだけでフロー図を更新します。</p>
+                    <p class="result-meta">Variant を検索・並び替えしながら表示できます。クリックすると対象 Variant のケースだけでフロー図を更新します。</p>
                 </div>
                 <button id="variant-reset-button" type="button" class="ghost-link process-explorer-button">全体表示</button>
             </div>
@@ -3137,8 +4514,34 @@ function renderPatternChart(analysis, runId, impact = null) {
                     <p id="variant-selection-title" class="variant-selection-title">全体表示中</p>
                     <p id="variant-selection-meta" class="panel-note">Variant を選択すると、その Variant に属するケースだけでフロー図を再描画します。</p>
                     <p id="variant-selection-sequence" class="variant-selection-sequence">現在は全ケースを使ったフロー図を表示しています。</p>
+                    <div id="variant-selection-diff"></div>
                 </article>
             </div>
+            <div class="variant-controls">
+                <label class="field">
+                    <span>検索</span>
+                    <input id="variant-search-input" type="search" placeholder="Variant名 / activity名 で検索">
+                </label>
+                <label class="field">
+                    <span>並び順</span>
+                    <select id="variant-sort-select">
+                        <option value="count">件数順</option>
+                        <option value="ratio">比率順</option>
+                        <option value="avg_case_duration_sec">平均所要時間順</option>
+                        <option value="activity_count">activity数順</option>
+                    </select>
+                </label>
+                <label class="field">
+                    <span>表示件数</span>
+                    <select id="variant-display-limit-select">
+                        <option value="10">Top 10</option>
+                        <option value="20">Top 20</option>
+                        <option value="50">Top 50</option>
+                        <option value="all">All</option>
+                    </select>
+                </label>
+            </div>
+            <p id="variant-results-meta" class="panel-note">読み込み中...</p>
             <div id="variant-list" class="variant-list"></div>
         </section>
         <section class="bottleneck-panel">
@@ -3233,7 +4636,7 @@ async function renderDetailPage() {
     const latestResult = loadLatestResult();
     const runId = getRunId(latestResult);
     let detailRequestVersion = 0;
-    activeDetailFilters = { ...DEFAULT_DETAIL_FILTERS };
+    activeDetailFilters = cloneDetailFilters(DEFAULT_DETAIL_FILTERS);
     currentDetailColumnSettings = {};
     detailPageAnalysisLoader = null;
 
@@ -3259,6 +4662,15 @@ async function renderDetailPage() {
 
         activeDetailFilters = cloneDetailFilters(detailData.applied_filters || DEFAULT_DETAIL_FILTERS);
         currentDetailColumnSettings = detailData.column_settings || {};
+
+        if (detailExportExcelButton) {
+            detailExportExcelButton.onclick = () => {
+                void downloadDetailExcelExport(runId, {
+                    analysisKeyName: analysisKey,
+                    filters: activeDetailFilters,
+                });
+            };
+        }
 
         const renderAnalysisPage = async (rowOffset) => {
             const currentVersion = detailRequestVersion + 1;

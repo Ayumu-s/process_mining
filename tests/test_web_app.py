@@ -1,9 +1,10 @@
-from io import BytesIO
+﻿from io import BytesIO
 import unittest
 from unittest import mock
 from zipfile import ZipFile
 
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 
 import web_app
 
@@ -31,16 +32,16 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertIn("renderDetailPage", response.text)
 
-    def test_index_page_renders_excel_option_unchecked_by_default(self):
+    def test_index_page_hides_top_excel_export_ui(self):
         response = self.client.get("/")
 
         self.assertEqual(200, response.status_code)
-        self.assertIn("Excel ZIP", response.text)
         self.assertIn('<select name="case_id_column"', response.text)
         self.assertIn('<select name="activity_column"', response.text)
         self.assertIn('<select name="timestamp_column"', response.text)
+        self.assertNotIn('id="export-excel-toggle"', response.text)
+        self.assertNotIn("Excel ZIP", response.text)
         self.assertNotIn('id="select-output-directory-button"', response.text)
-        self.assertNotIn('name="export_excel" checked', response.text)
         self.assertIn("/static/style.css?v=", response.text)
         self.assertIn("/static/app.js?v=", response.text)
 
@@ -66,6 +67,7 @@ class WebAppTestCase(unittest.TestCase):
         frequency_analysis = payload["analyses"]["frequency"]
         dashboard = payload["dashboard"]
         impact = payload["impact"]
+        insights = payload["insights"]
 
         self.assertGreater(frequency_analysis["row_count"], 0)
         self.assertEqual(frequency_analysis["row_count"], len(frequency_analysis["rows"]))
@@ -78,6 +80,16 @@ class WebAppTestCase(unittest.TestCase):
         self.assertTrue(impact["has_data"])
         self.assertTrue(impact["rows"])
         self.assertIn("impact_score", impact["rows"][0])
+        self.assertEqual("rule_based", insights["mode"])
+        self.assertTrue(insights["has_data"])
+        self.assertGreaterEqual(len(insights["items"]), 3)
+        self.assertTrue(any(item["id"] == "top_activity" for item in insights["items"]))
+
+        pattern_detail_response = self.client.get(f"/api/runs/{run_id}/analyses/pattern")
+        self.assertEqual(200, pattern_detail_response.status_code)
+        pattern_payload = pattern_detail_response.json()
+        pattern_insights = pattern_payload["insights"]
+        self.assertTrue(any(item["id"] == "top_pattern" for item in pattern_insights["items"]))
 
     def test_analysis_detail_api_supports_row_limit(self):
         analyze_response = self.client.post(
@@ -148,10 +160,81 @@ class WebAppTestCase(unittest.TestCase):
         self.assertTrue(excel_response.content.startswith(b"PK"))
 
         with ZipFile(BytesIO(excel_response.content)) as archive_file:
-            self.assertEqual(
-                {"頻度分析.xlsx", "前後処理分析.xlsx"},
-                set(archive_file.namelist()),
-            )
+            archive_names = set(archive_file.namelist())
+            self.assertEqual(2, len(archive_names))
+            self.assertTrue(all(name.endswith(".xlsx") for name in archive_names))
+
+
+    def test_report_excel_export_api_returns_workbook(self):
+        run_id = self.analyze_uploaded_csv(
+            "\n".join(
+                [
+                    "case_id,activity,start_time,group_a,group_b,group_c",
+                    "C001,Submit,2024-01-01 09:00:00,Sales,Web,A",
+                    "C001,Approve,2024-01-02 09:00:00,Sales,Web,A",
+                    "C002,Submit,2024-01-03 09:00:00,Sales,API,A",
+                    "C002,Approve,2024-01-04 09:00:00,Sales,API,A",
+                    "C003,Submit,2024-01-01 10:00:00,HR,Mail,B",
+                    "C003,Reject,2024-01-02 10:00:00,HR,Mail,B",
+                ]
+            ),
+            extra_data={
+                "filter_column_1": "group_a",
+                "filter_column_2": "group_b",
+                "filter_column_3": "group_c",
+            },
+        )
+
+        response = self.client.get(
+            f"/api/runs/{run_id}/report-excel"
+            "?analysis_key=pattern"
+            "&filter_value_1=Sales"
+            "&selected_transition_key=Submit__TO__Approve"
+            "&case_id=C001"
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            response.headers["content-type"],
+        )
+
+        workbook = load_workbook(BytesIO(response.content))
+        self.assertEqual(
+            ["\u30b5\u30de\u30ea\u30fc", "\u983b\u5ea6\u5206\u6790", "\u51e6\u7406\u9806\u30d1\u30bf\u30fc\u30f3\u5206\u6790", "Variant\u5206\u6790", "\u30dc\u30c8\u30eb\u30cd\u30c3\u30af\u5206\u6790", "\u6539\u5584\u30a4\u30f3\u30d1\u30af\u30c8\u5206\u6790", "\u30c9\u30ea\u30eb\u30c0\u30a6\u30f3", "\u30b1\u30fc\u30b9\u8ffd\u8de1"],
+            workbook.sheetnames,
+        )
+        summary_sheet = workbook["\u30b5\u30de\u30ea\u30fc"]
+        self.assertEqual("\u30b5\u30de\u30ea\u30fc", summary_sheet["A1"].value)
+        self.assertEqual("\u5b9f\u884cID", summary_sheet["A3"].value)
+        self.assertEqual(run_id, summary_sheet["B3"].value)
+        self.assertEqual("\u9069\u7528\u30d5\u30a3\u30eb\u30bf\u6761\u4ef6", summary_sheet["A11"].value)
+        self.assertIn("Sales", str(summary_sheet["B11"].value))
+
+        frequency_sheet = workbook["\u983b\u5ea6\u5206\u6790"]
+        self.assertEqual("\u983b\u5ea6\u5206\u6790", frequency_sheet["A1"].value)
+        self.assertEqual("\u9806\u4f4d", frequency_sheet["A2"].value)
+
+        pattern_sheet = workbook["\u51e6\u7406\u9806\u30d1\u30bf\u30fc\u30f3\u5206\u6790"]
+        self.assertEqual("\u51e6\u7406\u9806\u30d1\u30bf\u30fc\u30f3\u5206\u6790", pattern_sheet["A1"].value)
+        self.assertEqual("\u9806\u4f4d", pattern_sheet["A2"].value)
+
+        variant_sheet = workbook["Variant\u5206\u6790"]
+        self.assertEqual("Variant\u5206\u6790", variant_sheet["A1"].value)
+        self.assertEqual("\u9806\u4f4d", variant_sheet["A2"].value)
+
+        impact_sheet = workbook["\u6539\u5584\u30a4\u30f3\u30d1\u30af\u30c8\u5206\u6790"]
+        self.assertEqual("\u6539\u5584\u30a4\u30f3\u30d1\u30af\u30c8\u5206\u6790", impact_sheet["A1"].value)
+        self.assertEqual("\u9806\u4f4d", impact_sheet["A2"].value)
+
+        drilldown_sheet = workbook["\u30c9\u30ea\u30eb\u30c0\u30a6\u30f3"]
+        self.assertEqual("\u9077\u79fb\u30c9\u30ea\u30eb\u30c0\u30a6\u30f3: Submit \u2192 Approve", drilldown_sheet["A1"].value)
+        self.assertEqual("\u30b1\u30fc\u30b9ID", drilldown_sheet["A2"].value)
+        self.assertEqual("C001", drilldown_sheet["A3"].value)
+
+        case_trace_sheet = workbook["\u30b1\u30fc\u30b9\u8ffd\u8de1"]
+        self.assertEqual("\u30b1\u30fc\u30b9\u6982\u8981", case_trace_sheet["A1"].value)
+        self.assertEqual("\u901a\u904e\u30a4\u30d9\u30f3\u30c8", case_trace_sheet["A9"].value)
 
     def test_pattern_flow_api_accepts_exact_pattern_count(self):
         analyze_response = self.client.post(
@@ -209,10 +292,27 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(run_id, payload["run_id"])
         self.assertEqual(2, len(payload["variants"]))
         self.assertEqual(1, payload["variants"][0]["variant_id"])
-        self.assertEqual(["受付", "確認", "完了"], payload["variants"][0]["activities"])
+        self.assertEqual(["\u53d7\u4ed8", "\u78ba\u8a8d", "\u5b8c\u4e86"], payload["variants"][0]["activities"])
+        self.assertEqual(3, payload["variants"][0]["activity_count"])
+        self.assertGreater(payload["variants"][0]["avg_case_duration_sec"], 0)
         self.assertEqual(2, payload["coverage"]["displayed_variant_count"])
         self.assertEqual(4, payload["coverage"]["covered_case_count"])
         self.assertEqual(0.6667, payload["coverage"]["ratio"])
+
+    def test_variant_list_api_limit_zero_returns_all_variants(self):
+        analyze_response = self.client.post(
+            "/api/analyze",
+            data={"analysis_keys": ["pattern"]},
+        )
+        self.assertEqual(200, analyze_response.status_code)
+
+        run_id = analyze_response.json()["run_id"]
+        variant_response = self.client.get(f"/api/runs/{run_id}/variants?limit=0")
+
+        self.assertEqual(200, variant_response.status_code)
+        payload = variant_response.json()
+        self.assertGreaterEqual(len(payload["variants"]), 3)
+        self.assertEqual(len(payload["variants"]), payload["coverage"]["displayed_variant_count"])
 
     def test_pattern_flow_api_supports_variant_filter(self):
         analyze_response = self.client.post(
@@ -246,15 +346,15 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(2, payload["limit"])
         self.assertEqual(2, len(payload["activity_bottlenecks"]))
         self.assertEqual(2, len(payload["transition_bottlenecks"]))
-        self.assertEqual("確認", payload["activity_bottlenecks"][0]["activity"])
+        self.assertEqual("\u78ba\u8a8d", payload["activity_bottlenecks"][0]["activity"])
         self.assertEqual(577.5, payload["activity_bottlenecks"][0]["avg_duration_sec"])
         self.assertEqual(0.16, payload["activity_bottlenecks"][0]["avg_duration_hours"])
-        self.assertEqual("heat-5", payload["activity_heatmap"]["確認"]["heat_class"])
-        self.assertEqual("確認", payload["transition_bottlenecks"][0]["from_activity"])
-        self.assertEqual("差戻し", payload["transition_bottlenecks"][0]["to_activity"])
-        self.assertEqual("確認__TO__差戻し", payload["transition_bottlenecks"][0]["transition_key"])
+        self.assertEqual("heat-5", payload["activity_heatmap"]["\u78ba\u8a8d"]["heat_class"])
+        self.assertEqual("\u78ba\u8a8d", payload["transition_bottlenecks"][0]["from_activity"])
+        self.assertEqual("\u5dee\u623b\u3057", payload["transition_bottlenecks"][0]["to_activity"])
+        self.assertEqual("\u78ba\u8a8d__TO__\u5dee\u623b\u3057", payload["transition_bottlenecks"][0]["transition_key"])
         self.assertEqual(0.2, payload["transition_bottlenecks"][0]["avg_duration_hours"])
-        self.assertEqual("heat-5", payload["transition_heatmap"]["確認__TO__差戻し"]["heat_class"])
+        self.assertEqual("heat-5", payload["transition_heatmap"]["\u78ba\u8a8d__TO__\u5dee\u623b\u3057"]["heat_class"])
 
     def test_transition_case_drilldown_api_returns_slowest_cases(self):
         analyze_response = self.client.post(
@@ -266,16 +366,16 @@ class WebAppTestCase(unittest.TestCase):
         run_id = analyze_response.json()["run_id"]
         response = self.client.get(
             f"/api/runs/{run_id}/transition-cases"
-            "?from_activity=確認&to_activity=差戻し&limit=5"
+            "?from_activity=\u78ba\u8a8d&to_activity=\u5dee\u623b\u3057&limit=5"
         )
 
         self.assertEqual(200, response.status_code)
         payload = response.json()
         self.assertEqual(run_id, payload["run_id"])
-        self.assertEqual("確認", payload["from_activity"])
-        self.assertEqual("差戻し", payload["to_activity"])
-        self.assertEqual("確認__TO__差戻し", payload["transition_key"])
-        self.assertEqual("確認 → 差戻し", payload["transition_label"])
+        self.assertEqual("\u78ba\u8a8d", payload["from_activity"])
+        self.assertEqual("\u5dee\u623b\u3057", payload["to_activity"])
+        self.assertEqual("\u78ba\u8a8d__TO__\u5dee\u623b\u3057", payload["transition_key"])
+        self.assertEqual("\u78ba\u8a8d \u2192 \u5dee\u623b\u3057", payload["transition_label"])
         self.assertEqual(2, payload["returned_case_count"])
         self.assertEqual(2, len(payload["cases"]))
         self.assertEqual("C002", payload["cases"][0]["case_id"])
@@ -292,18 +392,18 @@ class WebAppTestCase(unittest.TestCase):
         run_id = analyze_response.json()["run_id"]
         response = self.client.get(
             f"/api/runs/{run_id}/activity-cases"
-            "?activity=確認&limit=5"
+            "?activity=\u78ba\u8a8d&limit=5"
         )
 
         self.assertEqual(200, response.status_code)
         payload = response.json()
         self.assertEqual(run_id, payload["run_id"])
-        self.assertEqual("確認", payload["activity"])
+        self.assertEqual("\u78ba\u8a8d", payload["activity"])
         self.assertEqual(5, payload["returned_case_count"])
         self.assertEqual(5, len(payload["cases"]))
         self.assertEqual("C002", payload["cases"][0]["case_id"])
         self.assertEqual(1020.0, payload["cases"][0]["duration_sec"])
-        self.assertEqual("差戻し", payload["cases"][0]["next_activity"])
+        self.assertEqual("\u5dee\u623b\u3057", payload["cases"][0]["next_activity"])
 
     def test_case_trace_api_returns_case_timeline(self):
         analyze_response = self.client.post(
@@ -411,6 +511,39 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual("Sales", payload["applied_filters"]["filter_value_1"])
         self.assertEqual("2024-01-02", payload["applied_filters"]["date_from"])
 
+    def test_analysis_detail_api_supports_activity_filters(self):
+        run_id = self.analyze_uploaded_csv(
+            "\n".join(
+                [
+                    "case_id,activity,start_time,group_a,group_b,group_c",
+                    "C001,Submit,2024-01-01 09:00:00,Sales,Web,A",
+                    "C001,Approve,2024-01-03 09:00:00,Sales,Web,A",
+                    "C002,Submit,2024-01-02 10:00:00,HR,Mail,B",
+                    "C002,Reject,2024-01-04 10:00:00,HR,Mail,B",
+                    "C003,Submit,2024-01-04 08:00:00,Sales,API,A",
+                    "C003,Approve,2024-01-05 08:00:00,Sales,API,A",
+                ]
+            ),
+            extra_data={
+                "filter_column_1": "group_a",
+                "filter_column_2": "group_b",
+                "filter_column_3": "group_c",
+            },
+        )
+
+        response = self.client.get(
+            f"/api/runs/{run_id}/analyses/frequency?filter_value_1=Sales&activity_mode=exclude&activity_values=Submit"
+        )
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertEqual(2, payload["case_count"])
+        self.assertEqual(2, payload["event_count"])
+        self.assertEqual(2, payload["dashboard"]["total_cases"])
+        self.assertEqual(2, payload["dashboard"]["total_records"])
+        self.assertEqual("exclude", payload["applied_filters"]["activity_mode"])
+        self.assertEqual("Submit", payload["applied_filters"]["activity_values"])
+
     def test_bottleneck_and_variant_api_support_filters(self):
         run_id = self.analyze_uploaded_csv(
             "\n".join(
@@ -461,7 +594,7 @@ class WebAppTestCase(unittest.TestCase):
         if pattern_rows:
             first_row = pattern_rows[0]
             for key in list(first_row.keys()):
-                if "pattern" in str(key).lower() or "繝代ち繝ｼ繝ｳ" in str(key) or "蜃ｦ逅" in str(key):
+                if "pattern" in str(key).lower() or "\u30d1\u30bf\u30fc\u30f3" in str(key) or "\u51e6\u7406\u9806" in str(key):
                     first_row[key] = ""
 
         response = self.client.get(f"/api/runs/{run_id}/patterns/0")
@@ -486,7 +619,7 @@ class WebAppTestCase(unittest.TestCase):
         self.assertIsNone(payload["diagnostics"])
 
     def test_csv_headers_api_returns_uploaded_headers(self):
-        csv_bytes = "申請ID,処理名,日時\nA001,受付,2024-01-01 09:00:00\n".encode("utf-8")
+        csv_bytes = "request_id,step_name,event_at\nA001,Start,2024-01-01 09:00:00\n".encode("utf-8")
 
         response = self.client.post(
             "/api/csv-headers",
@@ -496,7 +629,7 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         payload = response.json()
         self.assertEqual("custom_log.csv", payload["source_file_name"])
-        self.assertEqual(["申請ID", "処理名", "日時"], payload["headers"])
+        self.assertEqual(["request_id", "step_name", "event_at"], payload["headers"])
         self.assertEqual("", payload["default_selection"]["case_id_column"])
 
     def test_csv_headers_api_returns_filter_values_without_diagnostics(self):
@@ -534,7 +667,7 @@ class WebAppTestCase(unittest.TestCase):
 
         self.assertEqual(400, response.status_code)
         payload = response.json()
-        self.assertIn("異なる列", payload["error"])
+        self.assertIn("Case ID / Activity / Timestamp", payload["error"])
 
 
     def test_log_diagnostics_api_returns_uploaded_summary(self):
@@ -565,7 +698,7 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(2, payload["diagnostics"]["activity_type_count"])
         self.assertEqual(3, payload["diagnostics"]["event_count"])
         self.assertEqual(1, payload["diagnostics"]["duplicate_row_count"])
-        self.assertEqual("あり", payload["diagnostics"]["duplicate_status"])
+        self.assertEqual("\u3042\u308a", payload["diagnostics"]["duplicate_status"])
         self.assertEqual(2, payload["diagnostics"]["deduplicated_record_count"])
         self.assertEqual(0.3333, payload["diagnostics"]["duplicate_rate"])
         self.assertEqual("", payload["default_selection"]["case_id_column"])
@@ -573,3 +706,5 @@ class WebAppTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

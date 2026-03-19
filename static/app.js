@@ -15,8 +15,6 @@ const submitButton = document.getElementById("submit-button");
 const statusPanel = document.getElementById("status-panel");
 const summaryPanel = document.getElementById("summary-panel");
 const resultPanels = document.getElementById("result-panels");
-const exportExcelToggle = document.getElementById("export-excel-toggle");
-const excelExportSettings = document.getElementById("excel-export-settings");
 const csvFileInput = document.getElementById("csv-file-input");
 const columnSourceNote = document.getElementById("column-source-note");
 const diagnosticsPanel = document.getElementById("log-diagnostics-panel");
@@ -132,13 +130,6 @@ function mergeProfilePayload(basePayload, nextPayload) {
     };
 }
 
-function syncExcelExportSettings() {
-    const enabled = Boolean(exportExcelToggle?.checked);
-    if (excelExportSettings) {
-        excelExportSettings.classList.toggle("hidden", !enabled);
-    }
-}
-
 function syncSubmitState() {
     submitButton.disabled = isLoadingProfile || isAnalyzing || isRunningDiagnostics;
     if (diagnosticsButton) {
@@ -166,16 +157,13 @@ function buildTable(rows, options = {}) {
     const bodyHtml = rows.map((row) => {
         const cells = headers.map((header) => {
             const cellValue = escapeHtml(row[header]);
-            const isWideHeader = [
-                "処理順パターン",
-                "アクティビティ名",
-                "アクティビティ",
-                "前処理アクティビティ名",
-                "後処理アクティビティ名",
-            ].includes(header);
+            const isWideHeader = (
+                header.includes("\u30d1\u30bf\u30fc\u30f3")
+                || header.includes("\u30a2\u30af\u30c6\u30a3\u30d3\u30c6\u30a3")
+            );
             const isPatternLink = (
                 analysisKey === "pattern"
-                && header === "処理順パターン"
+                && header.includes("\u30d1\u30bf\u30fc\u30f3")
                 && runId
                 && Number.isInteger(row.__rowIndex)
             );
@@ -771,11 +759,11 @@ function validateColumnSelections() {
     const timestampColumn = String(timestampColumnSelect?.value || "").trim();
 
     if (!caseIdColumn || !activityColumn || !timestampColumn) {
-        return "Case ID列 / Activity列 / Timestamp列 を選択してください。";
+        return "Case ID列 / Activity列 / Timestamp列を選択してください。";
     }
 
     if (new Set([caseIdColumn, activityColumn, timestampColumn]).size !== 3) {
-        return "Case ID列 / Activity列 / Timestamp列 にはそれぞれ異なる列を選択してください。";
+        return "Case ID列 / Activity列 / Timestamp列にはそれぞれ異なる列を選択してください。";
     }
 
     return "";
@@ -834,28 +822,6 @@ function getDownloadFileName(response, fallbackFileName) {
     }
 
     return fallbackFileName;
-}
-
-async function downloadExcelArchive(data) {
-    setStatus("分析は完了しました。Excel ZIP を準備しています...", "info");
-    const response = await fetch(`/api/runs/${encodeURIComponent(data.run_id)}/excel-archive`);
-
-    if (!response.ok) {
-        const payload = await response.json();
-        throw new Error(payload.detail || payload.error || "Excel ZIP の生成に失敗しました。");
-    }
-
-    const archiveBlob = await response.blob();
-    const fallbackFileName = `${data.source_file_name.replace(/\.[^.]+$/, "") || "analysis"}_analysis_excels.zip`;
-    const downloadFileName = getDownloadFileName(response, fallbackFileName);
-    const downloadUrl = URL.createObjectURL(archiveBlob);
-    const downloadLink = document.createElement("a");
-    downloadLink.href = downloadUrl;
-    downloadLink.download = downloadFileName;
-    document.body.appendChild(downloadLink);
-    downloadLink.click();
-    downloadLink.remove();
-    URL.revokeObjectURL(downloadUrl);
 }
 
 function buildAppliedFilterSummary(appliedFilters = {}, columnSettings = {}) {
@@ -945,7 +911,6 @@ form.addEventListener("submit", async (event) => {
         return;
     }
 
-    const shouldExportExcel = Boolean(exportExcelToggle?.checked);
     isAnalyzing = true;
     syncSubmitState();
     setStatus("分析を実行しています...", "info");
@@ -968,12 +933,7 @@ form.addEventListener("submit", async (event) => {
         renderDashboard(data);
         saveTopPageState();
 
-        if (shouldExportExcel) {
-            await downloadExcelArchive(data);
-            setStatus("分析が完了し、Excel ZIP をダウンロードしました。", "success");
-        } else {
-            setStatus("分析が完了しました。", "success");
-        }
+        setStatus("分析が完了しました。", "success");
     } catch (error) {
         setStatus(error.message, "error");
     } finally {
@@ -1019,13 +979,9 @@ if (latestResult) {
     renderDashboard(latestResult);
 }
 
-if (exportExcelToggle) {
-    exportExcelToggle.addEventListener("change", syncExcelExportSettings);
-    syncExcelExportSettings();
-}
-
 renderProfilePayload(currentProfilePayload);
 restoreTopPageState(restoredTopPageState);
 saveTopPageState();
 syncSubmitState();
 hideStatus();
+

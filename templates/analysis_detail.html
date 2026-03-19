@@ -12,9 +12,12 @@
             <div>
                 <p class="eyebrow">Process Mining Detail</p>
                 <h1 id="detail-page-title">{{ analysis_name }}</h1>
-                <p id="detail-page-copy" class="hero-copy">直前に実行した分析結果の全件を表示します。</p>
+                <p id="detail-page-copy" class="hero-copy">分析後に取得した対象結果の全件を表示しています。</p>
             </div>
-            <a href="/" class="ghost-link">TOPに戻る</a>
+            <div class="detail-hero-actions">
+                <button id="detail-export-excel-button" type="button" class="ghost-link">統合レポートExcel出力</button>
+                <a href="/" class="ghost-link">TOPに戻る</a>
+            </div>
         </section>
 
         <section id="detail-status-panel" class="status-panel hidden"></section>

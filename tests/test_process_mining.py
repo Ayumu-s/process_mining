@@ -11,6 +11,7 @@ from 共通スクリプト.analysis_service import (
     create_impact_summary,
     create_log_diagnostics,
     create_pattern_bottleneck_details,
+    create_rule_based_insights,
     create_root_cause_summary,
     create_transition_case_drilldown,
     create_variant_flow_snapshot,
@@ -141,8 +142,10 @@ class ProcessMiningTestCase(unittest.TestCase):
         self.assertEqual(3, len(variants))
         self.assertEqual(1, variants[0]["variant_id"])
         self.assertEqual(["受付", "確認", "完了"], variants[0]["activities"])
+        self.assertEqual(3, variants[0]["activity_count"])
         self.assertEqual(2, variants[0]["count"])
         self.assertEqual(0.3333, variants[0]["ratio"])
+        self.assertGreater(variants[0]["avg_case_duration_sec"], 0)
 
     def test_bottleneck_summary_returns_ranked_activity_and_transition_rows(self):
         summary = create_bottleneck_summary(self.prepared_df, limit=3)
@@ -190,6 +193,52 @@ class ProcessMiningTestCase(unittest.TestCase):
         self.assertEqual(1.0, dashboard["top10_variant_coverage_ratio"])
         self.assertEqual("確認 → 差戻し", dashboard["top_bottleneck_transition_label"])
         self.assertEqual(720.0, dashboard["top_bottleneck_avg_wait_sec"])
+
+    def test_rule_based_insights_returns_key_points(self):
+        dashboard = create_dashboard_summary(
+            self.prepared_df,
+            variant_items=create_variant_summary(self.prepared_df, limit=10),
+            bottleneck_summary=create_bottleneck_summary(self.prepared_df, limit=10),
+        )
+        bottleneck_summary = create_bottleneck_summary(self.prepared_df, limit=10)
+        impact_summary = create_impact_summary(self.prepared_df, limit=10)
+        insights = create_rule_based_insights(
+            self.prepared_df,
+            dashboard_summary=dashboard,
+            bottleneck_summary=bottleneck_summary,
+            impact_summary=impact_summary,
+            max_items=5,
+        )
+
+        self.assertEqual("rule_based", insights["mode"])
+        self.assertTrue(insights["has_data"])
+        self.assertGreaterEqual(len(insights["items"]), 3)
+        self.assertLessEqual(len(insights["items"]), 5)
+        self.assertEqual("scope", insights["items"][0]["id"])
+        self.assertIn("対象は", insights["items"][0]["text"])
+        self.assertTrue(any(item["id"] == "top_impact_transition" for item in insights["items"]))
+
+    def test_rule_based_insights_support_analysis_specific_content(self):
+        frequency_rows = create_frequency_analysis(self.prepared_df).to_dict(orient="records")
+        pattern_rows = create_pattern_analysis(self.prepared_df).to_dict(orient="records")
+
+        frequency_insights = create_rule_based_insights(
+            self.prepared_df,
+            analysis_key="frequency",
+            analysis_rows=frequency_rows,
+            max_items=5,
+        )
+        pattern_insights = create_rule_based_insights(
+            self.prepared_df,
+            analysis_key="pattern",
+            analysis_rows=pattern_rows,
+            max_items=5,
+        )
+
+        self.assertTrue(any(item["id"] == "top_activity" for item in frequency_insights["items"]))
+        self.assertTrue(any(item["id"] == "event_distribution" for item in frequency_insights["items"]))
+        self.assertTrue(any(item["id"] == "top_pattern" for item in pattern_insights["items"]))
+        self.assertTrue(any(item["id"] == "pattern_variability" for item in pattern_insights["items"]))
 
     def test_impact_summary_returns_ranked_transition_rows(self):
         impact = create_impact_summary(self.prepared_df, limit=10)
@@ -367,6 +416,8 @@ class ProcessMiningTestCase(unittest.TestCase):
             filter_value_1=" Sales ",
             filter_value_2="   ",
             filter_value_3=None,
+            activity_mode=" Exclude ",
+            activity_values=[" Submit ", "", "Approve", "Submit"],
         )
 
         self.assertEqual("2024-01-01", normalized["date_from"])
@@ -374,6 +425,8 @@ class ProcessMiningTestCase(unittest.TestCase):
         self.assertEqual("Sales", normalized["filter_value_1"])
         self.assertIsNone(normalized["filter_value_2"])
         self.assertIsNone(normalized["filter_value_3"])
+        self.assertEqual("exclude", normalized["activity_mode"])
+        self.assertEqual("Submit,Approve", normalized["activity_values"])
 
     def test_filter_prepared_df_filters_by_date_and_attributes(self):
         raw_df = pd.DataFrame(
@@ -410,6 +463,42 @@ class ProcessMiningTestCase(unittest.TestCase):
         self.assertEqual(1, len(filtered_df))
         self.assertEqual(["C001"], filtered_df["case_id"].tolist())
         self.assertEqual(["Approve"], filtered_df["activity"].tolist())
+
+    def test_filter_prepared_df_filters_by_activity_mode(self):
+        raw_df = pd.DataFrame(
+            [
+                {"case": "C001", "step": "Submit", "ts": "2024-01-01 09:00:00", "group_a": "Sales"},
+                {"case": "C001", "step": "Approve", "ts": "2024-01-02 09:00:00", "group_a": "Sales"},
+                {"case": "C002", "step": "Submit", "ts": "2024-01-01 10:00:00", "group_a": "HR"},
+                {"case": "C002", "step": "Reject", "ts": "2024-01-02 10:00:00", "group_a": "HR"},
+            ]
+        )
+        prepared_df = prepare_event_log(
+            df=raw_df,
+            case_id_column="case",
+            activity_column="step",
+            timestamp_column="ts",
+        )
+
+        included_df = filter_prepared_df(
+            prepared_df,
+            {
+                "activity_mode": "include",
+                "activity_values": "Submit",
+            },
+            {},
+        )
+        excluded_df = filter_prepared_df(
+            prepared_df,
+            {
+                "activity_mode": "exclude",
+                "activity_values": "Submit",
+            },
+            {},
+        )
+
+        self.assertEqual(["Submit", "Submit"], included_df["activity"].tolist())
+        self.assertEqual(["Approve", "Reject"], excluded_df["activity"].tolist())
 
     def test_get_filter_options_returns_sorted_unique_values(self):
         raw_df = pd.DataFrame(
