@@ -1,164 +1,292 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Process Mining Workbench</title>
+    <title>ProcessLens | イベントログ分析</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+JP:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ static_version }}">
 </head>
-<body>
-    <main class="page-shell">
-        <section class="hero-panel">
-            <p class="eyebrow">Process Mining</p>
-            <h1>イベントログをブラウザで分析</h1>
-            <p class="hero-copy">
-                CSV をアップロードし、列マッピングと分析条件を設定して分析します。
-                ファイル未選択の場合は <code>{{ sample_file_name }}</code> を使います。
-            </p>
-        </section>
+<body class="app-shell app-shell--top">
+    <header class="top-header">
+        <a href="/" class="top-logo">
+            <div class="logo-mark">PL</div>
+            <div class="logo-name">Process<span>Lens</span></div>
+        </a>
+        <div class="header-breadcrumb">
+            <span>Home</span>
+            <span class="sep">/</span>
+            <span>Workbench</span>
+            <span class="sep">/</span>
+            <span class="current">イベントログ分析</span>
+        </div>
+        <div class="header-right">
+            <a href="/" class="hbtn">Dashboard</a>
+            <a href="/analysis/pattern" class="hbtn">Pattern</a>
+            <a href="#analyze-form" class="hbtn primary">New Analysis</a>
+        </div>
+    </header>
 
-        <section class="control-panel">
-            <form id="analyze-form" class="analyze-form">
-                <div class="panel-block">
-                    <h2>ログ読み込み</h2>
-                    <label class="field">
-                        <span>CSV ファイル</span>
-                        <input type="file" name="csv_file" accept=".csv" id="csv-file-input">
-                    </label>
-                    <p id="column-source-note" class="hint" data-source-file-name="{{ sample_file_name }}">
-                        現在は <code>{{ sample_file_name }}</code> の内容を基準に表示しています。
-                    </p>
-                </div>
+    <div class="layout">
+        <aside class="sidebar">
+            <div class="sidebar-section">
+                <div class="sidebar-label">Menu</div>
+                <a class="nav-item active" href="/">
+                    <div class="nav-dot blue">DB</div>
+                    ダッシュボード
+                </a>
+                <a class="nav-item" href="#analyze-form">
+                    <div class="nav-dot green">FI</div>
+                    ファイル設定
+                </a>
+                <a class="nav-item" href="#result-panels">
+                    <div class="nav-dot violet">RS</div>
+                    分析結果
+                </a>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-label">Analysis</div>
+                <a class="nav-item" href="/analysis/frequency">
+                    <div class="nav-dot blue">FR</div>
+                    頻度分析
+                </a>
+                <a class="nav-item" href="/analysis/transition">
+                    <div class="nav-dot green">TR</div>
+                    前後処理分析
+                </a>
+                <a class="nav-item" href="/analysis/pattern">
+                    <div class="nav-dot violet">PT</div>
+                    処理パターン
+                </a>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-label">Support</div>
+                <a class="nav-item" href="#log-diagnostics-panel">
+                    <div class="nav-dot amber">LG</div>
+                    ログ診断
+                </a>
+                <a class="nav-item" href="#result-panels">
+                    <div class="nav-dot gray">PV</div>
+                    プレビュー
+                </a>
+            </div>
+        </aside>
 
-                <div class="panel-block">
-                    <h2>列マッピング</h2>
-                    <div class="grid-fields">
-                        <label class="field">
-                            <span>Case ID列</span>
-                            <select name="case_id_column" id="case-id-column-select">
-                                <option value="">選択してください</option>
-                            </select>
-                        </label>
-                        <label class="field">
-                            <span>Activity列</span>
-                            <select name="activity_column" id="activity-column-select">
-                                <option value="">選択してください</option>
-                            </select>
-                        </label>
-                        <label class="field">
-                            <span>Timestamp列</span>
-                            <select name="timestamp_column" id="timestamp-column-select">
-                                <option value="">選択してください</option>
-                            </select>
-                        </label>
+        <main class="app-main">
+            <div class="page-shell">
+                <div class="page-title-block">
+                    <div class="page-title">イベントログをブラウザで分析</div>
+                    <div class="page-subtitle">
+                        CSV をアップロードし、列マッピングと分析条件を設定して分析します。
+                        ファイル未選択の場合は <a href="#analyze-form">{{ sample_file_name }}</a> を使います。
                     </div>
                 </div>
 
-                <div class="panel-block">
-                    <h2>ログ診断</h2>
-                    <div class="panel-actions diagnostics-actions">
-                        <button type="button" id="run-diagnostics-button" class="detail-link">ログ診断実行</button>
-                        <p class="hint">必要な列を選択したあとに実行すると、件数・期間・欠損件数・列サマリーを確認できます。</p>
+                <div class="steps" aria-hidden="true">
+                    <div class="step done">
+                        <div class="step-num">1</div>
+                        読み込み
                     </div>
-                    <p class="hint">ログ診断は読み込んだログ全体を対象に実行します。分析対象条件の絞り込みは、分析実行時に適用されます。</p>
-                    <div id="log-diagnostics-panel" class="diagnostics-panel">
-                        <p class="empty-state">ログ診断を実行すると、件数・期間・欠損件数・列サマリーを表示します。</p>
+                    <div class="step-arrow"></div>
+                    <div class="step done">
+                        <div class="step-num">2</div>
+                        マッピング
+                    </div>
+                    <div class="step-arrow"></div>
+                    <div class="step done">
+                        <div class="step-num">3</div>
+                        診断
+                    </div>
+                    <div class="step-arrow"></div>
+                    <div class="step active">
+                        <div class="step-num">4</div>
+                        フィルター
+                    </div>
+                    <div class="step-arrow"></div>
+                    <div class="step">
+                        <div class="step-num">5</div>
+                        実行
                     </div>
                 </div>
 
-                <div class="panel-block">
-                    <h2>分析対象条件</h2>
-                    <div class="grid-fields grid-fields--2">
-                        <label class="field">
-                            <span>開始日</span>
-                            <input type="date" name="date_from" id="analysis-date-from">
-                        </label>
-                        <label class="field">
-                            <span>終了日</span>
-                            <input type="date" name="date_to" id="analysis-date-to">
-                        </label>
-                    </div>
-                    <div class="filter-condition-list">
-                        <section class="filter-condition-card">
-                            <p id="filter-group-title-1" class="field-group-title">グループ/カテゴリー フィルター①</p>
-                            <div class="grid-fields grid-fields--2">
+                <form id="analyze-form" class="analyze-form">
+                    <section class="section-card">
+                        <div class="section-head">
+                            <div class="section-icon si-blue">CSV</div>
+                            <div class="section-head-copy">
+                                <div class="section-title">ログ読み込み</div>
+                                <div class="section-desc">CSV ファイルを選択してください</div>
+                            </div>
+                        </div>
+                        <div class="section-body">
+                            <label class="upload-zone" for="csv-file-input">
+                                <input class="upload-input" type="file" name="csv_file" accept=".csv" id="csv-file-input">
+                                <div class="upload-title">ここに CSV をドロップ、またはクリックして選択</div>
+                                <div class="upload-sub">UTF-8 推奨 / ヘッダー行必須 / サンプルファイル利用可</div>
+                            </label>
+                            <div class="upload-result">
+                                <div class="upload-result-icon">OK</div>
+                                <div id="column-source-note" class="upload-result-copy hint" data-source-file-name="{{ sample_file_name }}">
+                                    現在は <code>{{ sample_file_name }}</code> の内容を基準に表示しています。
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="section-card">
+                        <div class="section-head">
+                            <div class="section-icon si-violet">MAP</div>
+                            <div class="section-head-copy">
+                                <div class="section-title">列マッピング</div>
+                                <div class="section-desc">各役割に対応する列を指定してください</div>
+                            </div>
+                        </div>
+                        <div class="section-body">
+                            <div class="grid-fields">
                                 <label class="field">
-                                    <span>対象列</span>
-                                    <select name="filter_column_1" id="filter-column-1-select">
-                                        <option value="">未設定</option>
+                                    <span>Case ID列</span>
+                                    <select name="case_id_column" id="case-id-column-select">
+                                        <option value="">選択してください</option>
                                     </select>
                                 </label>
                                 <label class="field">
-                                    <span id="filter-value-1-label">値</span>
-                                    <select name="filter_value_1" id="filter-value-1-select" disabled>
-                                        <option value="">全て</option>
+                                    <span>Activity列</span>
+                                    <select name="activity_column" id="activity-column-select">
+                                        <option value="">選択してください</option>
+                                    </select>
+                                </label>
+                                <label class="field">
+                                    <span>Timestamp列</span>
+                                    <select name="timestamp_column" id="timestamp-column-select">
+                                        <option value="">選択してください</option>
                                     </select>
                                 </label>
                             </div>
-                        </section>
+                        </div>
+                    </section>
 
-                        <section class="filter-condition-card">
-                            <p id="filter-group-title-2" class="field-group-title">グループ/カテゴリー フィルター②</p>
+                    <section class="section-card">
+                        <div class="section-head">
+                            <div class="section-icon si-green">LOG</div>
+                            <div class="section-head-copy">
+                                <div class="section-title">ログ診断</div>
+                                <div class="section-desc">品質チェックとログ全体の統計情報を表示します</div>
+                            </div>
+                            <button type="button" id="run-diagnostics-button" class="hbtn primary">ログ診断実行</button>
+                        </div>
+                        <div class="section-body">
+                            <p class="section-note">必要な列を選択したあとに実行すると、件数・期間・欠損件数・列サマリーを確認できます。</p>
+                            <p class="section-note">ログ診断は読み込んだログ全体を対象に実行します。分析対象条件の絞り込みは分析実行時に適用されます。</p>
+                            <div id="log-diagnostics-panel" class="diagnostics-panel">
+                                <p class="empty-state">ログ診断を実行すると、件数・期間・欠損件数・列サマリーを表示します。</p>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="section-card">
+                        <div class="section-head">
+                            <div class="section-icon si-amber">FLT</div>
+                            <div class="section-head-copy">
+                                <div class="section-title">分析対象条件</div>
+                                <div class="section-desc">フィルター条件と分析対象を設定してください</div>
+                            </div>
+                        </div>
+                        <div class="section-body">
                             <div class="grid-fields grid-fields--2">
                                 <label class="field">
-                                    <span>対象列</span>
-                                    <select name="filter_column_2" id="filter-column-2-select">
-                                        <option value="">未設定</option>
-                                    </select>
+                                    <span>開始日</span>
+                                    <input type="date" name="date_from" id="analysis-date-from">
                                 </label>
                                 <label class="field">
-                                    <span id="filter-value-2-label">値</span>
-                                    <select name="filter_value_2" id="filter-value-2-select" disabled>
-                                        <option value="">全て</option>
-                                    </select>
+                                    <span>終了日</span>
+                                    <input type="date" name="date_to" id="analysis-date-to">
                                 </label>
                             </div>
-                        </section>
 
-                        <section class="filter-condition-card">
-                            <p id="filter-group-title-3" class="field-group-title">グループ/カテゴリー フィルター③</p>
-                            <div class="grid-fields grid-fields--2">
-                                <label class="field">
-                                    <span>対象列</span>
-                                    <select name="filter_column_3" id="filter-column-3-select">
-                                        <option value="">未設定</option>
-                                    </select>
-                                </label>
-                                <label class="field">
-                                    <span id="filter-value-3-label">値</span>
-                                    <select name="filter_value_3" id="filter-value-3-select" disabled>
-                                        <option value="">全て</option>
-                                    </select>
-                                </label>
+                            <div class="filter-condition-list">
+                                <section class="filter-condition-card">
+                                    <p id="filter-group-title-1" class="field-group-title">グループ/カテゴリー フィルター①</p>
+                                    <div class="grid-fields grid-fields--2">
+                                        <label class="field">
+                                            <span>対象列</span>
+                                            <select name="filter_column_1" id="filter-column-1-select">
+                                                <option value="">未設定</option>
+                                            </select>
+                                        </label>
+                                        <label class="field">
+                                            <span id="filter-value-1-label">値</span>
+                                            <select name="filter_value_1" id="filter-value-1-select" disabled>
+                                                <option value="">全て</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                </section>
+
+                                <section class="filter-condition-card">
+                                    <p id="filter-group-title-2" class="field-group-title">グループ/カテゴリー フィルター②</p>
+                                    <div class="grid-fields grid-fields--2">
+                                        <label class="field">
+                                            <span>対象列</span>
+                                            <select name="filter_column_2" id="filter-column-2-select">
+                                                <option value="">未設定</option>
+                                            </select>
+                                        </label>
+                                        <label class="field">
+                                            <span id="filter-value-2-label">値</span>
+                                            <select name="filter_value_2" id="filter-value-2-select" disabled>
+                                                <option value="">全て</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                </section>
+
+                                <section class="filter-condition-card">
+                                    <p id="filter-group-title-3" class="field-group-title">グループ/カテゴリー フィルター③</p>
+                                    <div class="grid-fields grid-fields--2">
+                                        <label class="field">
+                                            <span>対象列</span>
+                                            <select name="filter_column_3" id="filter-column-3-select">
+                                                <option value="">未設定</option>
+                                            </select>
+                                        </label>
+                                        <label class="field">
+                                            <span id="filter-value-3-label">値</span>
+                                            <select name="filter_value_3" id="filter-value-3-select" disabled>
+                                                <option value="">全て</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                </section>
                             </div>
-                        </section>
-                    </div>
-                    <p id="filter-selection-note" class="hint">開始日・終了日とフィルターごとの対象列と値を設定すると、分析対象を絞り込めます。</p>
-                </div>
 
-                <div class="panel-block">
-                    <h2>分析対象</h2>
-                    <div class="analysis-list">
-                        {% for option in analysis_options %}
-                        <label class="analysis-option">
-                            <input type="checkbox" name="analysis_keys" value="{{ option.key }}" checked>
-                            <span>{{ option.label }}</span>
-                        </label>
-                        {% endfor %}
-                    </div>
-                </div>
+                            <p id="filter-selection-note" class="section-note">開始日・終了日とフィルターごとの対象列と値を設定すると、分析対象を絞り込めます。</p>
 
-                <div class="panel-actions">
-                    <button type="submit" id="submit-button">分析を実行</button>
-                    <p class="hint">TOP 画面では各分析の先頭 10 件を表示します。</p>
-                </div>
-            </form>
-        </section>
+                            <div class="analysis-target-label">分析対象</div>
+                            <div class="analysis-targets">
+                                {% for option in analysis_options %}
+                                <label class="target-check checked">
+                                    <input type="checkbox" name="analysis_keys" value="{{ option.key }}" checked>
+                                    <span>{{ option.label }}</span>
+                                </label>
+                                {% endfor %}
+                            </div>
 
-        <section id="status-panel" class="status-panel hidden"></section>
-        <section id="summary-panel" class="summary-panel hidden"></section>
-        <section id="result-panels" class="result-stack"></section>
-    </main>
+                            <div class="panel-actions">
+                                <button type="submit" id="submit-button" class="run-btn">分析を実行</button>
+                                <p class="run-btn-hint">TOP 画面では各分析の先頭 10 件を表示します。</p>
+                            </div>
+                        </div>
+                    </section>
+                </form>
+
+                <section id="status-panel" class="status-panel hidden"></section>
+                <section id="summary-panel" class="summary-panel hidden"></section>
+                <section id="result-panels" class="result-stack"></section>
+            </div>
+        </main>
+    </div>
 
     <script id="initial-profile-payload" type="application/json">{{ sample_profile_payload | tojson }}</script>
     <script src="{{ url_for('static', path='/app.js') }}?v={{ static_version }}"></script>

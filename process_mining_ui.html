@@ -1,0 +1,1471 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>ProcessLens | イベントログ分析</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+JP:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet"/>
+<style>
+/* ═══════════════════════════════════════════
+   TOKENS
+═══════════════════════════════════════════ */
+:root {
+  --bg:          #f4f5f7;
+  --bg-card:     #ffffff;
+  --bg-subtle:   #f8f9fb;
+  --bg-hover:    #f0f2f6;
+
+  --border:      #e2e5eb;
+  --border-mid:  #cdd2db;
+  --border-dark: #b0b9c8;
+
+  --text-1: #0f1623;
+  --text-2: #3d4a5c;
+  --text-3: #6b7a90;
+  --text-4: #9aa5b8;
+
+  --blue:      #2563eb;
+  --blue-bg:   #eff6ff;
+  --blue-mid:  #bfdbfe;
+
+  --green:     #059669;
+  --green-bg:  #ecfdf5;
+  --green-mid: #a7f3d0;
+
+  --amber:     #d97706;
+  --amber-bg:  #fffbeb;
+  --amber-mid: #fde68a;
+
+  --red:       #dc2626;
+  --red-bg:    #fef2f2;
+  --red-mid:   #fecaca;
+
+  --violet:    #7c3aed;
+  --violet-bg: #f5f3ff;
+  --violet-mid:#ddd6fe;
+
+  --radius-sm: 6px;
+  --radius:    10px;
+  --radius-lg: 14px;
+
+  --shadow-xs: 0 1px 2px rgba(0,0,0,0.06);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
+  --shadow:    0 4px 12px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.05);
+  --shadow-md: 0 8px 24px rgba(0,0,0,0.1),  0 2px 6px rgba(0,0,0,0.05);
+
+  --font-display: 'Syne', 'Noto Sans JP', sans-serif;
+  --font-body:    'Noto Sans JP', sans-serif;
+  --font-mono:    'IBM Plex Mono', monospace;
+
+  --sidebar-w: 220px;
+  --header-h:  56px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 14px; scroll-behavior: smooth; }
+body {
+  background: var(--bg);
+  color: var(--text-1);
+  font-family: var(--font-body);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+a { color: inherit; text-decoration: none; }
+button { cursor: pointer; font-family: inherit; }
+select { font-family: inherit; }
+
+/* ═══════════════════════════════════════════
+   TOP HEADER
+═══════════════════════════════════════════ */
+.top-header {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: var(--header-h);
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow-xs);
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  gap: 16px;
+  z-index: 200;
+}
+.top-logo {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: var(--sidebar-w);
+  flex-shrink: 0;
+}
+.logo-mark {
+  width: 30px;
+  height: 30px;
+  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  color: #fff;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.logo-name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: var(--text-1);
+  letter-spacing: -0.01em;
+}
+.logo-name span { color: var(--blue); }
+
+.header-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--text-3);
+}
+.header-breadcrumb .sep { color: var(--border-mid); }
+.header-breadcrumb .current { color: var(--text-1); font-weight: 600; }
+
+.header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.hbtn {
+  padding: 5px 13px;
+  border-radius: var(--radius-sm);
+  font-size: 0.8rem;
+  font-weight: 600;
+  border: 1px solid var(--border-mid);
+  background: var(--bg-card);
+  color: var(--text-2);
+  transition: background 0.12s, border-color 0.12s;
+}
+.hbtn:hover { background: var(--bg-hover); }
+.hbtn.primary {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+}
+.hbtn.primary:hover { background: #1d4ed8; }
+
+/* ═══════════════════════════════════════════
+   LAYOUT
+═══════════════════════════════════════════ */
+.layout {
+  display: flex;
+  margin-top: var(--header-h);
+  min-height: calc(100vh - var(--header-h));
+}
+
+/* ─── Sidebar ─── */
+.sidebar {
+  width: var(--sidebar-w);
+  flex-shrink: 0;
+  background: var(--bg-card);
+  border-right: 1px solid var(--border);
+  position: fixed;
+  top: var(--header-h);
+  bottom: 0;
+  overflow-y: auto;
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sidebar-section {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.sidebar-section:first-child { margin-top: 0; border-top: none; padding-top: 0; }
+.sidebar-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-4);
+  padding: 0 8px;
+  margin-bottom: 4px;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 0.83rem;
+  font-weight: 500;
+  color: var(--text-2);
+  transition: background 0.12s, color 0.12s;
+}
+.nav-item:hover { background: var(--bg-hover); color: var(--text-1); }
+.nav-item.active {
+  background: var(--blue-bg);
+  color: var(--blue);
+  font-weight: 600;
+}
+.nav-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  flex-shrink: 0;
+}
+.nav-dot.blue   { background: var(--blue-bg);   color: var(--blue); }
+.nav-dot.green  { background: var(--green-bg);  color: var(--green); }
+.nav-dot.violet { background: var(--violet-bg); color: var(--violet); }
+.nav-dot.amber  { background: var(--amber-bg);  color: var(--amber); }
+
+/* ─── Main ─── */
+.main {
+  margin-left: var(--sidebar-w);
+  flex: 1;
+  padding: 28px 32px 60px;
+  max-width: 1100px;
+}
+
+/* ═══════════════════════════════════════════
+   PAGE TITLE
+═══════════════════════════════════════════ */
+.page-title-block {
+  margin-bottom: 28px;
+}
+.page-title {
+  font-family: var(--font-display);
+  font-size: 1.65rem;
+  font-weight: 800;
+  color: var(--text-1);
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+.page-subtitle {
+  font-size: 0.84rem;
+  color: var(--text-3);
+  margin-top: 5px;
+}
+.page-subtitle a { color: var(--blue); border-bottom: 1px solid var(--blue-mid); }
+
+/* ═══════════════════════════════════════════
+   STEP INDICATOR
+═══════════════════════════════════════════ */
+.steps {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-bottom: 32px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 4px;
+  box-shadow: var(--shadow-xs);
+}
+.step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  flex: 1;
+  font-size: 0.81rem;
+  font-weight: 500;
+  color: var(--text-3);
+  transition: background 0.12s;
+}
+.step.done { color: var(--green); }
+.step.active {
+  background: var(--bg);
+  color: var(--blue);
+  font-weight: 700;
+  box-shadow: var(--shadow-xs);
+}
+.step-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+  flex-shrink: 0;
+  border: 1.5px solid currentColor;
+}
+.step.done .step-num {
+  background: var(--green-bg);
+  border-color: var(--green-mid);
+  color: var(--green);
+}
+.step.active .step-num {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+}
+.step-arrow {
+  width: 1px;
+  height: 24px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
+/* ═══════════════════════════════════════════
+   SECTION CARD
+═══════════════════════════════════════════ */
+.section-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  margin-bottom: 20px;
+  overflow: hidden;
+}
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+.section-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+  flex-shrink: 0;
+}
+.si-blue   { background: var(--blue-bg);   color: var(--blue); }
+.si-green  { background: var(--green-bg);  color: var(--green); }
+.si-violet { background: var(--violet-bg); color: var(--violet); }
+.si-amber  { background: var(--amber-bg);  color: var(--amber); }
+
+.section-title {
+  font-family: var(--font-display);
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text-1);
+}
+.section-desc {
+  font-size: 0.75rem;
+  color: var(--text-3);
+  margin-left: auto;
+}
+.section-body { padding: 20px; }
+
+/* ═══════════════════════════════════════════
+   UPLOAD AREA
+═══════════════════════════════════════════ */
+.upload-zone {
+  border: 2px dashed var(--border-mid);
+  border-radius: var(--radius);
+  padding: 28px 24px;
+  text-align: center;
+  background: var(--bg-subtle);
+  transition: border-color 0.15s, background 0.15s;
+  cursor: pointer;
+}
+.upload-zone:hover { border-color: var(--blue); background: var(--blue-bg); }
+.upload-icon { font-size: 2rem; margin-bottom: 10px; }
+.upload-title { font-weight: 600; font-size: 0.9rem; color: var(--text-1); margin-bottom: 4px; }
+.upload-sub { font-size: 0.77rem; color: var(--text-3); }
+.upload-sub a { color: var(--blue); }
+
+.upload-result {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--green-bg);
+  border: 1px solid var(--green-mid);
+  border-radius: var(--radius);
+  margin-top: 12px;
+}
+.upload-result-icon { font-size: 1.1rem; }
+.upload-result-name { font-size: 0.83rem; font-weight: 600; color: var(--text-1); }
+.upload-result-meta { font-size: 0.75rem; color: var(--text-3); margin-top: 1px; }
+.upload-rebtn {
+  margin-left: auto;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: 1px solid var(--border-mid);
+  background: var(--bg-card);
+  color: var(--text-2);
+}
+
+/* ═══════════════════════════════════════════
+   COLUMN MAPPING
+═══════════════════════════════════════════ */
+.mapping-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+.mapping-item label {
+  display: block;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--text-3);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.mapping-item label .req {
+  color: var(--red);
+  margin-left: 3px;
+}
+.map-select {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-1);
+  font-size: 0.83rem;
+  font-weight: 500;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7a90' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.map-select:focus {
+  outline: none;
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px var(--blue-bg);
+}
+
+/* ═══════════════════════════════════════════
+   STAT GRID
+═══════════════════════════════════════════ */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+  margin-bottom: 20px;
+}
+.stat-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  box-shadow: var(--shadow-xs);
+}
+.stat-label {
+  font-size: 0.71rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  margin-bottom: 6px;
+}
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: 1.3rem;
+  font-weight: 500;
+  color: var(--text-1);
+  line-height: 1;
+  margin-bottom: 4px;
+}
+.stat-sub {
+  font-size: 0.72rem;
+  color: var(--text-4);
+}
+
+/* ═══════════════════════════════════════════
+   DIAGNOSTIC DETAIL
+═══════════════════════════════════════════ */
+.diag-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.diag-item {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.diag-item-label { font-size: 0.71rem; color: var(--text-3); font-weight: 600; margin-bottom: 4px; }
+.diag-item-val   { font-size: 0.88rem; font-weight: 600; color: var(--text-1); font-family: var(--font-mono); }
+.diag-item-sub   { font-size: 0.7rem; color: var(--text-4); margin-top: 2px; }
+
+.notice-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--amber-bg);
+  border: 1px solid var(--amber-mid);
+  border-radius: var(--radius);
+  margin-top: 12px;
+  font-size: 0.78rem;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+.notice-bar .ni { color: var(--amber); font-size: 0.9rem; flex-shrink: 0; margin-top: 1px; }
+
+/* ═══════════════════════════════════════════
+   HEADER TABLE (column preview)
+═══════════════════════════════════════════ */
+.preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.79rem;
+}
+.preview-table th {
+  padding: 9px 12px;
+  text-align: left;
+  background: var(--bg-subtle);
+  border-bottom: 2px solid var(--border-mid);
+  font-weight: 700;
+  color: var(--text-2);
+  font-size: 0.73rem;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+.preview-table td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+  vertical-align: middle;
+}
+.preview-table tr:last-child td { border-bottom: none; }
+.preview-table tbody tr:hover td { background: var(--bg-hover); }
+.mono-cell { font-family: var(--font-mono); font-size: 0.76rem; color: var(--text-1); }
+.badge-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+.chip-blue   { background: var(--blue-bg);   color: var(--blue);   border: 1px solid var(--blue-mid); }
+.chip-green  { background: var(--green-bg);  color: var(--green);  border: 1px solid var(--green-mid); }
+.chip-violet { background: var(--violet-bg); color: var(--violet); border: 1px solid var(--violet-mid); }
+.chip-gray   { background: var(--bg-hover);  color: var(--text-2); border: 1px solid var(--border-mid); }
+.chip-amber  { background: var(--amber-bg);  color: var(--amber);  border: 1px solid var(--amber-mid); }
+
+/* ═══════════════════════════════════════════
+   FILTER SECTION
+═══════════════════════════════════════════ */
+.date-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.field-group label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-3);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.field-input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius-sm);
+  font-size: 0.83rem;
+  font-family: var(--font-body);
+  background: var(--bg-card);
+  color: var(--text-1);
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.field-input:focus {
+  outline: none;
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px var(--blue-bg);
+}
+
+.filter-group {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 14px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 10px;
+}
+.filter-group-label {
+  grid-column: span 2;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-3);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin-bottom: -4px;
+}
+
+.analysis-targets {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+.target-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.target-check.checked {
+  border-color: var(--blue-mid);
+  background: var(--blue-bg);
+  color: var(--blue);
+}
+.target-check input { accent-color: var(--blue); }
+
+.run-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 24px;
+  background: var(--blue);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 0.88rem;
+  font-weight: 700;
+  font-family: var(--font-body);
+  transition: background 0.12s, transform 0.1s, box-shadow 0.12s;
+  box-shadow: 0 2px 8px rgba(37,99,235,0.35);
+}
+.run-btn:hover { background: #1d4ed8; transform: translateY(-1px); box-shadow: 0 4px 14px rgba(37,99,235,0.4); }
+.run-btn:active { transform: translateY(0); }
+.run-btn-hint { font-size: 0.74rem; color: var(--text-3); margin-top: 8px; }
+
+/* ═══════════════════════════════════════════
+   RESULTS SECTION
+═══════════════════════════════════════════ */
+.result-meta-bar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 14px 20px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 20px;
+}
+.result-meta-item { display: flex; flex-direction: column; gap: 2px; }
+.rm-label { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-4); }
+.rm-val   { font-size: 0.88rem; font-weight: 600; color: var(--text-1); font-family: var(--font-mono); }
+.result-meta-bar .divider { width: 1px; height: 32px; background: var(--border-mid); }
+
+.tab-bar {
+  display: flex;
+  gap: 2px;
+  border-bottom: 2px solid var(--border);
+  margin-bottom: 20px;
+}
+.tab {
+  padding: 9px 16px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-3);
+  border: none;
+  background: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tab:hover { color: var(--text-1); }
+.tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+.tab-count {
+  background: var(--bg-hover);
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--text-3);
+}
+.tab.active .tab-count { background: var(--blue-bg); color: var(--blue); }
+
+.result-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-xs);
+}
+.result-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.79rem;
+  white-space: nowrap;
+}
+.result-table thead th {
+  padding: 10px 14px;
+  background: var(--bg-subtle);
+  border-bottom: 2px solid var(--border-mid);
+  text-align: left;
+  font-size: 0.71rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  position: sticky;
+  top: 0;
+}
+.result-table th.num { text-align: right; }
+.result-table td {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+  vertical-align: middle;
+}
+.result-table tr:last-child td { border-bottom: none; }
+.result-table tbody tr:hover td { background: #f0f6ff; }
+.result-table td.num {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 0.77rem;
+  color: var(--text-1);
+}
+.result-table td.activity-name { font-weight: 600; color: var(--text-1); }
+
+.bar-wrap { display: flex; align-items: center; gap: 8px; }
+.bar-bg {
+  flex: 1;
+  height: 6px;
+  background: var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  min-width: 60px;
+}
+.bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--blue);
+  transition: width 0.4s ease;
+}
+.bar-fill.green  { background: var(--green); }
+.bar-fill.violet { background: var(--violet); }
+.bar-fill.amber  { background: var(--amber); }
+.bar-pct { font-family: var(--font-mono); font-size: 0.71rem; color: var(--text-3); min-width: 34px; }
+
+.detail-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid var(--blue-mid);
+  border-radius: var(--radius-sm);
+  font-size: 0.73rem;
+  font-weight: 600;
+  color: var(--blue);
+  background: var(--blue-bg);
+  transition: background 0.12s;
+}
+.detail-link:hover { background: #dbeafe; }
+
+/* ─── Pattern table ─── */
+.pattern-path {
+  font-family: var(--font-mono);
+  font-size: 0.71rem;
+  color: var(--text-2);
+  max-width: 420px;
+  white-space: normal;
+  line-height: 1.5;
+}
+.path-arrow { color: var(--text-4); margin: 0 3px; }
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-mid); border-radius: 3px; }
+
+/* ─── Fade-in animation ─── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.section-card { animation: fadeUp 0.3s ease both; }
+.section-card:nth-child(2) { animation-delay: 0.05s; }
+.section-card:nth-child(3) { animation-delay: 0.10s; }
+.section-card:nth-child(4) { animation-delay: 0.15s; }
+.section-card:nth-child(5) { animation-delay: 0.20s; }
+</style>
+</head>
+<body>
+
+<!-- ════════════════════════ HEADER ════════════════════════ -->
+<header class="top-header">
+  <div class="top-logo">
+    <div class="logo-mark">⬡</div>
+    <div class="logo-name">Process<span>Lens</span></div>
+  </div>
+  <div class="header-breadcrumb">
+    <span>ホーム</span>
+    <span class="sep">›</span>
+    <span>分析</span>
+    <span class="sep">›</span>
+    <span class="current">イベントログ分析</span>
+  </div>
+  <div class="header-right">
+    <button class="hbtn">📂 保存済み分析</button>
+    <button class="hbtn">⚙ 設定</button>
+    <button class="hbtn primary">＋ 新規分析</button>
+  </div>
+</header>
+
+<div class="layout">
+
+<!-- ════════════════════════ SIDEBAR ════════════════════════ -->
+<aside class="sidebar">
+  <div class="sidebar-section">
+    <div class="sidebar-label">メニュー</div>
+    <a class="nav-item active" href="#">
+      <div class="nav-dot blue">📊</div> ダッシュボード
+    </a>
+    <a class="nav-item" href="#">
+      <div class="nav-dot green">📁</div> ファイル管理
+    </a>
+    <a class="nav-item" href="#">
+      <div class="nav-dot violet">🔍</div> 分析一覧
+    </a>
+    <a class="nav-item" href="#">
+      <div class="nav-dot amber">⭐</div> お気に入り
+    </a>
+  </div>
+  <div class="sidebar-section">
+    <div class="sidebar-label">分析タイプ</div>
+    <a class="nav-item" href="#">
+      <div class="nav-dot blue">📈</div> 頻度分析
+    </a>
+    <a class="nav-item" href="#">
+      <div class="nav-dot green">🔄</div> 前後処理分析
+    </a>
+    <a class="nav-item" href="#">
+      <div class="nav-dot violet">🗺</div> 処理パターン
+    </a>
+  </div>
+  <div class="sidebar-section">
+    <div class="sidebar-label">サポート</div>
+    <a class="nav-item" href="#">
+      <div class="nav-dot amber">📖</div> ドキュメント
+    </a>
+    <a class="nav-item" href="#">
+      <div class="nav-dot gray">💬</div> フィードバック
+    </a>
+  </div>
+</aside>
+
+<!-- ════════════════════════ MAIN ════════════════════════ -->
+<main class="main">
+
+  <div class="page-title-block">
+    <div class="page-title">イベントログをブラウザで分析</div>
+    <div class="page-subtitle">
+      CSVをアップロードし、列マッピングと分析条件を設定して分析します。
+      <a href="#">sample_event_log.csv</a> をお試しください。
+    </div>
+  </div>
+
+  <!-- STEP INDICATOR -->
+  <div class="steps">
+    <div class="step done">
+      <div class="step-num">✓</div>
+      ファイル読み込み
+    </div>
+    <div class="step-arrow"></div>
+    <div class="step done">
+      <div class="step-num">✓</div>
+      列マッピング
+    </div>
+    <div class="step-arrow"></div>
+    <div class="step active">
+      <div class="step-num">3</div>
+      ログ診断
+    </div>
+    <div class="step-arrow"></div>
+    <div class="step">
+      <div class="step-num">4</div>
+      条件設定・実行
+    </div>
+    <div class="step-arrow"></div>
+    <div class="step">
+      <div class="step-num">5</div>
+      結果確認
+    </div>
+  </div>
+
+  <!-- ① ファイル読み込み -->
+  <div class="section-card">
+    <div class="section-head">
+      <div class="section-icon si-blue">📂</div>
+      <div class="section-title">ログ読み込み</div>
+      <div class="section-desc">CSV ファイルを選択してください</div>
+    </div>
+    <div class="section-body">
+      <div class="upload-zone">
+        <div class="upload-icon">☁️</div>
+        <div class="upload-title">ここにCSVをドロップ、またはクリックして選択</div>
+        <div class="upload-sub">最大 500MB · UTF-8推奨 · <a href="#">サンプルをダウンロード</a></div>
+      </div>
+      <div class="upload-result">
+        <div class="upload-result-icon">✅</div>
+        <div>
+          <div class="upload-result-name">realistic_process_mining_test_100k.csv</div>
+          <div class="upload-result-meta">100,000行 · 8列 · 読み込み完了</div>
+        </div>
+        <button class="upload-rebtn">変更</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ② 列マッピング -->
+  <div class="section-card">
+    <div class="section-head">
+      <div class="section-icon si-violet">⚙</div>
+      <div class="section-title">列マッピング</div>
+      <div class="section-desc">各役割に対応する列を指定してください</div>
+    </div>
+    <div class="section-body">
+      <div class="mapping-grid">
+        <div class="mapping-item">
+          <label>Case ID列 <span class="req">*</span></label>
+          <select class="map-select">
+            <option selected>case_id</option>
+            <option>id</option>
+          </select>
+        </div>
+        <div class="mapping-item">
+          <label>Activity列 <span class="req">*</span></label>
+          <select class="map-select">
+            <option selected>activity</option>
+            <option>act</option>
+          </select>
+        </div>
+        <div class="mapping-item">
+          <label>Timestamp列 <span class="req">*</span></label>
+          <select class="map-select">
+            <option selected>timestamp</option>
+            <option>time</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ③ ログ診断 -->
+  <div class="section-card">
+    <div class="section-head">
+      <div class="section-icon si-green">🔍</div>
+      <div class="section-title">ログ診断</div>
+      <div class="section-desc">品質チェック・ログ全体を対象に統計情報を表示します</div>
+      <button class="hbtn primary" style="margin-left:12px; font-size:0.78rem; padding:5px 14px;">▶ ログ診断実行</button>
+    </div>
+    <div class="section-body">
+      <!-- Stat cards -->
+      <div class="stat-grid">
+        <div class="stat-card">
+          <div class="stat-label">プロセス数</div>
+          <div class="stat-value">157,955</div>
+          <div class="stat-sub">ユニークケース</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">イベント数</div>
+          <div class="stat-value">12,000</div>
+          <div class="stat-sub">総イベント行</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">アクティビティ</div>
+          <div class="stat-value">20</div>
+          <div class="stat-sub">ユニーク種別</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">期間</div>
+          <div class="stat-value" style="font-size:0.78rem; padding-top:4px;">2026-01<br>〜 2026-04</div>
+          <div class="stat-sub">タイムスパン</div>
+        </div>
+      </div>
+
+      <!-- Detail -->
+      <div class="diag-row">
+        <div class="diag-item">
+          <div class="diag-item-label">大切別数</div>
+          <div class="diag-item-val">0</div>
+          <div class="diag-item-sub">異常なし</div>
+        </div>
+        <div class="diag-item">
+          <div class="diag-item-label">重複行数</div>
+          <div class="diag-item-val">0</div>
+          <div class="diag-item-sub">重複なし</div>
+        </div>
+        <div class="diag-item">
+          <div class="diag-item-label">重複ケース数</div>
+          <div class="diag-item-val">157,955</div>
+          <div class="diag-item-sub">全ケース対象</div>
+        </div>
+      </div>
+
+      <div class="notice-bar">
+        <span class="ni">⚠️</span>
+        <span>このCSVコードに一致するイベントが見当たりません。タイムスタンプの型変換に関するエラーが含まれる可能性があります。
+        形式の先月は一般的で形式です。</span>
+      </div>
+
+      <!-- Header preview table -->
+      <div style="margin-top:20px;">
+        <div style="font-size:0.78rem; font-weight:700; color:var(--text-2); margin-bottom:10px;">📋 ヘッダー確認（全列プレビュー）</div>
+        <div class="result-table-wrap">
+          <table class="preview-table">
+            <thead>
+              <tr>
+                <th>列名</th>
+                <th>サンプル値</th>
+                <th>ユニーク件数</th>
+                <th>欠損行数</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="badge-chip chip-blue">case_id</span></td>
+                <td class="mono-cell">C00001, C00002, C00003…</td>
+                <td class="mono-cell">12000</td>
+                <td class="mono-cell">0</td>
+              </tr>
+              <tr>
+                <td><span class="badge-chip chip-green">activity</span></td>
+                <td class="mono-cell">初期申請, 内部確認, 最終…</td>
+                <td class="mono-cell">20</td>
+                <td class="mono-cell">0</td>
+              </tr>
+              <tr>
+                <td><span class="badge-chip chip-violet">timestamp</span></td>
+                <td class="mono-cell">2026-01-06T08:04:00</td>
+                <td class="mono-cell">97494</td>
+                <td class="mono-cell">0</td>
+              </tr>
+              <tr>
+                <td><span class="badge-chip chip-gray">user</span></td>
+                <td class="mono-cell">applicant_a, boss_a…</td>
+                <td class="mono-cell">15</td>
+                <td class="mono-cell">0</td>
+              </tr>
+              <tr>
+                <td><span class="badge-chip chip-gray">department</span></td>
+                <td class="mono-cell">営業, 経理, 企画, 開発, 人事</td>
+                <td class="mono-cell">5</td>
+                <td class="mono-cell">0</td>
+              </tr>
+              <tr>
+                <td><span class="badge-chip chip-gray">channel</span></td>
+                <td class="mono-cell">Web, Bot用API, API, メール</td>
+                <td class="mono-cell">4</td>
+                <td class="mono-cell">0</td>
+              </tr>
+              <tr>
+                <td><span class="badge-chip chip-amber">nps_score</span></td>
+                <td class="mono-cell">21, 38, 42, 60, 59</td>
+                <td class="mono-cell">95</td>
+                <td class="mono-cell">0</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ④ 分析条件 -->
+  <div class="section-card">
+    <div class="section-head">
+      <div class="section-icon si-amber">🎛</div>
+      <div class="section-title">分析対象条件</div>
+      <div class="section-desc">フィルター条件を設定してください</div>
+    </div>
+    <div class="section-body">
+      <div class="date-row">
+        <div class="field-group">
+          <label>開始日</label>
+          <input class="field-input" type="date" value="2026-01-06"/>
+        </div>
+        <div class="field-group">
+          <label>終了日</label>
+          <input class="field-input" type="date" value="2026-04-10"/>
+        </div>
+      </div>
+
+      <div class="filter-group">
+        <div class="filter-group-label">グループ／カテゴリーフィルター 1</div>
+        <div class="field-group">
+          <label>対象列</label>
+          <select class="map-select">
+            <option>未指定</option>
+            <option>department</option>
+            <option>channel</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label>値</label>
+          <select class="map-select">
+            <option>すべて</option>
+            <option>営業</option>
+            <option>経理</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="filter-group">
+        <div class="filter-group-label">グループ／カテゴリーフィルター 2</div>
+        <div class="field-group">
+          <label>対象列</label>
+          <select class="map-select">
+            <option>未指定</option>
+            <option>channel</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label>値</label>
+          <select class="map-select">
+            <option>すべて</option>
+            <option>Web</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="font-size:0.76rem; color:var(--text-3); margin: 4px 0 16px; padding-left:2px;">
+        ⓘ フィルターごとに対象件数が絞られます。絞り込み過ぎに注意してください。
+      </div>
+
+      <div style="font-size:0.74rem; font-weight:700; color:var(--text-3); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:10px;">分析対象</div>
+      <div class="analysis-targets" style="margin-bottom:20px;">
+        <label class="target-check checked"><input type="checkbox" checked/> 📈 頻度分析</label>
+        <label class="target-check checked"><input type="checkbox" checked/> 🔄 前後処理分析</label>
+        <label class="target-check checked"><input type="checkbox" checked/> 🗺 処理パターン分析</label>
+      </div>
+
+      <button class="run-btn">▶ 分析を実行</button>
+      <div class="run-btn-hint">ⓘ 分析設定は各タブ内の「詳細」から個別に参照できます。</div>
+    </div>
+  </div>
+
+  <!-- ⑤ 分析結果 -->
+  <div class="section-card" style="margin-top:32px;">
+    <div class="section-head">
+      <div class="section-icon si-green">✅</div>
+      <div class="section-title">分析結果</div>
+    </div>
+    <div class="section-body">
+
+      <!-- Meta bar -->
+      <div class="result-meta-bar">
+        <div class="result-meta-item">
+          <span class="rm-label">ファイル</span>
+          <span class="rm-val">realistic_process_mining_test_100k.csv</span>
+        </div>
+        <div class="divider"></div>
+        <div class="result-meta-item">
+          <span class="rm-label">ケース数</span>
+          <span class="rm-val">12,000</span>
+        </div>
+        <div class="divider"></div>
+        <div class="result-meta-item">
+          <span class="rm-label">イベント数</span>
+          <span class="rm-val">157,955</span>
+        </div>
+        <div class="divider"></div>
+        <div class="result-meta-item">
+          <span class="rm-label">フィルター適用</span>
+          <span class="rm-val" style="color:var(--amber);">なし</span>
+        </div>
+      </div>
+
+      <!-- Tabs -->
+      <div class="tab-bar">
+        <button class="tab active">📈 頻度分析 <span class="tab-count">14</span></button>
+        <button class="tab">🔄 前後処理分析 <span class="tab-count">10</span></button>
+        <button class="tab">🗺 処理パターン分析 <span class="tab-count">234</span></button>
+      </div>
+
+      <!-- Frequency table -->
+      <div class="result-table-wrap">
+        <table class="result-table">
+          <thead>
+            <tr>
+              <th>アクティビティ</th>
+              <th class="num">イベント数</th>
+              <th class="num">ケース数</th>
+              <th class="num">合計時間(h)</th>
+              <th class="num">平均時間(h)</th>
+              <th class="num">中央値(h)</th>
+              <th class="num">最大値(h)</th>
+              <th>割合</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="activity-name">初期申請</td>
+              <td class="num">14,174</td>
+              <td class="num">12,000</td>
+              <td class="num">460,444</td>
+              <td class="num">32.49</td>
+              <td class="num">24</td>
+              <td class="num">155</td>
+              <td>
+                <div class="bar-wrap">
+                  <div class="bar-bg"><div class="bar-fill" style="width:100%"></div></div>
+                  <span class="bar-pct">8.19%</span>
+                </div>
+              </td>
+              <td><a class="detail-link" href="#">詳細 →</a></td>
+            </tr>
+            <tr>
+              <td class="activity-name">チェック</td>
+              <td class="num">12,843</td>
+              <td class="num">12,000</td>
+              <td class="num">350,152</td>
+              <td class="num">27.65</td>
+              <td class="num">24</td>
+              <td class="num">4</td>
+              <td>
+                <div class="bar-wrap">
+                  <div class="bar-bg"><div class="bar-fill green" style="width:90%"></div></div>
+                  <span class="bar-pct">8.19%</span>
+                </div>
+              </td>
+              <td><a class="detail-link" href="#">詳細 →</a></td>
+            </tr>
+            <tr>
+              <td class="activity-name">内部確認</td>
+              <td class="num">12,206</td>
+              <td class="num">12,000</td>
+              <td class="num">150,967</td>
+              <td class="num">11.81</td>
+              <td class="num">91</td>
+              <td class="num">2984</td>
+              <td>
+                <div class="bar-wrap">
+                  <div class="bar-bg"><div class="bar-fill violet" style="width:83%"></div></div>
+                  <span class="bar-pct">8.10%</span>
+                </div>
+              </td>
+              <td><a class="detail-link" href="#">詳細 →</a></td>
+            </tr>
+            <tr>
+              <td class="activity-name">最終確定</td>
+              <td class="num">12,006</td>
+              <td class="num">12,000</td>
+              <td class="num">1,999,667</td>
+              <td class="num">969.39</td>
+              <td class="num">140</td>
+              <td class="num">1295</td>
+              <td>
+                <div class="bar-wrap">
+                  <div class="bar-bg"><div class="bar-fill amber" style="width:78%"></div></div>
+                  <span class="bar-pct">7.6%</span>
+                </div>
+              </td>
+              <td><a class="detail-link" href="#">詳細 →</a></td>
+            </tr>
+            <tr>
+              <td class="activity-name">承認処理</td>
+              <td class="num">12,006</td>
+              <td class="num">12,000</td>
+              <td class="num">63,917</td>
+              <td class="num">1.96</td>
+              <td class="num">5</td>
+              <td class="num">18</td>
+              <td>
+                <div class="bar-wrap">
+                  <div class="bar-bg"><div class="bar-fill" style="width:75%"></div></div>
+                  <span class="bar-pct">7.6%</span>
+                </div>
+              </td>
+              <td><a class="detail-link" href="#">詳細 →</a></td>
+            </tr>
+            <tr>
+              <td class="activity-name">証跡取り</td>
+              <td class="num">31,622</td>
+              <td class="num">10,789</td>
+              <td class="num">719,538</td>
+              <td class="num">61.91</td>
+              <td class="num">55</td>
+              <td class="num">244</td>
+              <td>
+                <div class="bar-wrap">
+                  <div class="bar-bg"><div class="bar-fill green" style="width:72%"></div></div>
+                  <span class="bar-pct">7.35%</span>
+                </div>
+              </td>
+              <td><a class="detail-link" href="#">詳細 →</a></td>
+            </tr>
+            <tr>
+              <td class="activity-name">最終承認</td>
+              <td class="num">31,867</td>
+              <td class="num">10,780</td>
+              <td class="num">530,615</td>
+              <td class="num">43.58</td>
+              <td class="num">57</td>
+              <td class="num">311</td>
+              <td>
+                <div class="bar-wrap">
+                  <div class="bar-bg"><div class="bar-fill violet" style="width:68%"></div></div>
+                  <span class="bar-pct">7.16%</span>
+                </div>
+              </td>
+              <td><a class="detail-link" href="#">詳細 →</a></td>
+            </tr>
+            <tr>
+              <td class="activity-name">システム完了</td>
+              <td class="num">30,678</td>
+              <td class="num">10,079</td>
+              <td class="num">1,380,516</td>
+              <td class="num">501.66</td>
+              <td class="num">82</td>
+              <td class="num">1020</td>
+              <td>
+                <div class="bar-wrap">
+                  <div class="bar-bg"><div class="bar-fill amber" style="width:62%"></div></div>
+                  <span class="bar-pct">6.75%</span>
+                </div>
+              </td>
+              <td><a class="detail-link" href="#">詳細 →</a></td>
+            </tr>
+            <tr>
+              <td class="activity-name">上長承認</td>
+              <td class="num">9,871</td>
+              <td class="num">8,198</td>
+              <td class="num">2,984,287</td>
+              <td class="num">325.1</td>
+              <td class="num">247</td>
+              <td class="num">3437</td>
+              <td>
+                <div class="bar-wrap">
+                  <div class="bar-bg"><div class="bar-fill" style="width:55%"></div></div>
+                  <span class="bar-pct">5.62%</span>
+                </div>
+              </td>
+              <td><a class="detail-link" href="#">詳細 →</a></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Pattern preview -->
+      <div style="margin-top:28px;">
+        <div class="tab-bar">
+          <button class="tab active">🗺 処理パターン分析（上位5件）</button>
+        </div>
+        <div class="result-table-wrap">
+          <table class="result-table">
+            <thead>
+              <tr>
+                <th class="num">ケース数</th>
+                <th class="num">平均時間</th>
+                <th class="num">中央値</th>
+                <th class="num">合計時間</th>
+                <th class="num">最大ケース</th>
+                <th>処理パターン</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="num">331</td>
+                <td class="num">505.69</td>
+                <td class="num">481</td>
+                <td class="num">354</td>
+                <td class="num">671</td>
+                <td>
+                  <div class="pattern-path">
+                    初期申請<span class="path-arrow">→</span>内部確認<span class="path-arrow">→</span>書類確認<span class="path-arrow">→</span>データ入力<span class="path-arrow">→</span>システム照合<span class="path-arrow">→</span>チェック<span class="path-arrow">→</span>次承認<span class="path-arrow">→</span>最終確定<span class="path-arrow">→</span>承認済み
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td class="num">329</td>
+                <td class="num">847.95</td>
+                <td class="num">788</td>
+                <td class="num">249</td>
+                <td class="num">2026</td>
+                <td>
+                  <div class="pattern-path">
+                    初期申請<span class="path-arrow">→</span>内部確認<span class="path-arrow">→</span>書類確認<span class="path-arrow">→</span>データ入力<span class="path-arrow">→</span>システム照合<span class="path-arrow">→</span>チェック<span class="path-arrow">→</span>次承認<span class="path-arrow">→</span>差し戻し<span class="path-arrow">→</span>最終確定
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td class="num">310</td>
+                <td class="num">2,121.5</td>
+                <td class="num">2,040</td>
+                <td class="num">7,031</td>
+                <td class="num">161,4</td>
+                <td>
+                  <div class="pattern-path">
+                    初期申請<span class="path-arrow">→</span>内部確認<span class="path-arrow">→</span>データ入力<span class="path-arrow">→</span>システム照合<span class="path-arrow">→</span>追加確認<span class="path-arrow">→</span>チェック<span class="path-arrow">→</span>山田承認<span class="path-arrow">→</span>次承認<span class="path-arrow">→</span>最終確定<span class="path-arrow">→</span>承認済み
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td class="num">234</td>
+                <td class="num">1,939</td>
+                <td class="num">1,805</td>
+                <td class="num">275</td>
+                <td class="num">2754</td>
+                <td>
+                  <div class="pattern-path">
+                    初期申請<span class="path-arrow">→</span>内部確認<span class="path-arrow">→</span>書類確認<span class="path-arrow">→</span>山田確認<span class="path-arrow">→</span>データ入力<span class="path-arrow">→</span>システム照合<span class="path-arrow">→</span>チェック<span class="path-arrow">→</span>次承認<span class="path-arrow">→</span>差し戻し<span class="path-arrow">→</span>最終確定
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td class="num">228</td>
+                <td class="num">5,399.95</td>
+                <td class="num">3,113.5</td>
+                <td class="num">265</td>
+                <td class="num">1878</td>
+                <td>
+                  <div class="pattern-path">
+                    初期申請<span class="path-arrow">→</span>内部確認<span class="path-arrow">→</span>書類確認<span class="path-arrow">→</span>データ入力<span class="path-arrow">→</span>上長承認<span class="path-arrow">→</span>最終確定<span class="path-arrow">→</span>終了
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</main>
+</div>
+</body>
+</html>
