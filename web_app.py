@@ -1142,9 +1142,9 @@ def index(request: Request):
     )
 
     return templates.TemplateResponse(
+        request,
         "index.html",
-        {
-            "request": request,
+        context={
             "analysis_options": get_analysis_options(),
             "default_headers": DEFAULT_HEADERS,
             "sample_profile_payload": sample_profile_payload,
@@ -1157,9 +1157,9 @@ def index(request: Request):
 @app.get("/analysis/patterns/{pattern_index}")
 def pattern_detail_page(request: Request, pattern_index: int):
     return templates.TemplateResponse(
+        request,
         "pattern_detail.html",
-        {
-            "request": request,
+        context={
             "pattern_index": pattern_index,
             "static_version": get_static_version(),
         },
@@ -1174,9 +1174,9 @@ def analysis_detail(request: Request, analysis_key):
         raise HTTPException(status_code=404, detail="Analysis key was not found.")
 
     return templates.TemplateResponse(
+        request,
         "analysis_detail.html",
-        {
-            "request": request,
+        context={
             "analysis_key": analysis_key,
             "analysis_name": analysis_definitions[analysis_key]["config"]["analysis_name"],
             "static_version": get_static_version(),
@@ -1755,4 +1755,3 @@ async def analyze(request: Request):
 
 if __name__ == "__main__":
     uvicorn.run("web_app:app", host="127.0.0.1", port=5000, reload=True)
-
