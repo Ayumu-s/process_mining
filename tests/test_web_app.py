@@ -1,12 +1,24 @@
 ﻿from io import BytesIO
 import unittest
 from unittest import mock
+from urllib.parse import quote
 from zipfile import ZipFile
 
+import inspect
+import httpx
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
 import web_app
+
+
+if "app" not in inspect.signature(httpx.Client.__init__).parameters:
+    _original_httpx_client_init = httpx.Client.__init__
+
+    def _compat_httpx_client_init(self, *args, app=None, **kwargs):
+        return _original_httpx_client_init(self, *args, **kwargs)
+
+    httpx.Client.__init__ = _compat_httpx_client_init
 
 
 class WebAppTestCase(unittest.TestCase):
@@ -163,6 +175,8 @@ class WebAppTestCase(unittest.TestCase):
             archive_names = set(archive_file.namelist())
             self.assertEqual(2, len(archive_names))
             self.assertTrue(all(name.endswith(".xlsx") for name in archive_names))
+            self.assertIn("sample_event_log_頻度分析.xlsx", archive_names)
+            self.assertIn("sample_event_log_前後処理分析.xlsx", archive_names)
 
 
     def test_report_excel_export_api_returns_workbook(self):
@@ -185,56 +199,309 @@ class WebAppTestCase(unittest.TestCase):
             },
         )
 
-        response = self.client.get(
-            f"/api/runs/{run_id}/report-excel"
-            "?analysis_key=pattern"
-            "&filter_value_1=Sales"
-            "&selected_transition_key=Submit__TO__Approve"
-            "&case_id=C001"
-        )
+        with mock.patch(
+            "web_app.build_excel_ai_summary",
+            return_value={
+                "title": "AI解説",
+                "mode": "ollama",
+                "provider": "Ollama (qwen2.5:7b)",
+                "generated_at": "2026-04-02T00:00:00+00:00",
+                "period": "2024-01-01 09:00 〜 2024-01-04 09:00",
+                "text": "【全体サマリー】\nテスト用のAI解説です。",
+                "highlights": [
+                    "Submit が中心のルートです。",
+                    "Approve の前後を重点確認してください。",
+                ],
+                "note": "ローカルLLMで生成した解説を掲載しています。",
+            },
+        ):
+            response = self.client.get(
+                f"/api/runs/{run_id}/report-excel"
+                "?analysis_key=pattern"
+                "&pattern_display_limit=10"
+                "&filter_value_1=Sales"
+                "&selected_transition_key=Submit__TO__Approve"
+                "&case_id=C001"
+            )
 
         self.assertEqual(200, response.status_code)
         self.assertEqual(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             response.headers["content-type"],
         )
+        self.assertIn(
+            quote("custom_log_処理順パターン分析レポート.xlsx"),
+            response.headers["content-disposition"],
+        )
 
         workbook = load_workbook(BytesIO(response.content))
         self.assertEqual(
-            ["\u30b5\u30de\u30ea\u30fc", "\u983b\u5ea6\u5206\u6790", "\u51e6\u7406\u9806\u30d1\u30bf\u30fc\u30f3\u5206\u6790", "Variant\u5206\u6790", "\u30dc\u30c8\u30eb\u30cd\u30c3\u30af\u5206\u6790", "\u6539\u5584\u30a4\u30f3\u30d1\u30af\u30c8\u5206\u6790", "\u30c9\u30ea\u30eb\u30c0\u30a6\u30f3", "\u30b1\u30fc\u30b9\u8ffd\u8de1"],
+            ["\u30b5\u30de\u30ea\u30fc", "AI\u89e3\u8aac", "\u51e6\u7406\u9806\u30d1\u30bf\u30fc\u30f3\u5206\u6790", "Pattern01\u8a73\u7d30", "\u30c9\u30ea\u30eb\u30c0\u30a6\u30f3", "\u30b1\u30fc\u30b9\u8ffd\u8de1"],
             workbook.sheetnames,
         )
         summary_sheet = workbook["\u30b5\u30de\u30ea\u30fc"]
         self.assertEqual("\u30b5\u30de\u30ea\u30fc", summary_sheet["A1"].value)
-        self.assertEqual("\u5b9f\u884cID", summary_sheet["A3"].value)
-        self.assertEqual(run_id, summary_sheet["B3"].value)
-        self.assertEqual("\u9069\u7528\u30d5\u30a3\u30eb\u30bf\u6761\u4ef6", summary_sheet["A11"].value)
-        self.assertIn("Sales", str(summary_sheet["B11"].value))
+        self.assertEqual("\u5b9f\u884cID", summary_sheet["A4"].value)
+        self.assertEqual(run_id, summary_sheet["B4"].value)
+        self.assertEqual("\u9069\u7528\u30d5\u30a3\u30eb\u30bf\u6761\u4ef6", summary_sheet["A12"].value)
+        self.assertIn("Sales", str(summary_sheet["B12"].value))
+        self.assertEqual("主要KPI", summary_sheet["A18"].value)
+        self.assertEqual("AIハイライト", summary_sheet["A27"].value)
 
-        frequency_sheet = workbook["\u983b\u5ea6\u5206\u6790"]
-        self.assertEqual("\u983b\u5ea6\u5206\u6790", frequency_sheet["A1"].value)
-        self.assertEqual("\u9806\u4f4d", frequency_sheet["A2"].value)
+        ai_sheet = workbook["AI\u89e3\u8aac"]
+        self.assertEqual("AI\u89e3\u8aac", ai_sheet["A1"].value)
+        self.assertEqual("対象分析", ai_sheet["A4"].value)
+        self.assertEqual("\u51e6\u7406\u9806\u30d1\u30bf\u30fc\u30f3\u5206\u6790", ai_sheet["B4"].value)
+        self.assertEqual("解説本文", ai_sheet["A10"].value)
+        self.assertIn("テスト用のAI解説", str(ai_sheet["A11"].value))
+        self.assertEqual("要点一覧", ai_sheet["A13"].value)
+        self.assertNotIn("\u983b\u5ea6\u5206\u6790", workbook.sheetnames)
+        self.assertNotIn("\u30dc\u30c8\u30eb\u30cd\u30c3\u30af\u5206\u6790", workbook.sheetnames)
+        self.assertNotIn("\u6539\u5584\u30a4\u30f3\u30d1\u30af\u30c8\u5206\u6790", workbook.sheetnames)
 
         pattern_sheet = workbook["\u51e6\u7406\u9806\u30d1\u30bf\u30fc\u30f3\u5206\u6790"]
         self.assertEqual("\u51e6\u7406\u9806\u30d1\u30bf\u30fc\u30f3\u5206\u6790", pattern_sheet["A1"].value)
-        self.assertEqual("\u9806\u4f4d", pattern_sheet["A2"].value)
+        self.assertEqual("\u9806\u4f4d", pattern_sheet["A3"].value)
+        self.assertEqual("Pattern / Variant", pattern_sheet["B3"].value)
+        self.assertFalse(pattern_sheet["F4"].alignment.wrap_text)
+        self.assertGreaterEqual(pattern_sheet.column_dimensions["F"].width, 80)
 
-        variant_sheet = workbook["Variant\u5206\u6790"]
-        self.assertEqual("Variant\u5206\u6790", variant_sheet["A1"].value)
-        self.assertEqual("\u9806\u4f4d", variant_sheet["A2"].value)
-
-        impact_sheet = workbook["\u6539\u5584\u30a4\u30f3\u30d1\u30af\u30c8\u5206\u6790"]
-        self.assertEqual("\u6539\u5584\u30a4\u30f3\u30d1\u30af\u30c8\u5206\u6790", impact_sheet["A1"].value)
-        self.assertEqual("\u9806\u4f4d", impact_sheet["A2"].value)
+        pattern_detail_sheet = workbook["Pattern01\u8a73\u7d30"]
+        self.assertEqual("Pattern #1 詳細", pattern_detail_sheet["A1"].value)
+        self.assertEqual("項目", pattern_detail_sheet["A3"].value)
+        self.assertEqual("ステップ別処理時間", pattern_detail_sheet["A15"].value)
 
         drilldown_sheet = workbook["\u30c9\u30ea\u30eb\u30c0\u30a6\u30f3"]
         self.assertEqual("\u9077\u79fb\u30c9\u30ea\u30eb\u30c0\u30a6\u30f3: Submit \u2192 Approve", drilldown_sheet["A1"].value)
-        self.assertEqual("\u30b1\u30fc\u30b9ID", drilldown_sheet["A2"].value)
-        self.assertEqual("C001", drilldown_sheet["A3"].value)
+        self.assertEqual("\u30b1\u30fc\u30b9ID", drilldown_sheet["A3"].value)
+        self.assertEqual("C001", drilldown_sheet["A4"].value)
 
         case_trace_sheet = workbook["\u30b1\u30fc\u30b9\u8ffd\u8de1"]
         self.assertEqual("\u30b1\u30fc\u30b9\u6982\u8981", case_trace_sheet["A1"].value)
-        self.assertEqual("\u901a\u904e\u30a4\u30d9\u30f3\u30c8", case_trace_sheet["A9"].value)
+        self.assertEqual("\u901a\u904e\u30a4\u30d9\u30f3\u30c8", case_trace_sheet["A10"].value)
+
+    def test_report_excel_export_api_falls_back_when_ollama_is_unavailable(self):
+        run_id = self.analyze_uploaded_csv(
+            "\n".join(
+                [
+                    "case_id,activity,start_time",
+                    "C001,Submit,2024-01-01 09:00:00",
+                    "C001,Approve,2024-01-02 09:00:00",
+                    "C002,Submit,2024-01-03 09:00:00",
+                    "C002,Approve,2024-01-04 09:00:00",
+                ]
+            )
+        )
+
+        with mock.patch(
+            "web_app.request_ollama_insights_text",
+            side_effect=web_app.httpx.ConnectError("offline"),
+        ):
+            response = self.client.get(
+                f"/api/runs/{run_id}/report-excel?analysis_key=frequency"
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(
+            quote("custom_log_頻度分析レポート.xlsx"),
+            response.headers["content-disposition"],
+        )
+
+        workbook = load_workbook(BytesIO(response.content))
+        ai_sheet = workbook["AI\u89e3\u8aac"]
+        self.assertEqual("ルールベース要約", ai_sheet["B5"].value)
+        self.assertIn("Ollama が起動していない", str(ai_sheet["B8"].value))
+        self.assertTrue(str(ai_sheet["A11"].value).strip())
+
+    def test_report_excel_export_api_returns_transition_workbook(self):
+        run_id = self.analyze_uploaded_csv(
+            "\n".join(
+                [
+                    "case_id,activity,start_time",
+                    "C001,Submit,2024-01-01 09:00:00",
+                    "C001,Approve,2024-01-02 09:00:00",
+                    "C002,Submit,2024-01-03 09:00:00",
+                    "C002,Reject,2024-01-04 09:00:00",
+                ]
+            ),
+            analysis_keys=["transition"],
+        )
+
+        with mock.patch(
+            "web_app.build_excel_ai_summary",
+            return_value={
+                "title": "AI解説",
+                "mode": "ollama",
+                "provider": "Ollama (qwen2.5:7b)",
+                "generated_at": "2026-04-02T00:00:00+00:00",
+                "period": "2024-01-01 09:00 〜 2024-01-04 09:00",
+                "text": "前後処理向けのAI解説です。",
+                "highlights": ["遷移の詰まりを確認してください。"],
+                "note": "ローカルLLMで生成した解説を掲載しています。",
+            },
+        ):
+            response = self.client.get(
+                f"/api/runs/{run_id}/report-excel"
+                "?analysis_key=transition"
+                "&selected_transition_key=Submit__TO__Approve"
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(
+            quote("custom_log_前後処理分析レポート.xlsx"),
+            response.headers["content-disposition"],
+        )
+        workbook = load_workbook(BytesIO(response.content))
+        self.assertEqual(
+            ["\u30b5\u30de\u30ea\u30fc", "AI\u89e3\u8aac", "\u524d\u5f8c\u51e6\u7406\u5206\u6790", "\u30dc\u30c8\u30eb\u30cd\u30c3\u30af\u5206\u6790", "\u6539\u5584\u30a4\u30f3\u30d1\u30af\u30c8\u5206\u6790", "\u30c9\u30ea\u30eb\u30c0\u30a6\u30f3"],
+            workbook.sheetnames,
+        )
+        self.assertNotIn("\u983b\u5ea6\u5206\u6790", workbook.sheetnames)
+        self.assertNotIn("\u51e6\u7406\u9806\u30d1\u30bf\u30fc\u30f3\u5206\u6790", workbook.sheetnames)
+        self.assertNotIn("Variant\u5206\u6790", workbook.sheetnames)
+        transition_sheet = workbook["\u524d\u5f8c\u51e6\u7406\u5206\u6790"]
+        self.assertEqual("\u524d\u5f8c\u51e6\u7406\u5206\u6790", transition_sheet["A1"].value)
+        self.assertEqual("\u9806\u4f4d", transition_sheet["A3"].value)
+
+        bottleneck_sheet = workbook["\u30dc\u30c8\u30eb\u30cd\u30c3\u30af\u5206\u6790"]
+        self.assertEqual("Activityボトルネック", bottleneck_sheet["A1"].value)
+        self.assertEqual("平均処理時間", bottleneck_sheet["E3"].value)
+        transition_title_row = next(
+            row_index
+            for row_index in range(1, bottleneck_sheet.max_row + 1)
+            if bottleneck_sheet.cell(row=row_index, column=1).value == "Transitionボトルネック"
+        )
+        self.assertEqual("Transitionボトルネック", bottleneck_sheet.cell(row=transition_title_row, column=1).value)
+        self.assertEqual("平均処理時間", bottleneck_sheet.cell(row=transition_title_row + 2, column=5).value)
+
+        activity_data_rows = [
+            row
+            for row in bottleneck_sheet.iter_rows(min_row=4, max_row=transition_title_row - 1, values_only=True)
+            if row[0] not in (None, "")
+        ]
+        self.assertTrue(activity_data_rows)
+        self.assertTrue(all(row[0] not in (None, "") for row in activity_data_rows))
+        self.assertTrue(all(row[1] not in (None, "") for row in activity_data_rows))
+        self.assertTrue(all(row[4] not in (None, "") for row in activity_data_rows))
+        self.assertTrue(all(row[5] not in (None, "") for row in activity_data_rows))
+        self.assertTrue(all(row[6] not in (None, "") for row in activity_data_rows))
+
+        transition_data_rows = [
+            row
+            for row in bottleneck_sheet.iter_rows(min_row=transition_title_row + 3, values_only=True)
+            if row[0] not in (None, "")
+        ]
+        self.assertTrue(transition_data_rows)
+        self.assertTrue(all(row[0] not in (None, "") for row in transition_data_rows))
+        self.assertTrue(all(row[1] not in (None, "") for row in transition_data_rows))
+        self.assertTrue(all(row[4] not in (None, "") for row in transition_data_rows))
+        self.assertTrue(all(row[5] not in (None, "") for row in transition_data_rows))
+        self.assertTrue(all(row[6] not in (None, "") for row in transition_data_rows))
+
+    def test_ai_insights_api_restores_cached_output_across_page_reload(self):
+        run_id = self.analyze_uploaded_csv(
+            "\n".join(
+                [
+                    "case_id,activity,start_time",
+                    "C001,Submit,2024-01-01 09:00:00",
+                    "C001,Approve,2024-01-02 09:00:00",
+                    "C002,Submit,2024-01-03 09:00:00",
+                    "C002,Reject,2024-01-04 09:00:00",
+                ]
+            ),
+            analysis_keys=["frequency", "pattern"],
+        )
+
+        empty_response = self.client.get(f"/api/runs/{run_id}/ai-insights/frequency")
+        self.assertEqual(200, empty_response.status_code)
+        self.assertFalse(empty_response.json()["generated"])
+
+        with mock.patch(
+            "web_app.request_ollama_insights_text",
+            return_value="頻度分析向けの AI 解説です。",
+        ):
+            generate_response = self.client.post(f"/api/runs/{run_id}/ai-insights/frequency")
+
+        self.assertEqual(200, generate_response.status_code)
+        generate_payload = generate_response.json()
+        self.assertTrue(generate_payload["generated"])
+        self.assertFalse(generate_payload["cached"])
+        self.assertEqual("頻度分析", generate_payload["analysis_name"])
+        self.assertEqual("頻度分析向けの AI 解説です。", generate_payload["text"])
+
+        restored_response = self.client.get(f"/api/runs/{run_id}/ai-insights/frequency")
+        self.assertEqual(200, restored_response.status_code)
+        restored_payload = restored_response.json()
+        self.assertTrue(restored_payload["generated"])
+        self.assertTrue(restored_payload["cached"])
+        self.assertEqual("頻度分析向けの AI 解説です。", restored_payload["text"])
+
+    def test_report_excel_export_uses_analysis_specific_ai_output(self):
+        run_id = self.analyze_uploaded_csv(
+            "\n".join(
+                [
+                    "case_id,activity,start_time",
+                    "C001,Submit,2024-01-01 09:00:00",
+                    "C001,Approve,2024-01-02 09:00:00",
+                    "C002,Submit,2024-01-03 09:00:00",
+                    "C002,Reject,2024-01-04 09:00:00",
+                ]
+            ),
+            analysis_keys=["frequency", "pattern"],
+        )
+
+        def _fake_ai(prompt):
+            if "頻度分析" in prompt:
+                return "frequency ai"
+            if "処理順パターン分析" in prompt:
+                return "pattern ai"
+            return "generic ai"
+
+        with mock.patch("web_app.request_ollama_insights_text", side_effect=_fake_ai):
+            frequency_response = self.client.get(
+                f"/api/runs/{run_id}/report-excel?analysis_key=frequency"
+            )
+            pattern_response = self.client.get(
+                f"/api/runs/{run_id}/report-excel?analysis_key=pattern&pattern_display_limit=1"
+            )
+
+        self.assertEqual(200, frequency_response.status_code)
+        self.assertEqual(200, pattern_response.status_code)
+
+        frequency_workbook = load_workbook(BytesIO(frequency_response.content))
+        pattern_workbook = load_workbook(BytesIO(pattern_response.content))
+        self.assertEqual(["\u30b5\u30de\u30ea\u30fc", "AI\u89e3\u8aac", "\u983b\u5ea6\u5206\u6790"], frequency_workbook.sheetnames)
+        self.assertEqual(["\u30b5\u30de\u30ea\u30fc", "AI\u89e3\u8aac", "\u51e6\u7406\u9806\u30d1\u30bf\u30fc\u30f3\u5206\u6790", "Pattern01\u8a73\u7d30"], pattern_workbook.sheetnames)
+        self.assertEqual("frequency ai", frequency_workbook["AI\u89e3\u8aac"]["A11"].value)
+        self.assertEqual("pattern ai", pattern_workbook["AI\u89e3\u8aac"]["A11"].value)
+
+    def test_pattern_report_excel_caps_detail_sheets_at_twenty(self):
+        csv_lines = ["case_id,activity,start_time"]
+        for case_index in range(1, 26):
+            csv_lines.append(f"C{case_index:03d},Start_{case_index},2024-01-01 09:00:00")
+            csv_lines.append(f"C{case_index:03d},End_{case_index},2024-01-01 10:00:00")
+
+        run_id = self.analyze_uploaded_csv(
+            "\n".join(csv_lines),
+            analysis_keys=["pattern"],
+        )
+
+        with mock.patch(
+            "web_app.request_ollama_insights_text",
+            return_value="pattern ai",
+        ):
+            response = self.client.get(
+                f"/api/runs/{run_id}/report-excel?analysis_key=pattern&pattern_display_limit=50"
+            )
+
+        self.assertEqual(200, response.status_code)
+        workbook = load_workbook(BytesIO(response.content))
+        detail_sheet_names = [
+            sheet_name
+            for sheet_name in workbook.sheetnames
+            if sheet_name.startswith("Pattern") and sheet_name.endswith("詳細")
+        ]
+        self.assertEqual(20, len(detail_sheet_names))
 
     def test_pattern_flow_api_accepts_exact_pattern_count(self):
         analyze_response = self.client.post(
@@ -251,6 +518,9 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(1, payload["pattern_window"]["requested_count"])
         self.assertEqual(1, payload["pattern_window"]["used_pattern_count"])
         self.assertGreaterEqual(len(payload["flow_data"]["nodes"]), 1)
+        self.assertTrue(payload["flow_data"]["edges"])
+        self.assertIn("avg_duration_text", payload["flow_data"]["edges"][0])
+        self.assertGreater(payload["flow_data"]["edges"][0]["avg_duration_sec"], 0)
 
     def test_pattern_flow_api_reuses_cached_snapshot(self):
         analyze_response = self.client.post(
@@ -294,6 +564,7 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(1, payload["variants"][0]["variant_id"])
         self.assertEqual(["\u53d7\u4ed8", "\u78ba\u8a8d", "\u5b8c\u4e86"], payload["variants"][0]["activities"])
         self.assertEqual(3, payload["variants"][0]["activity_count"])
+        self.assertEqual(0, payload["variants"][0]["pattern_index"])
         self.assertGreater(payload["variants"][0]["avg_case_duration_sec"], 0)
         self.assertEqual(2, payload["coverage"]["displayed_variant_count"])
         self.assertEqual(4, payload["coverage"]["covered_case_count"])
@@ -327,8 +598,10 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(200, flow_response.status_code)
         payload = flow_response.json()
         self.assertEqual(1, payload["selected_variant"]["variant_id"])
+        self.assertEqual(0, payload["selected_variant"]["pattern_index"])
         self.assertEqual(1, payload["pattern_window"]["used_pattern_count"])
         self.assertTrue(payload["flow_data"]["nodes"])
+        self.assertTrue(all("avg_duration_text" in edge for edge in payload["flow_data"]["edges"]))
 
     def test_bottleneck_list_api_returns_ranked_activity_and_transition_rows(self):
         analyze_response = self.client.post(
@@ -512,6 +785,8 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual("2024-01-02", payload["applied_filters"]["date_from"])
 
     def test_analysis_detail_api_supports_activity_filters(self):
+        # Activity filter is case-level: keeps all events of cases that contain (or don't contain)
+        # the target activity. C004 is a Sales case with no Submit → survives exclude-Submit filter.
         run_id = self.analyze_uploaded_csv(
             "\n".join(
                 [
@@ -522,6 +797,7 @@ class WebAppTestCase(unittest.TestCase):
                     "C002,Reject,2024-01-04 10:00:00,HR,Mail,B",
                     "C003,Submit,2024-01-04 08:00:00,Sales,API,A",
                     "C003,Approve,2024-01-05 08:00:00,Sales,API,A",
+                    "C004,Approve,2024-01-06 08:00:00,Sales,API,A",
                 ]
             ),
             extra_data={
@@ -537,10 +813,11 @@ class WebAppTestCase(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         payload = response.json()
-        self.assertEqual(2, payload["case_count"])
-        self.assertEqual(2, payload["event_count"])
-        self.assertEqual(2, payload["dashboard"]["total_cases"])
-        self.assertEqual(2, payload["dashboard"]["total_records"])
+        # Sales cases that never pass through Submit: only C004 (1 case, 1 event)
+        self.assertEqual(1, payload["case_count"])
+        self.assertEqual(1, payload["event_count"])
+        self.assertEqual(1, payload["dashboard"]["total_cases"])
+        self.assertEqual(1, payload["dashboard"]["total_records"])
         self.assertEqual("exclude", payload["applied_filters"]["activity_mode"])
         self.assertEqual("Submit", payload["applied_filters"]["activity_values"])
 
@@ -704,7 +981,141 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual("", payload["default_selection"]["case_id_column"])
 
 
+    # -------------------------------------------------------------------------
+    # 統計指標（標準偏差・パーセンタイル）のテスト
+    # -------------------------------------------------------------------------
+
+    def _run_sample_analysis(self, analysis_keys):
+        """サンプルCSV（sample_event_log.csv）でデフォルト設定のまま分析を実行して run_id を返す。"""
+        response = self.client.post(
+            "/api/analyze",
+            data={"analysis_keys": analysis_keys},
+        )
+        self.assertEqual(200, response.status_code)
+        return response.json()["run_id"]
+
+    def test_frequency_analysis_has_std_and_percentile_columns(self):
+        """頻度分析の結果に標準偏差・P75/P90/P95 列が含まれること。"""
+        run_id = self._run_sample_analysis(["frequency"])
+        response = self.client.get(f"/api/runs/{run_id}/analyses/frequency")
+        self.assertEqual(200, response.status_code)
+
+        rows = response.json()["analyses"]["frequency"]["rows"]
+        self.assertTrue(rows, "頻度分析の結果行が空です。")
+
+        first_row = rows[0]
+        for col in ("標準偏差(分)", "75%点(分)", "90%点(分)", "95%点(分)"):
+            self.assertIn(col, first_row, f"列 '{col}' が頻度分析の結果に存在しません。")
+
+    def test_frequency_analysis_kakuin_statistics_match_expected(self):
+        """確認アクティビティ（8件）の統計値がサンプルデータの手計算値と一致すること。
+
+        サンプルデータの確認 duration_min（次イベント開始 - 自イベント開始）:
+          C001:8, C002-1回目:17, C002-2回目:14, C003:7, C004:12, C005-1回目:7, C005-2回目:8, C006:4
+          sorted = [4, 7, 7, 8, 8, 12, 14, 17]
+          std  ≈ 4.31  (ddof=1)
+          P75  = 12.5
+          P90  = 14.9
+          P95  = 15.95
+        """
+        run_id = self._run_sample_analysis(["frequency"])
+        response = self.client.get(f"/api/runs/{run_id}/analyses/frequency")
+        rows = response.json()["analyses"]["frequency"]["rows"]
+
+        kakuin_row = next((r for r in rows if r.get("アクティビティ") == "確認"), None)
+        self.assertIsNotNone(kakuin_row, "確認アクティビティの行が見つかりません。")
+
+        self.assertEqual(8, kakuin_row["イベント件数"])
+        self.assertAlmostEqual(4.31, float(kakuin_row["標準偏差(分)"]), delta=0.15)
+        self.assertAlmostEqual(12.5, float(kakuin_row["75%点(分)"]), delta=0.05)
+        self.assertAlmostEqual(14.9, float(kakuin_row["90%点(分)"]), delta=0.05)
+        self.assertAlmostEqual(15.95, float(kakuin_row["95%点(分)"]), delta=0.05)
+
+    def test_frequency_analysis_std_is_dash_for_single_event_activity(self):
+        """イベントが1件しかないアクティビティの標準偏差が '-' になること。"""
+        csv_text = "\n".join([
+            "case_id,activity,start_time",
+            "C001,受付,2026-01-01 09:00:00",
+            "C001,確認,2026-01-01 09:05:00",
+            "C001,完了,2026-01-01 09:10:00",
+        ])
+        run_id = self.analyze_uploaded_csv(csv_text, analysis_keys=["frequency"])
+        response = self.client.get(f"/api/runs/{run_id}/analyses/frequency")
+        self.assertEqual(200, response.status_code)
+
+        rows = response.json()["analyses"]["frequency"]["rows"]
+        # 全アクティビティがそれぞれ1件 → 標準偏差は "-" になる
+        for row in rows:
+            self.assertEqual("-", row["標準偏差(分)"],
+                             f"アクティビティ '{row.get('アクティビティ')}' の標準偏差が '-' ではありません。")
+
+    def test_transition_analysis_has_statistics_columns(self):
+        """前後処理分析の結果に標準偏差・P75/P90/P95 等の統計列が含まれること。"""
+        run_id = self._run_sample_analysis(["transition"])
+        response = self.client.get(f"/api/runs/{run_id}/analyses/transition")
+        self.assertEqual(200, response.status_code)
+
+        rows = response.json()["analyses"]["transition"]["rows"]
+        self.assertTrue(rows, "前後処理分析の結果行が空です。")
+
+        first_row = rows[0]
+        for col in (
+            "平均時間(分)",
+            "中央値時間(分)",
+            "標準偏差(分)",
+            "最小時間(分)",
+            "最大時間(分)",
+            "75%点(分)",
+            "90%点(分)",
+            "95%点(分)",
+        ):
+            self.assertIn(col, first_row, f"列 '{col}' が前後処理分析の結果に存在しません。")
+
+    def test_pattern_analysis_has_std_and_percentile_columns(self):
+        """処理順パターン分析の結果に標準偏差・P75/P90/P95 列が含まれること。"""
+        run_id = self._run_sample_analysis(["pattern"])
+        response = self.client.get(f"/api/runs/{run_id}/analyses/pattern")
+        self.assertEqual(200, response.status_code)
+
+        rows = response.json()["analyses"]["pattern"]["rows"]
+        self.assertTrue(rows, "処理順パターン分析の結果行が空です。")
+
+        first_row = rows[0]
+        for col in (
+            "標準偏差ケース時間(分)",
+            "75%点ケース時間(分)",
+            "90%点ケース時間(分)",
+            "95%点ケース時間(分)",
+        ):
+            self.assertIn(col, first_row, f"列 '{col}' が処理順パターン分析の結果に存在しません。")
+
+    def test_pattern_analysis_std_is_dash_for_single_case_pattern(self):
+        """ケース数が1件のパターンの標準偏差が '-' になること。"""
+        csv_text = "\n".join([
+            "case_id,activity,start_time",
+            "C001,受付,2026-01-01 09:00:00",
+            "C001,確認,2026-01-01 09:05:00",
+            "C001,完了,2026-01-01 09:10:00",
+            "C002,受付,2026-01-01 10:00:00",
+            "C002,確認,2026-01-01 10:05:00",
+            "C002,差戻し,2026-01-01 10:08:00",
+            "C002,確認,2026-01-01 10:12:00",
+            "C002,完了,2026-01-01 10:18:00",
+        ])
+        run_id = self.analyze_uploaded_csv(csv_text, analysis_keys=["pattern"])
+        response = self.client.get(f"/api/runs/{run_id}/analyses/pattern")
+        self.assertEqual(200, response.status_code)
+
+        rows = response.json()["analyses"]["pattern"]["rows"]
+        # C001 と C002 で異なるパターン → それぞれ1件 → 標準偏差は "-"
+        for row in rows:
+            self.assertEqual("-", row["標準偏差ケース時間(分)"],
+                             f"パターン '{row.get('処理順パターン')}' の標準偏差が '-' ではありません。")
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
 
 

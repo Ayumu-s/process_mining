@@ -1,4 +1,4 @@
-const FLOW_SELECTION_STORAGE_KEY = "processMiningFlowSelection";
+﻿const FLOW_SELECTION_STORAGE_KEY = "processMiningFlowSelection";
 const DETAIL_ROW_LIMIT = 500;
 const RENDERING_LIMIT = 1200; // Stricter limit for total elements
 const EDGE_LIMIT = 800;      // Stricter limit for paths specifically
@@ -24,8 +24,18 @@ const chartNote = document.getElementById("detail-chart-note");
 const chartContainer = document.getElementById("detail-chart");
 const resultPanel = document.getElementById("detail-result-panel");
 const detailExportExcelButton = document.getElementById("detail-export-excel-button");
+const detailExportTitle = document.getElementById("detail-export-title");
+const detailExportMeta = document.getElementById("detail-export-meta");
+const detailExportNote = document.getElementById("detail-export-note");
+const detailExportScope = document.getElementById("detail-export-scope");
 const detailPageTitle = document.getElementById("detail-page-title");
 const detailPageCopy = document.getElementById("detail-page-copy");
+const aiInsightsTitle = document.getElementById("ai-insights-title");
+const aiInsightsMeta = document.getElementById("ai-insights-meta");
+const aiInsightsNote = document.getElementById("ai-insights-note");
+const aiInsightsState = document.getElementById("ai-insights-state");
+const aiInsightsButton = document.getElementById("ai-insights-btn");
+const aiInsightsOutput = document.getElementById("ai-insights-output");
 const FILTER_SLOT_KEYS = ["filter_value_1", "filter_value_2", "filter_value_3"];
 const DEFAULT_FILTER_LABELS = {
     filter_value_1: "グループ/カテゴリー フィルター①",
@@ -41,14 +51,168 @@ const DEFAULT_DETAIL_FILTERS = Object.freeze({
     activity_mode: "include",
     activity_values: Object.freeze([]),
 });
+const VARIANT_PAGE_SIZE = 10;
 let activeDetailFilters = { ...DEFAULT_DETAIL_FILTERS };
 let detailPageAnalysisLoader = null;
 let currentDetailColumnSettings = {};
+let currentAiInsightsPayload = null;
+let aiInsightsRequestVersion = 0;
 
 const sharedUi = window.ProcessMiningShared;
 const { buildTransitionKey, escapeHtml, fetchJson, formatDateTime, getRunId, loadLatestResult } = sharedUi;
 const setStatus = (message, type = "info") => sharedUi.setStatus(statusPanel, message, type);
 const hideStatus = () => sharedUi.hideStatus(statusPanel);
+
+function buildAiInsightsApiUrl(runId, filters = activeDetailFilters, forceRefresh = false) {
+    const params = new URLSearchParams();
+    buildFilterQueryParams(filters).forEach((value, key) => {
+        params.set(key, value);
+    });
+    if (forceRefresh) {
+        params.set("force_refresh", "true");
+    }
+    const query = params.toString();
+    return `/api/runs/${encodeURIComponent(runId)}/ai-insights/${encodeURIComponent(analysisKey)}${query ? `?${query}` : ""}`;
+}
+
+async function loadAiInsightsState(runId, filters = activeDetailFilters) {
+    return fetchJson(
+        buildAiInsightsApiUrl(runId, filters),
+        "AI解説の状態を読み込めませんでした。",
+        10000
+    );
+}
+
+async function generateAiInsights(runId, filters = activeDetailFilters, forceRefresh = false) {
+    const response = await fetch(buildAiInsightsApiUrl(runId, filters, forceRefresh), {
+        method: "POST",
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+        throw new Error(payload.detail || payload.error || "AI解説を生成できませんでした。");
+    }
+    return payload;
+}
+
+function setAiInsightsChip(text, modifier = "idle") {
+    if (!aiInsightsState) return;
+    aiInsightsState.textContent = text;
+    aiInsightsState.className = `ai-insights-chip${modifier ? ` is-${modifier}` : ""}`;
+}
+
+function renderAiInsightsPayload(payload, analysisName = "") {
+    if (!aiInsightsTitle || !aiInsightsMeta || !aiInsightsNote || !aiInsightsOutput || !aiInsightsButton) {
+        return;
+    }
+
+    const resolvedAnalysisName = payload?.analysis_name || analysisName || detailPageTitle?.textContent?.trim() || "";
+    aiInsightsTitle.textContent = resolvedAnalysisName ? `${resolvedAnalysisName} AI解説` : "AI解説";
+
+    if (!payload?.generated) {
+        currentAiInsightsPayload = payload || null;
+        aiInsightsMeta.textContent = "分析ごとに生成し、画面を切り替えても同じ条件なら再表示されます。";
+        aiInsightsNote.textContent = payload?.note || "まだ生成していません。";
+        aiInsightsOutput.textContent = "";
+        aiInsightsOutput.classList.add("hidden");
+        aiInsightsButton.disabled = false;
+        aiInsightsButton.textContent = "AI解説を生成";
+        setAiInsightsChip("未生成", "idle");
+        return;
+    }
+
+    currentAiInsightsPayload = payload;
+    const providerLabel = payload.provider || "AI解説";
+    const generatedAtLabel = payload.generated_at ? formatDateTime(payload.generated_at) : "";
+    aiInsightsMeta.textContent = generatedAtLabel ? `${providerLabel} / ${generatedAtLabel}` : providerLabel;
+    aiInsightsNote.textContent = payload.note || "現在の分析条件に対応する解説です。";
+    aiInsightsOutput.textContent = payload.text || "";
+    aiInsightsOutput.classList.toggle("hidden", !payload.text);
+    aiInsightsButton.disabled = false;
+    aiInsightsButton.textContent = payload.cached ? "AI解説を再生成" : "AI解説を更新";
+
+    if (payload.mode === "rule_based") {
+        setAiInsightsChip(payload.cached ? "要約保存済み" : "要約生成済み", "fallback");
+    } else {
+        setAiInsightsChip(payload.cached ? "保存済み" : "生成済み", "ready");
+    }
+}
+
+function renderAiInsightsLoading(analysisName = "") {
+    if (!aiInsightsTitle || !aiInsightsMeta || !aiInsightsNote || !aiInsightsOutput || !aiInsightsButton) {
+        return;
+    }
+
+    const resolvedAnalysisName = analysisName || detailPageTitle?.textContent?.trim() || "";
+    aiInsightsTitle.textContent = resolvedAnalysisName ? `${resolvedAnalysisName} AI解説` : "AI解説";
+    aiInsightsMeta.textContent = "現在の分析条件に対する解説を生成しています。";
+    aiInsightsNote.textContent = "生成中です。完了すると画面切替後も保持されます。";
+    aiInsightsOutput.textContent = "解説を生成しています...";
+    aiInsightsOutput.classList.remove("hidden");
+    aiInsightsButton.disabled = true;
+    aiInsightsButton.textContent = "生成中...";
+    setAiInsightsChip("生成中", "loading");
+}
+
+function syncDetailExportPanel(analysisName = "", options = {}) {
+    if (!detailExportExcelButton || !detailExportTitle || !detailExportMeta || !detailExportNote || !detailExportScope) {
+        return;
+    }
+
+    const {
+        filters = activeDetailFilters,
+        variantId = null,
+        selectedActivity = "",
+        selectedTransitionKey = "",
+        caseId = "",
+        filterDefs = buildDefaultFilterDefinitions(currentDetailColumnSettings),
+    } = options;
+    const resolvedAnalysisName = analysisName || detailPageTitle?.textContent?.trim() || "この分析";
+    const normalizedTransitionLabel = String(selectedTransitionKey || "").replace("__TO__", " → ");
+    const filterSummary = buildFilterSelectionSummary(filters, Array.isArray(filterDefs) ? filterDefs : []);
+    const chips = [
+        `${resolvedAnalysisName}レポート`,
+        filterSummary,
+    ];
+
+    if (variantId !== null && variantId !== undefined) {
+        chips.push(`Variant #${variantId}`);
+    }
+    if (selectedActivity) {
+        chips.push(`Activity: ${selectedActivity}`);
+    }
+    if (normalizedTransitionLabel) {
+        chips.push(`遷移: ${normalizedTransitionLabel}`);
+    }
+    if (caseId) {
+        chips.push(`Case: ${caseId}`);
+    }
+
+    let metaText = "この分析画面に対応する内容だけを出力します。";
+    if (analysisKey === "frequency") {
+        metaText = "頻度分析に関連するサマリーと集計表だけを Excel にまとめます。";
+    } else if (analysisKey === "transition") {
+        metaText = "前後処理分析、ボトルネック、改善インパクトをまとめて出力します。";
+    } else if (analysisKey === "pattern") {
+        metaText = "処理順パターンの統合一覧と、表示件数に応じた上位パターン詳細シートを出力します。";
+    }
+
+    const selectionItems = [];
+    if (variantId !== null && variantId !== undefined) selectionItems.push(`Variant #${variantId}`);
+    if (selectedActivity) selectionItems.push(`Activity「${selectedActivity}」`);
+    if (normalizedTransitionLabel) selectionItems.push(`遷移「${normalizedTransitionLabel}」`);
+    if (caseId) selectionItems.push(`Case「${caseId}」`);
+
+    detailExportTitle.textContent = `${resolvedAnalysisName}のExcelレポート`;
+    detailExportMeta.textContent = metaText;
+    detailExportNote.textContent = selectionItems.length
+        ? `現在の絞り込みと ${selectionItems.join(" / ")} の選択状態も反映して出力します。`
+        : "現在の絞り込み条件を反映して出力します。";
+    detailExportScope.innerHTML = chips
+        .filter(Boolean)
+        .map((item) => `<span class="detail-export-chip">${escapeHtml(item)}</span>`)
+        .join("");
+    detailExportExcelButton.textContent = `${resolvedAnalysisName}をExcel出力`;
+}
 
 // -----------------------------------------------------------------------------
 // Filter state helpers
@@ -201,6 +365,45 @@ function loadAnalysisPage(runId, rowOffset = 0, filters = activeDetailFilters) {
     );
 }
 
+async function syncAiInsightsPanel(runId, analysisName = "", { forceRefresh = false } = {}) {
+    if (!aiInsightsButton || !aiInsightsTitle || !aiInsightsMeta || !aiInsightsNote || !aiInsightsOutput) {
+        return null;
+    }
+
+    const requestVersion = aiInsightsRequestVersion + 1;
+    aiInsightsRequestVersion = requestVersion;
+
+    if (forceRefresh) {
+        renderAiInsightsLoading(analysisName);
+    }
+
+    try {
+        const payload = forceRefresh
+            ? await generateAiInsights(runId, activeDetailFilters, Boolean(currentAiInsightsPayload?.generated))
+            : await loadAiInsightsState(runId, activeDetailFilters);
+
+        if (requestVersion !== aiInsightsRequestVersion) {
+            return null;
+        }
+
+        renderAiInsightsPayload(payload, analysisName);
+        return payload;
+    } catch (error) {
+        if (requestVersion !== aiInsightsRequestVersion) {
+            return null;
+        }
+
+        aiInsightsMeta.textContent = "AI解説の取得に失敗しました。";
+        aiInsightsNote.textContent = error.message;
+        aiInsightsOutput.textContent = "";
+        aiInsightsOutput.classList.add("hidden");
+        aiInsightsButton.disabled = false;
+        aiInsightsButton.textContent = "AI解説を生成";
+        setAiInsightsChip("取得失敗", "error");
+        return null;
+    }
+}
+
 function buildVariantListApiUrl(runId, limit = 10, filters = activeDetailFilters) {
     const params = new URLSearchParams({
         limit: String(Math.max(0, Number(limit) || 0)),
@@ -318,6 +521,7 @@ function buildDetailExcelExportUrl(runId, options = {}) {
     const {
         analysisKeyName = analysisKey,
         filters = activeDetailFilters,
+        patternDisplayLimit = "",
         variantId = null,
         selectedActivity = "",
         selectedTransitionKey = "",
@@ -329,6 +533,9 @@ function buildDetailExcelExportUrl(runId, options = {}) {
         drilldown_limit: String(Math.max(0, Number(drilldownLimit) || 0)),
     });
 
+    if (patternDisplayLimit) {
+        params.set("pattern_display_limit", String(patternDisplayLimit));
+    }
     if (variantId !== null && variantId !== undefined) {
         params.set("variant_id", String(variantId));
     }
@@ -424,7 +631,7 @@ function buildDashboardCardsHtml(dashboard) {
             value: dashboard.top_bottleneck_transition_label || "-",
         },
         {
-            label: "最大ボトルネック平均待ち時間",
+            label: "最大ボトルネック平均所要時間",
             value: dashboard.top_bottleneck_transition_label
                 ? `Avg ${formatDurationHours(dashboard.top_bottleneck_avg_wait_hours)}`
                 : "-",
@@ -501,11 +708,11 @@ function buildImpactSortLabel(sortKey) {
         case "impact_share_pct":
             return "改善インパクト比率";
         case "avg_duration_sec":
-            return "平均待ち時間";
+            return "平均所要時間";
         case "case_count":
             return "ケース数";
         case "max_duration_sec":
-            return "最大待ち時間";
+            return "最大所要時間";
         case "impact_score":
         default:
             return "改善インパクト";
@@ -562,8 +769,8 @@ function buildImpactTableHtml(rows) {
         "順位",
         "遷移",
         "ケース数",
-        "平均待ち時間",
-        "最大待ち時間",
+        "平均所要時間",
+        "最大所要時間",
         "待ち時間シェア(%)",
         "改善インパクト",
         "改善インパクト比率(%)",
@@ -692,7 +899,7 @@ function buildImpactSectionHtml(impact, viewState = getDefaultImpactViewState())
                 <div class="result-header">
                     <div>
                         <h2>改善インパクト分析</h2>
-                        <p class="result-meta">平均待ち時間 × 件数をもとに、改善効果の大きい遷移を表示しています。</p>
+                        <p class="result-meta">平均所要時間 × 件数をもとに、改善効果の大きい遷移を表示しています。</p>
                     </div>
                 </div>
                 <p class="empty-state">条件に一致するデータがありません。</p>
@@ -707,7 +914,7 @@ function buildImpactSectionHtml(impact, viewState = getDefaultImpactViewState())
                 <div class="result-header">
                     <div>
                         <h2>改善インパクト分析</h2>
-                        <p class="result-meta">平均待ち時間 × 件数をもとに、改善効果の大きい遷移を表示しています。</p>
+                        <p class="result-meta">平均所要時間 × 件数をもとに、改善効果の大きい遷移を表示しています。</p>
                     </div>
                 </div>
                 <p class="empty-state">表示できる遷移がありません。</p>
@@ -729,7 +936,7 @@ function buildImpactSectionHtml(impact, viewState = getDefaultImpactViewState())
             <div class="result-header">
                 <div>
                     <h2>改善インパクト分析</h2>
-                    <p class="result-meta">平均待ち時間 × 件数をもとに、改善効果の大きい遷移を表示しています。</p>
+                    <p class="result-meta">平均所要時間 × 件数をもとに、改善効果の大きい遷移を表示しています。</p>
                 </div>
             </div>
             <div class="impact-controls" role="group" aria-label="改善インパクト分析 controls">
@@ -738,9 +945,9 @@ function buildImpactSectionHtml(impact, viewState = getDefaultImpactViewState())
                     <select id="impact-sort-select">
                         <option value="impact_score"${safeSortKey === "impact_score" ? " selected" : ""}>改善インパクト順</option>
                         <option value="impact_share_pct"${safeSortKey === "impact_share_pct" ? " selected" : ""}>改善インパクト比率順</option>
-                        <option value="avg_duration_sec"${safeSortKey === "avg_duration_sec" ? " selected" : ""}>平均待ち時間順</option>
+                        <option value="avg_duration_sec"${safeSortKey === "avg_duration_sec" ? " selected" : ""}>平均所要時間順</option>
                         <option value="case_count"${safeSortKey === "case_count" ? " selected" : ""}>ケース数順</option>
-                        <option value="max_duration_sec"${safeSortKey === "max_duration_sec" ? " selected" : ""}>最大待ち時間順</option>
+                        <option value="max_duration_sec"${safeSortKey === "max_duration_sec" ? " selected" : ""}>最大所要時間順</option>
                     </select>
                 </label>
                 <label class="field">
@@ -748,7 +955,7 @@ function buildImpactSectionHtml(impact, viewState = getDefaultImpactViewState())
                     <input id="impact-min-case-count-input" type="number" min="0" step="1" value="${escapeHtml(safeMinCaseCount)}" placeholder="0">
                 </label>
                 <label class="field">
-                    <span>最低平均待ち時間(h)</span>
+                    <span>最低平均所要時間(h)</span>
                     <input id="impact-min-avg-hours-input" type="number" min="0" step="0.1" value="${escapeHtml(safeMinAvgDurationHours)}" placeholder="0">
                 </label>
                 <label class="field">
@@ -779,15 +986,15 @@ function getVariantSequenceText(variant) {
 
 function buildVariantCoverageHtml(coverage) {
     if (!coverage) {
-        return '<p class="panel-note">Coverage を計算できませんでした。</p>';
+        return '<p class="panel-note">カバー率を計算できませんでした。</p>';
     }
 
     return `
-        <span class="variant-coverage-label">Top ${escapeHtml(coverage.displayed_variant_count)} Coverage</span>
+        <span class="variant-coverage-label">${escapeHtml(coverage.display_label || `上位${coverage.displayed_variant_count}件カバー率`)}</span>
         <strong class="variant-coverage-value">${escapeHtml(formatVariantRatio(coverage.ratio))}%</strong>
         <span class="variant-coverage-sub">
             ${escapeHtml(Number(coverage.covered_case_count || 0).toLocaleString("ja-JP"))}
-            / ${escapeHtml(Number(coverage.total_case_count || 0).toLocaleString("ja-JP"))} cases
+            / ${escapeHtml(Number(coverage.total_case_count || 0).toLocaleString("ja-JP"))} 件
         </span>
     `;
 }
@@ -797,6 +1004,7 @@ function getDefaultVariantViewState() {
         searchTerm: "",
         sortKey: "count",
         displayLimit: "10",
+        page: 1,
     };
 }
 
@@ -810,17 +1018,24 @@ function buildVariantSearchText(variant) {
         .toLocaleLowerCase("ja-JP");
 }
 
-function buildVariantCoveragePayload(variantItems, totalCaseCount, displayLimit = 10) {
-    const safeLimit = Math.max(0, Number(displayLimit) || 0);
+function buildVariantCoveragePayload(variantItems, totalCaseCount, displayLimit = 10, options = {}) {
+    const isAllDisplay = Boolean(options.isAllDisplay);
+    const safeLimit = isAllDisplay
+        ? variantItems.length
+        : Math.max(0, Number(displayLimit) || 0);
     const coveredItems = safeLimit > 0
         ? variantItems.slice(0, safeLimit)
         : variantItems.slice();
+    const displayLabel = isAllDisplay
+        ? "全件カバー率"
+        : `上位${Number(coveredItems.length || 0).toLocaleString("ja-JP")}件カバー率`;
     const coveredCaseCount = coveredItems.reduce(
         (sum, variant) => sum + Number(variant.count || 0),
         0,
     );
 
     return {
+        display_label: displayLabel,
         displayed_variant_count: coveredItems.length,
         covered_case_count: coveredCaseCount,
         total_case_count: Number(totalCaseCount || 0),
@@ -830,10 +1045,9 @@ function buildVariantCoveragePayload(variantItems, totalCaseCount, displayLimit 
     };
 }
 
-function getVisibleVariants(variants, viewState = getDefaultVariantViewState()) {
+function getFilteredSortedVariants(variants, viewState = getDefaultVariantViewState()) {
     const normalizedSearchTerm = String(viewState.searchTerm || "").trim().toLocaleLowerCase("ja-JP");
     const safeSortKey = viewState.sortKey || "count";
-    const safeDisplayLimit = String(viewState.displayLimit || "10").trim().toLowerCase();
     const filteredVariants = variants.filter((variant) => (
         !normalizedSearchTerm || buildVariantSearchText(variant).includes(normalizedSearchTerm)
     ));
@@ -852,11 +1066,36 @@ function getVisibleVariants(variants, viewState = getDefaultVariantViewState()) 
         return String(leftVariant.pattern || "").localeCompare(String(rightVariant.pattern || ""), "ja");
     });
 
-    if (safeDisplayLimit === "all") {
-        return filteredVariants;
-    }
+    return filteredVariants;
+}
 
-    return filteredVariants.slice(0, Math.max(1, Number(safeDisplayLimit) || 10));
+function getVariantPageState(variants, viewState = getDefaultVariantViewState()) {
+    const filteredVariants = getFilteredSortedVariants(variants, viewState);
+    const safeDisplayLimit = String(viewState.displayLimit || "10").trim().toLowerCase();
+    const isAllDisplay = safeDisplayLimit === "all";
+    const maxVisibleCount = isAllDisplay
+        ? filteredVariants.length
+        : Math.max(1, Number(safeDisplayLimit) || 10);
+    const limitedVariants = filteredVariants.slice(0, maxVisibleCount);
+    const pageSize = VARIANT_PAGE_SIZE;
+    const totalPages = Math.max(1, Math.ceil(limitedVariants.length / pageSize) || 1);
+    const currentPage = Math.min(Math.max(1, Number(viewState.page) || 1), totalPages);
+    const startIndex = limitedVariants.length ? (currentPage - 1) * pageSize : 0;
+    const endIndex = Math.min(limitedVariants.length, startIndex + pageSize);
+    const visibleVariants = limitedVariants.slice(startIndex, endIndex);
+
+    return {
+        filteredVariants,
+        limitedVariants,
+        visibleVariants,
+        maxVisibleCount,
+        pageSize,
+        currentPage,
+        totalPages,
+        isAllDisplay,
+        startRowNumber: limitedVariants.length ? startIndex + 1 : 0,
+        endRowNumber: limitedVariants.length ? endIndex : 0,
+    };
 }
 
 function buildVariantSortLabel(sortKey) {
@@ -866,11 +1105,90 @@ function buildVariantSortLabel(sortKey) {
     case "avg_case_duration_sec":
         return "平均所要時間順";
     case "activity_count":
-        return "activity数順";
+        return "アクティビティ数順";
     case "count":
     default:
         return "件数順";
     }
+}
+
+function buildVariantPaginationPages(currentPage, totalPages) {
+    if (totalPages <= 1) {
+        return [];
+    }
+
+    const pages = [];
+    const startPage = Math.max(1, currentPage - 2);
+    const endPage = Math.min(totalPages, startPage + 4);
+    const normalizedStartPage = Math.max(1, endPage - 4);
+
+    if (normalizedStartPage > 1) {
+        pages.push(1);
+        if (normalizedStartPage > 2) {
+            pages.push("ellipsis-start");
+        }
+    }
+
+    for (let pageNumber = normalizedStartPage; pageNumber <= endPage; pageNumber += 1) {
+        pages.push(pageNumber);
+    }
+
+    if (endPage < totalPages) {
+        if (endPage < totalPages - 1) {
+            pages.push("ellipsis-end");
+        }
+        pages.push(totalPages);
+    }
+
+    return pages;
+}
+
+function buildVariantPaginationHtml(pageState) {
+    if (!pageState || pageState.totalPages <= 1) {
+        return "";
+    }
+
+    const pageItems = buildVariantPaginationPages(pageState.currentPage, pageState.totalPages);
+
+    return `
+        <p class="result-pagination-meta">
+            ${escapeHtml(pageState.currentPage)} / ${escapeHtml(pageState.totalPages)} ページ
+        </p>
+        <div class="result-pagination-actions variant-pagination-actions">
+            <button
+                type="button"
+                class="ghost-link result-pagination-button variant-pagination-button"
+                data-variant-page="${escapeHtml(Math.max(1, pageState.currentPage - 1))}"
+                ${pageState.currentPage > 1 ? "" : "disabled"}
+            >
+                前へ
+            </button>
+            ${pageItems.map((pageItem) => {
+        if (typeof pageItem !== "number") {
+            return '<span class="variant-pagination-ellipsis" aria-hidden="true">…</span>';
+        }
+
+        return `
+                    <button
+                        type="button"
+                        class="ghost-link result-pagination-button variant-pagination-button${pageItem === pageState.currentPage ? " is-active" : ""}"
+                        data-variant-page="${escapeHtml(pageItem)}"
+                        aria-pressed="${pageItem === pageState.currentPage ? "true" : "false"}"
+                    >
+                        ${escapeHtml(pageItem)}
+                    </button>
+                `;
+    }).join("")}
+            <button
+                type="button"
+                class="ghost-link result-pagination-button variant-pagination-button"
+                data-variant-page="${escapeHtml(Math.min(pageState.totalPages, pageState.currentPage + 1))}"
+                ${pageState.currentPage < pageState.totalPages ? "" : "disabled"}
+            >
+                次へ
+            </button>
+        </div>
+    `;
 }
 
 function buildVariantTransitionKeys(activities = []) {
@@ -1207,7 +1525,7 @@ function buildVariantSelectionState(variants, selectedVariantId) {
     if (selectedVariantId === null) {
         return {
             title: "全体表示中",
-            meta: "Variant を選択すると、その Variant に属するケースだけでフロー図を再描画します。",
+            meta: "Pattern / Variant を選択すると、そのルートに属するケースだけでフロー図を再描画します。",
             sequence: "現在は全ケースを使ったフロー図を表示しています。",
             titleAttribute: "全ケースを使ったフロー図を表示しています。",
         };
@@ -1219,51 +1537,100 @@ function buildVariantSelectionState(variants, selectedVariantId) {
 
     if (!selectedVariant) {
         return {
-            title: "Variant 情報なし",
-            meta: "選択中 Variant の情報を取得できませんでした。",
+            title: "Pattern / Variant 情報なし",
+            meta: "選択中の Pattern / Variant 情報を取得できませんでした。",
             sequence: "",
             titleAttribute: "",
         };
     }
 
     const sequenceText = getVariantSequenceText(selectedVariant);
+    const patternIndex = Number.isInteger(Number(selectedVariant.pattern_index))
+        ? Number(selectedVariant.pattern_index) + 1
+        : null;
+    const titleParts = [];
+    if (patternIndex !== null) {
+        titleParts.push(`Pattern #${patternIndex}`);
+    }
+    titleParts.push(`Variant #${selectedVariant.variant_id}`);
+    titleParts.push(`${formatVariantRatio(selectedVariant.ratio)}%`);
+    titleParts.push(`${Number(selectedVariant.count || 0).toLocaleString("ja-JP")}件`);
     return {
-        title: `Variant #${selectedVariant.variant_id} / ${formatVariantRatio(selectedVariant.ratio)}% / ${Number(selectedVariant.count || 0).toLocaleString("ja-JP")} cases`,
-        meta: "選択中の Variant に属するケースだけでフロー図を表示しています。",
+        title: titleParts.join(" / "),
+        meta: "選択中のルートに属するケースだけでフロー図を表示しています。",
         sequence: sequenceText,
         titleAttribute: sequenceText,
     };
 }
 
-function buildVariantCardsHtml(variants, selectedVariantId = null, emptyMessage = "表示できる Variant がありません。") {
+function buildVariantRowCell(label, value, className = "") {
+    return `
+        <span class="variant-row-cell ${className}">
+            <span class="variant-row-cell-label">${escapeHtml(label)}</span>
+            <span class="variant-row-cell-value">${escapeHtml(value)}</span>
+        </span>
+    `;
+}
+
+function buildVariantCardsHtml(variants, selectedVariantId = null, emptyMessage = "表示できるルートがありません。", runId = "", rankOffset = 0) {
     if (!variants.length) {
         return `<p class="empty-state">${escapeHtml(emptyMessage)}</p>`;
     }
 
     return variants
-        .map((variant) => {
+        .map((variant, index) => {
+            const displayRank = rankOffset + index + 1;
             const isSelected = Number(variant.variant_id) === Number(selectedVariantId);
             const sequenceText = getVariantSequenceText(variant);
+            const caseCountText = Number(variant.count || 0).toLocaleString("ja-JP");
+            const patternIndex = Number.isInteger(Number(variant.pattern_index))
+                ? Number(variant.pattern_index)
+                : null;
+            const patternNumber = patternIndex !== null ? patternIndex + 1 : null;
+            const detailHref = (runId && patternIndex !== null)
+                ? buildPatternDetailHref(runId, patternIndex)
+                : "";
+            const routeLabel = patternNumber !== null
+                ? `Pattern #${patternNumber} / Variant #${variant.variant_id}`
+                : `Variant #${variant.variant_id}`;
             const cardTitle = [
-                `Variant #${variant.variant_id}`,
-                `${formatVariantRatio(variant.ratio)}% / ${Number(variant.count || 0).toLocaleString("ja-JP")} cases`,
+                `#${displayRank}`,
+                routeLabel,
+                `${formatVariantRatio(variant.ratio)}% / ${caseCountText}件`,
+                `平均所要時間 ${variant.avg_case_duration_text || "0s"}`,
                 sequenceText,
             ].join("\n");
 
+            const patternCellHtml = detailHref
+                ? `<span class="variant-row-cell variant-row-cell--pattern">
+                        <span class="variant-row-cell-label">Pattern / Variant</span>
+                        <a href="${detailHref}" class="variant-row-cell-value variant-row-pattern-link" title="パターン詳細ページへ">${escapeHtml(routeLabel)}</a>
+                    </span>`
+                : buildVariantRowCell("Pattern / Variant", routeLabel, "variant-row-cell--pattern");
+
+            const sequenceCellHtml = `<span class="variant-row-cell variant-row-cell--sequence" title="${escapeHtml(sequenceText)}">
+                    <span class="variant-row-cell-label">ルート</span>
+                    <span class="variant-row-cell-value">${escapeHtml(sequenceText)}</span>
+                </span>`;
+
             return `
-                <button
-                    type="button"
-                    class="variant-card${isSelected ? " variant-card--selected" : ""}"
-                    data-variant-id="${escapeHtml(variant.variant_id)}"
-                    aria-pressed="${isSelected ? "true" : "false"}"
-                    title="${escapeHtml(cardTitle)}"
-                >
-                    <span class="variant-card-rank">Variant #${escapeHtml(variant.variant_id)}</span>
-                    <span class="variant-card-meta">
-                        ${escapeHtml(formatVariantRatio(variant.ratio))}% / ${escapeHtml(Number(variant.count || 0).toLocaleString("ja-JP"))} cases
-                    </span>
-                    <span class="variant-card-sequence">${escapeHtml(sequenceText)}</span>
-                </button>
+                <article class="variant-row${isSelected ? " variant-row--selected" : ""}">
+                    <div
+                        role="button"
+                        tabindex="0"
+                        class="variant-row-main"
+                        data-variant-id="${escapeHtml(variant.variant_id)}"
+                        aria-pressed="${isSelected ? "true" : "false"}"
+                        title="${escapeHtml(cardTitle)}"
+                    >
+                        ${buildVariantRowCell("順位", `#${displayRank}`, "variant-row-cell--rank")}
+                        ${patternCellHtml}
+                        ${buildVariantRowCell("件数", `${caseCountText}件`, "variant-row-cell--count")}
+                        ${buildVariantRowCell("比率", `${formatVariantRatio(variant.ratio)}%`, "variant-row-cell--ratio")}
+                        ${buildVariantRowCell("平均所要時間", variant.avg_case_duration_text || "0s", "variant-row-cell--duration")}
+                        ${sequenceCellHtml}
+                    </div>
+                </article>
             `;
         })
         .join("");
@@ -1893,7 +2260,7 @@ function renderTransitionChart(analysis) {
             const toActivity = row["後処理アクティビティ名"];
             const transitionLabel = `${fromActivity} → ${toActivity}`;
             const transitionCount = Number(row["遷移件数"]) || 0;
-            const avgWaitingTime = row["平均待ち時間(分)"];
+            const avgDuration = row["平均時間(分)"] ?? row["平均所要時間(分)"] ?? row["平均待ち時間(分)"];
             const transitionRatio = row["遷移比率(%)"];
             const barWidth = Math.max(12, (transitionCount / maxTransitionCount) * barAreaWidth);
             const rowCenterY = 68 + index * 52;
@@ -1908,7 +2275,7 @@ function renderTransitionChart(analysis) {
                     ${escapeHtml(transitionCount.toLocaleString("ja-JP"))}件 (${escapeHtml(String(transitionRatio))}%)
                 </text>
                 <text x="${infoStartX}" y="${rowCenterY + 14}" class="transition-svg-avg">
-                    平均待ち${escapeHtml(String(avgWaitingTime))}分
+                    平均所要${escapeHtml(String(avgDuration ?? "-"))}分
                 </text>
             `;
         })
@@ -1916,7 +2283,7 @@ function renderTransitionChart(analysis) {
 
     chartPanel.className = "result-panel";
     chartTitle.textContent = "前後処理分析グラフ";
-    chartNote.textContent = "左が前処理→後処理、中央の棒が遷移件数、右が件数比率と平均待ち時間(分)です。";
+    chartNote.textContent = "左が前処理→後処理、中央の棒が遷移件数、右が件数比率と平均所要時間(分)です。";
     chartContainer.innerHTML = `
         <svg
             class="transition-chart-svg"
@@ -2232,11 +2599,11 @@ function buildProcessFlowData(patternRows, transitionRows = [], frequencyRows = 
 }
 
 function filterProcessFlowData(sourceNodes, sourceEdges, activityPercent = 100, connectionPercent = 100) {
-    if (!sourceNodes.length || !sourceEdges.length) {
+    if (!sourceNodes.length) {
         return {
             nodes: [],
             edges: [],
-            totalNodeCount: sourceNodes.length,
+            totalNodeCount: 0,
             totalEdgeCount: sourceEdges.length,
         };
     }
@@ -2266,16 +2633,10 @@ function filterProcessFlowData(sourceNodes, sourceEdges, activityPercent = 100, 
         )
         : 0;
     const selectedEdges = candidateEdges.slice(0, connectionLimit);
-    const connectedNodeNames = new Set();
 
-    selectedEdges.forEach((edge) => {
-        connectedNodeNames.add(edge.source);
-        connectedNodeNames.add(edge.target);
-    });
-
-    const visibleNodes = selectedNodes
-        .filter((node) => connectedNodeNames.has(node.name))
-        .map((node) => ({ ...node }));
+    // Show all selected nodes regardless of whether they have visible edges.
+    // This prevents the flow from going empty when selected nodes have no mutual connections.
+    const visibleNodes = selectedNodes.map((node) => ({ ...node }));
     const visibleEdges = selectedEdges.map((edge) => ({ ...edge }));
 
     return {
@@ -2318,6 +2679,39 @@ function buildProcessMapLabelState(edges, labelPercent = 100) {
         visibleLabelCount: visibleLabelKeys.size,
         totalLabelCount: sortedEdges.length,
     };
+}
+
+function normalizeProcessMapLabelMode(labelMode) {
+    return labelMode === "duration" ? "duration" : "count";
+}
+
+function getProcessMapEdgeLabelText(edge, labelMode = "count") {
+    const normalizedLabelMode = normalizeProcessMapLabelMode(labelMode);
+    const countLabel = `${Number(edge?.count || 0).toLocaleString("ja-JP")}件`;
+    const durationText = String(edge?.avg_duration_text || "").trim();
+
+    if (normalizedLabelMode === "duration" && durationText) {
+        return `平均 ${durationText}`;
+    }
+
+    return countLabel;
+}
+
+function applyProcessMapLabelMode(viewportElement, labelMode = "count") {
+    const svgElement = viewportElement?.querySelector("svg.process-map-svg");
+    if (!svgElement) {
+        return;
+    }
+
+    const normalizedLabelMode = normalizeProcessMapLabelMode(labelMode);
+    svgElement.querySelectorAll(".process-map-edge-label").forEach((labelElement) => {
+        const fallbackText = String(labelElement.dataset.labelCount || labelElement.textContent || "").trim();
+        const nextText = normalizedLabelMode === "duration"
+            ? String(labelElement.dataset.labelDuration || fallbackText).trim()
+            : fallbackText;
+        labelElement.textContent = nextText || fallbackText;
+        labelElement.dataset.labelMode = normalizedLabelMode;
+    });
 }
 
 function downloadBlob(blob, fileName) {
@@ -2588,6 +2982,7 @@ function renderProcessFlowMapFromData(flowData, options = {}) {
     const activityPercent = Number(options.activityPercent ?? 100);
     const connectionPercent = Number(options.connectionPercent ?? 100);
     const labelPercent = Number(options.labelPercent ?? 100);
+    const labelMode = normalizeProcessMapLabelMode(options.labelMode);
     const compactMode = Boolean(options.compactMode);
     const filteredData = filterProcessFlowData(
         flowData.nodes,
@@ -2688,7 +3083,7 @@ function renderProcessFlowMapFromData(flowData, options = {}) {
                 : "#2d5ec4";
         return `
             <path d="${pathD}" class="${isBack ? "process-map-edge process-map-edge--return" : "process-map-edge"}" marker-end="url(#${isBack ? "process-map-arrow-return" : "process-map-arrow"})" data-source="${escapeHtml(edge.source)}" data-target="${escapeHtml(edge.target)}" data-transition-key="${escapeHtml(transitionKey)}" style="stroke-width: ${strokeWidth}; opacity: ${opacity}; fill: none; stroke: var(--edge-heat-stroke, ${strokeColor}); filter: var(--edge-heat-filter, none);"></path>
-            ${showLabel ? `<text x="${lblX}" y="${lblY}" class="${isBack ? "process-map-edge-label process-map-edge-label--return" : "process-map-edge-label"}" data-source="${escapeHtml(edge.source)}" data-target="${escapeHtml(edge.target)}" data-transition-key="${escapeHtml(transitionKey)}">${escapeHtml(edge.count.toLocaleString("ja-JP"))}件</text>` : ""}
+            ${showLabel ? `<text x="${lblX}" y="${lblY}" class="${isBack ? "process-map-edge-label process-map-edge-label--return" : "process-map-edge-label"}" data-source="${escapeHtml(edge.source)}" data-target="${escapeHtml(edge.target)}" data-transition-key="${escapeHtml(transitionKey)}" data-label-count="${escapeHtml(getProcessMapEdgeLabelText(edge, "count"))}" data-label-duration="${escapeHtml(getProcessMapEdgeLabelText(edge, "duration"))}" data-label-mode="${escapeHtml(labelMode)}">${escapeHtml(getProcessMapEdgeLabelText(edge, labelMode))}</text>` : ""}
         `;
     }).join("");
 
@@ -2796,7 +3191,7 @@ function renderProcessHeatLegend() {
                 <strong>Avg wait</strong>
             </div>
             <div class="process-explorer-legend-body">
-                <p class="process-explorer-legend-copy">平均待ち時間ベースの Heatmap です。ノードは activity、線は transition の待ち時間を表します。</p>
+                <p class="process-explorer-legend-copy">平均所要時間ベースの Heatmap です。ノードは activity、線は transition の所要時間を表します。</p>
                 <div class="process-explorer-legend-scale">
                     <span class="process-explorer-legend-boundary">HIGH</span>
                     <div class="process-explorer-legend-swatches">
@@ -2881,19 +3276,17 @@ async function initializePatternFlowExplorer(runId, impact = null) {
     const mapViewport = document.getElementById("process-map-viewport");
     const patternsSlider = document.getElementById("process-map-patterns-slider");
     const activitiesSlider = document.getElementById("process-map-activities-slider");
-    const connectionsSlider = document.getElementById("process-map-connections-slider");
-    const labelsSlider = document.getElementById("process-map-labels-slider");
+    const labelModeCountButton = document.getElementById("process-map-label-mode-count");
+    const labelModeDurationButton = document.getElementById("process-map-label-mode-duration");
+    const labelModeMeta = document.getElementById("process-map-label-mode-meta");
     const patternsValue = document.getElementById("process-map-patterns-value");
     const activitiesValue = document.getElementById("process-map-activities-value");
-    const connectionsValue = document.getElementById("process-map-connections-value");
-    const labelsValue = document.getElementById("process-map-labels-value");
     const patternsMeta = document.getElementById("process-map-patterns-meta");
     const activitiesMeta = document.getElementById("process-map-activities-meta");
-    const connectionsMeta = document.getElementById("process-map-connections-meta");
-    const labelsMeta = document.getElementById("process-map-labels-meta");
     const exportSvgButton = document.getElementById("process-map-export-svg");
     const exportPngButton = document.getElementById("process-map-export-png");
     const variantList = document.getElementById("variant-list");
+    const variantPagination = document.getElementById("variant-pagination");
     const variantResetButton = document.getElementById("variant-reset-button");
     const variantCoverageMeta = document.getElementById("variant-coverage-meta");
     const variantSelectionTitle = document.getElementById("variant-selection-title");
@@ -2904,10 +3297,7 @@ async function initializePatternFlowExplorer(runId, impact = null) {
     const variantSortSelect = document.getElementById("variant-sort-select");
     const variantDisplayLimitSelect = document.getElementById("variant-display-limit-select");
     const variantResultsMeta = document.getElementById("variant-results-meta");
-    const activityBottleneckList = document.getElementById("activity-bottleneck-list");
-    const transitionBottleneckList = document.getElementById("transition-bottleneck-list");
     const impactPanel = chartContainer.querySelector(".impact-panel");
-    const transitionCasePanel = document.getElementById("transition-case-panel");
     const detailFilterForm = document.getElementById("detail-light-filter-form");
     const detailFilterDateFromInput = document.getElementById("detail-light-date-from");
     const detailFilterDateToInput = document.getElementById("detail-light-date-to");
@@ -2927,6 +3317,8 @@ async function initializePatternFlowExplorer(runId, impact = null) {
     let selectedVariantId = null;
     let selectedActivity = "";
     let selectedTransitionKey = "";
+    const initialPatternPercent = Number(patternsSlider.value);
+    const initialActivityPercent = Number(activitiesSlider.value);
     let caseTraceActivities = new Set();
     let caseTraceTransitions = new Set();
     let variants = [];
@@ -2948,6 +3340,7 @@ async function initializePatternFlowExplorer(runId, impact = null) {
     let impactViewState = getDefaultImpactViewState();
     let draftDetailFilters = cloneDetailFilters(activeDetailFilters);
     let filterOptionsPayload = null;
+    let currentLabelMode = "count";
     let filteredCounts = {
         caseCount: 0,
         eventCount: 0,
@@ -2971,9 +3364,11 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         !mapViewport
         || !patternsSlider
         || !activitiesSlider
-        || !connectionsSlider
-        || !labelsSlider
+        || !labelModeCountButton
+        || !labelModeDurationButton
+        || !labelModeMeta
         || !variantList
+        || !variantPagination
         || !variantResetButton
         || !variantCoverageMeta
         || !variantSelectionTitle
@@ -2984,9 +3379,6 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         || !variantSortSelect
         || !variantDisplayLimitSelect
         || !variantResultsMeta
-        || !activityBottleneckList
-        || !transitionBottleneckList
-        || !transitionCasePanel
         || !detailFilterForm
         || !detailFilterDateFromInput
         || !detailFilterDateToInput
@@ -3001,8 +3393,6 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         || !caseTraceForm
         || !caseTraceInput
         || !caseTraceResult
-        || detailFilterValueSelects.some((selectElement) => !selectElement)
-        || detailFilterLabelElements.some((labelElement) => !labelElement)
     ) {
         return;
     }
@@ -3013,6 +3403,7 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         detailExportExcelButton.onclick = () => {
             void downloadDetailExcelExport(runId, {
                 analysisKeyName: analysisKey,
+                patternDisplayLimit: variantViewState.displayLimit,
                 filters: activeDetailFilters,
                 variantId: selectedVariantId,
                 selectedActivity,
@@ -3021,6 +3412,14 @@ async function initializePatternFlowExplorer(runId, impact = null) {
             });
         };
     }
+    syncDetailExportPanel(detailPageTitle?.textContent?.trim() || "処理順パターン分析", {
+        filters: activeDetailFilters,
+        variantId: selectedVariantId,
+        selectedActivity,
+        selectedTransitionKey,
+        caseId: caseTracePayload?.found ? caseTracePayload.case_id : "",
+        filterDefs: filterDefinitions,
+    });
 
     function resolveTransitionLabel(transitionItem, transitionKey = "") {
         if (transitionItem) {
@@ -3051,6 +3450,18 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         }
 
         return null;
+    }
+
+    function syncProcessMapLabelModeControls(visibleLabelCount = 0, totalLabelCount = 0) {
+        const normalizedLabelMode = normalizeProcessMapLabelMode(currentLabelMode);
+        labelModeCountButton.classList.toggle("is-active", normalizedLabelMode === "count");
+        labelModeDurationButton.classList.toggle("is-active", normalizedLabelMode === "duration");
+        labelModeCountButton.setAttribute("aria-pressed", normalizedLabelMode === "count" ? "true" : "false");
+        labelModeDurationButton.setAttribute("aria-pressed", normalizedLabelMode === "duration" ? "true" : "false");
+        labelModeMeta.textContent = totalLabelCount > 0
+            ? `表示中: ${normalizedLabelMode === "count" ? "件数" : "平均所要時間"} / ${visibleLabelCount} ラベル`
+            : `表示中: ${normalizedLabelMode === "count" ? "件数" : "平均所要時間"}`;
+        applyProcessMapLabelMode(mapViewport, normalizedLabelMode);
     }
 
     function getSelectableTransitionKeys() {
@@ -3104,13 +3515,15 @@ async function initializePatternFlowExplorer(runId, impact = null) {
             if (detailFilterLabelElement) {
                 detailFilterLabelElement.textContent = definition.label || DEFAULT_FILTER_LABELS[definition.slot];
             }
-            replaceSingleSelectOptions(
-                detailFilterValueSelect,
-                definition.options || [],
-                selectedValue,
-                "全て"
-            );
-            detailFilterValueSelect.disabled = !definition.column_name && !selectedValue;
+            if (detailFilterValueSelect) {
+                replaceSingleSelectOptions(
+                    detailFilterValueSelect,
+                    definition.options || [],
+                    selectedValue,
+                    "全て"
+                );
+                detailFilterValueSelect.disabled = !definition.column_name && !selectedValue;
+            }
         });
     }
 
@@ -3151,7 +3564,21 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         };
 
         renderSummary(detailData, analysis);
-        renderResult(analysis, runId, detailPageAnalysisLoader);
+        if (analysisKey === "pattern") {
+            resultPanel.className = "result-panel hidden";
+            resultPanel.innerHTML = "";
+        } else {
+            renderResult(analysis, runId, detailPageAnalysisLoader);
+        }
+        syncDetailExportPanel(analysis.analysis_name, {
+            filters: activeDetailFilters,
+            variantId: selectedVariantId,
+            selectedActivity,
+            selectedTransitionKey,
+            caseId: caseTracePayload?.found ? caseTracePayload.case_id : "",
+            filterDefs: filterDefinitions,
+        });
+        await syncAiInsightsPanel(runId, analysis.analysis_name);
         renderFilterSummary();
         syncDetailFilterControls();
         return detailData;
@@ -3183,6 +3610,10 @@ async function initializePatternFlowExplorer(runId, impact = null) {
     async function resetDetailFilters() {
         draftDetailFilters = cloneDetailFilters(DEFAULT_DETAIL_FILTERS);
         syncDetailFilterControls();
+        patternsSlider.value = initialPatternPercent;
+        patternsValue.textContent = `${initialPatternPercent}%`;
+        activitiesSlider.value = initialActivityPercent;
+        activitiesValue.textContent = `${initialActivityPercent}%`;
         await applyDetailFilters();
     }
 
@@ -3295,7 +3726,7 @@ async function initializePatternFlowExplorer(runId, impact = null) {
             return {
                 source: "none",
                 title: "全体表示中",
-                meta: "現在は全ケースを使ったフロー図を表示しています。Variant Analysis の全体表示で解除できます。",
+                meta: "現在は全ケースを使ったフロー図を表示しています。Pattern / Variant 一覧の全体表示で解除できます。",
             };
         }
     }
@@ -3569,6 +4000,7 @@ async function initializePatternFlowExplorer(runId, impact = null) {
     }
 
     function renderTransitionCasePanel() {
+        if (!transitionCasePanel) return;
         const drilldownConfig = getDrilldownPanelConfig();
         const hasTransitionSelection = Boolean(selectedTransitionKey || selectedActivity);
         transitionCasePanel.className = "result-panel";
@@ -3612,6 +4044,7 @@ async function initializePatternFlowExplorer(runId, impact = null) {
     }
 
     async function loadSelectedTransitionCases() {
+        if (!transitionCasePanel) return;
         if (!selectedTransitionKey && !selectedActivity) {
             transitionCaseRows = [];
             transitionCaseErrorMessage = "";
@@ -3814,62 +4247,18 @@ async function initializePatternFlowExplorer(runId, impact = null) {
     }
 
     function syncBottleneckPanel() {
-        if (bottleneckErrorMessage) {
-            activityBottleneckList.innerHTML = `<p class="empty-state">${escapeHtml(bottleneckErrorMessage)}</p>`;
-            transitionBottleneckList.innerHTML = `<p class="empty-state">${escapeHtml(bottleneckErrorMessage)}</p>`;
-            renderTransitionCasePanel();
-            return;
-        }
-
-        activityBottleneckList.innerHTML = buildBottleneckCardsHtml(
-            bottleneckSummary?.activity_bottlenecks || [],
-            "activity",
-            { selectedActivity, selectedTransitionKey }
-        );
-        transitionBottleneckList.innerHTML = buildBottleneckCardsHtml(
-            bottleneckSummary?.transition_bottlenecks || [],
-            "transition",
-            { selectedActivity, selectedTransitionKey }
-        );
-
-        activityBottleneckList.querySelectorAll("[data-bottleneck-kind='activity']").forEach((buttonElement) => {
-            buttonElement.addEventListener("click", async () => {
-                const activityName = buttonElement.dataset.activity || "";
-                selectedActivity = selectedActivity === activityName ? "" : activityName;
-                currentSelectionSource = selectedActivity
-                    ? "activity-bottleneck"
-                    : (selectedVariantId !== null ? "variant" : "");
-                selectedTransitionKey = "";
-                resetCaseTraceHighlightState();
-                resetVariantBranchFocusState();
-                transitionCaseRows = [];
-                transitionCaseErrorMessage = "";
-                saveFlowSelection(runId, selectedVariantId, selectedActivity, selectedTransitionKey);
-                syncVariantPanel();
-                syncBottleneckPanel();
-                syncImpactPanel();
-                await updateProcessMap();
-                await loadSelectedTransitionCases();
-            });
-        });
-
-        transitionBottleneckList.querySelectorAll("[data-bottleneck-kind='transition']").forEach((buttonElement) => {
-            buttonElement.addEventListener("click", async () => {
-                const transitionKey = buttonElement.dataset.transitionKey || "";
-                await applyTransitionSelection(transitionKey, "transition-bottleneck");
-            });
-        });
-
-        renderTransitionCasePanel();
+        // bottleneck panel removed; heatmap data is still applied via applyProcessMapDecorators
     }
 
     function syncVariantPanel() {
         if (variantErrorMessage) {
             variantDiffState = buildVariantDiffState([], null);
             variantList.innerHTML = `<p class="empty-state">${escapeHtml(variantErrorMessage)}</p>`;
-            variantCoverageMeta.innerHTML = '<p class="panel-note">Coverage could not be loaded.</p>';
-            variantSelectionTitle.textContent = "Variant data is unavailable";
-            variantSelectionMeta.textContent = "Variant list could not be loaded.";
+            variantPagination.className = "result-pagination variant-pagination hidden";
+            variantPagination.innerHTML = "";
+            variantCoverageMeta.innerHTML = '<p class="panel-note">カバー率を読み込めませんでした。</p>';
+            variantSelectionTitle.textContent = "Pattern / Variant 情報を読み込めませんでした";
+            variantSelectionMeta.textContent = "一覧の読み込みに失敗しました。";
             variantSelectionSequence.textContent = "";
             variantSelectionSequence.title = "";
             variantSelectionDiff.innerHTML = "";
@@ -3880,17 +4269,18 @@ async function initializePatternFlowExplorer(runId, impact = null) {
             variantResetButton.disabled = true;
             patternsSlider.disabled = false;
             activitiesSlider.disabled = false;
-            connectionsSlider.disabled = false;
             renderCurrentSelectionState();
             syncProcessRuleLegend();
             return;
         }
 
-        const visibleVariants = getVisibleVariants(variants, variantViewState);
+        const variantPageState = getVariantPageState(variants, variantViewState);
+        variantViewState.page = variantPageState.currentPage;
+        const visibleVariants = variantPageState.visibleVariants;
         const hasSearchTerm = Boolean(String(variantViewState.searchTerm || "").trim());
         const emptyMessage = hasSearchTerm
-            ? "検索条件に一致する Variant がありません。"
-            : "表示できる Variant がありません。";
+            ? "検索条件に一致するルートがありません。"
+            : "表示できるルートがありません。";
         variantDiffState = buildVariantDiffState(variants, selectedVariantId);
         if (variantBranchFocusState && !findVariantBranchFocusState(variantBranchFocusState.focusId)) {
             resetVariantBranchFocusState();
@@ -3900,7 +4290,13 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         variantSearchInput.disabled = false;
         variantSortSelect.disabled = false;
         variantDisplayLimitSelect.disabled = false;
-        variantList.innerHTML = buildVariantCardsHtml(visibleVariants, selectedVariantId, emptyMessage);
+        variantList.innerHTML = buildVariantCardsHtml(
+            visibleVariants,
+            selectedVariantId,
+            emptyMessage,
+            runId,
+            Math.max(0, Number(variantPageState.startRowNumber || 1) - 1)
+        );
         variantResetButton.disabled = !(
             selectedVariantId !== null
             || Boolean(selectedActivity)
@@ -3911,9 +4307,29 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         );
         patternsSlider.disabled = selectedVariantId !== null;
         activitiesSlider.disabled = selectedVariantId !== null;
-        connectionsSlider.disabled = selectedVariantId !== null;
+        variantCoverage = buildVariantCoveragePayload(
+            variantPageState.limitedVariants,
+            filteredCounts.caseCount,
+            variantPageState.maxVisibleCount,
+            { isAllDisplay: variantPageState.isAllDisplay }
+        );
         variantCoverageMeta.innerHTML = buildVariantCoverageHtml(variantCoverage);
-        variantResultsMeta.textContent = `対象 Variant ${Number(variants.length || 0).toLocaleString("ja-JP")} 件 / 表示 ${Number(visibleVariants.length || 0).toLocaleString("ja-JP")} 件 / ${buildVariantSortLabel(variantViewState.sortKey)}`;
+        variantResultsMeta.textContent = [
+            `対象ルート ${Number(variants.length || 0).toLocaleString("ja-JP")} 件`,
+            `条件一致 ${Number(variantPageState.filteredVariants.length || 0).toLocaleString("ja-JP")} 件`,
+            `表示対象 ${Number(variantPageState.limitedVariants.length || 0).toLocaleString("ja-JP")} 件`,
+            variantPageState.filteredVariants.length
+                ? `${Number(variantPageState.startRowNumber || 0).toLocaleString("ja-JP")} - ${Number(variantPageState.endRowNumber || 0).toLocaleString("ja-JP")} 件目を表示`
+                : "表示対象なし",
+            buildVariantSortLabel(variantViewState.sortKey),
+            variantPageState.totalPages > 1
+                ? `${Number(variantPageState.pageSize || 0).toLocaleString("ja-JP")} 件ずつページ切り替え`
+                : "",
+        ].filter(Boolean).join(" / ");
+        variantPagination.innerHTML = buildVariantPaginationHtml(variantPageState);
+        variantPagination.className = variantPageState.totalPages > 1
+            ? "result-pagination variant-pagination"
+            : "result-pagination variant-pagination hidden";
 
         const selectionState = buildVariantSelectionState(variants, selectedVariantId);
         variantSelectionTitle.textContent = selectionState.title;
@@ -3930,13 +4346,34 @@ async function initializePatternFlowExplorer(runId, impact = null) {
             });
         });
 
-        variantList.querySelectorAll("[data-variant-id]").forEach((buttonElement) => {
-            buttonElement.addEventListener("click", async () => {
-                const clickedVariantId = Number(buttonElement.dataset.variantId);
+        variantList.querySelectorAll("[data-variant-id]").forEach((element) => {
+            element.addEventListener("click", async (event) => {
+                if (event.target.closest("a")) return;
+                const clickedVariantId = Number(element.dataset.variantId);
                 const nextVariantId = selectedVariantId === clickedVariantId
                     ? null
                     : clickedVariantId;
                 await applyVariantSelection(nextVariantId);
+            });
+            element.addEventListener("keydown", async (event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                const clickedVariantId = Number(element.dataset.variantId);
+                const nextVariantId = selectedVariantId === clickedVariantId
+                    ? null
+                    : clickedVariantId;
+                await applyVariantSelection(nextVariantId);
+            });
+        });
+        variantPagination.querySelectorAll("[data-variant-page]").forEach((buttonElement) => {
+            buttonElement.addEventListener("click", () => {
+                const nextPage = Number(buttonElement.dataset.variantPage || 1);
+                if (!Number.isFinite(nextPage) || nextPage === variantViewState.page) {
+                    return;
+                }
+                variantViewState.page = nextPage;
+                syncVariantPanel();
+                variantList.scrollIntoView({ block: "start", behavior: "smooth" });
             });
         });
     }
@@ -3967,14 +4404,12 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         requestVersion = currentVersion;
         const patternPercent = Number(patternsSlider.value);
         const activityPercent = Number(activitiesSlider.value);
-        const connectionPercent = Number(connectionsSlider.value);
-        const labelPercent = Number(labelsSlider.value);
+        const connectionPercent = 100;
+        const labelPercent = 100;
 
         // Update labels instantly
         patternsValue.textContent = `${patternPercent}%`;
         activitiesValue.textContent = `${activityPercent}%`;
-        connectionsValue.textContent = `${connectionPercent}%`;
-        labelsValue.textContent = `${labelPercent}%`;
 
         mapViewport.innerHTML = renderProcessMapEmpty("フロー図を読み込んでいます...");
 
@@ -4014,8 +4449,6 @@ async function initializePatternFlowExplorer(runId, impact = null) {
                 patternsMeta.textContent = `${snapshot.pattern_window.used_pattern_count} / ${snapshot.pattern_window.effective_pattern_count} patterns`;
             }
             activitiesMeta.textContent = `${snapshot.activity_window.visible_activity_count} / ${snapshot.activity_window.available_activity_count} activities`;
-            connectionsMeta.textContent = `${snapshot.connection_window.visible_connection_count} / ${snapshot.connection_window.available_connection_count} connections`;
-            labelsMeta.textContent = `${labelState.visibleLabelCount} / ${labelState.totalLabelCount} labels`;
 
             if (!flowData.nodes.length) {
                 mapViewport.innerHTML = renderProcessMapEmpty("表示できるフロー図がありません。表示率を広げてください。");
@@ -4043,6 +4476,7 @@ async function initializePatternFlowExplorer(runId, impact = null) {
 
             mapViewport.innerHTML = renderProcessFlowMapFromData(flowData, {
                 labelPercent,
+                labelMode: currentLabelMode,
                 activityPercent: 100,
                 connectionPercent: 100,
                 compactMode: selectedVariantId !== null,
@@ -4059,20 +4493,20 @@ async function initializePatternFlowExplorer(runId, impact = null) {
             });
             scrollVariantBranchFocusIntoView(mapViewport, variantBranchFocusState);
             attachProcessMapInteractions(mapViewport);
+            syncProcessMapLabelModeControls(labelState.visibleLabelCount, labelState.totalLabelCount);
         } catch (error) {
             if (currentVersion !== requestVersion) {
                 return;
             }
             patternsMeta.textContent = "";
             activitiesMeta.textContent = "";
-            connectionsMeta.textContent = "";
-            labelsMeta.textContent = "";
             filteredCounts = {
                 caseCount: 0,
                 eventCount: 0,
             };
             renderFilterSummary();
             mapViewport.innerHTML = renderProcessMapEmpty(error.message);
+            syncProcessMapLabelModeControls();
         }
     }
 
@@ -4086,29 +4520,25 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         activitiesValue.textContent = `${activitiesSlider.value}%`;
         debouncedUpdate();
     });
-    connectionsSlider.addEventListener("input", () => {
-        connectionsValue.textContent = `${connectionsSlider.value}%`;
-        debouncedUpdate();
+    labelModeCountButton.addEventListener("click", () => {
+        currentLabelMode = "count";
+        syncProcessMapLabelModeControls();
     });
-    labelsSlider.addEventListener("input", () => {
-        labelsValue.textContent = `${labelsSlider.value}%`;
-        debouncedUpdate();
+    labelModeDurationButton.addEventListener("click", () => {
+        currentLabelMode = "duration";
+        syncProcessMapLabelModeControls();
     });
-    
-    // We also want real-time label change without a network request ideally, but 'input' event 
-    // for all might cause lag. Use 'change' instead.
-    
     if (exportSvgButton) {
         exportSvgButton.addEventListener("click", () => {
             exportProcessMapSvg(
-                `process_flow_map_${patternsSlider.value}_${activitiesSlider.value}_${connectionsSlider.value}_${labelsSlider.value}.svg`
+                `process_flow_map_${patternsSlider.value}_${activitiesSlider.value}.svg`
             );
         });
     }
     if (exportPngButton) {
         exportPngButton.addEventListener("click", () => {
             exportProcessMapPng(
-                `process_flow_map_${patternsSlider.value}_${activitiesSlider.value}_${connectionsSlider.value}_${labelsSlider.value}.png`
+                `process_flow_map_${patternsSlider.value}_${activitiesSlider.value}.png`
             );
         });
     }
@@ -4129,16 +4559,19 @@ async function initializePatternFlowExplorer(runId, impact = null) {
 
     variantSearchInput.addEventListener("input", () => {
         variantViewState.searchTerm = String(variantSearchInput.value || "").trim();
+        variantViewState.page = 1;
         syncVariantPanel();
     });
 
     variantSortSelect.addEventListener("change", () => {
         variantViewState.sortKey = variantSortSelect.value || "count";
+        variantViewState.page = 1;
         syncVariantPanel();
     });
 
     variantDisplayLimitSelect.addEventListener("change", () => {
         variantViewState.displayLimit = variantDisplayLimitSelect.value || "10";
+        variantViewState.page = 1;
         syncVariantPanel();
     });
 
@@ -4189,6 +4622,7 @@ async function initializePatternFlowExplorer(runId, impact = null) {
     syncVariantPanel();
     syncBottleneckPanel();
     syncImpactPanel();
+    syncProcessMapLabelModeControls();
     renderCaseTracePanel();
     if (selectedTransitionKey) {
         await loadSelectedTransitionCases();
@@ -4342,15 +4776,10 @@ function renderPatternChart(analysis, runId, impact = null) {
 
     chartPanel.className = "result-panel";
     chartTitle.textContent = "業務全体フロー図";
-    chartNote.textContent = "大きなデータでは初期表示を自動で絞っています。Variant を選ぶと、その Variant に属するケースだけでフロー図を再描画します。";
+    chartNote.textContent = "大きなデータでは初期表示を自動で絞っています。ラベルは件数と平均所要時間を切り替えられ、Pattern / Variant を選ぶとそのルートのケースだけでフロー図を再描画します。";
     chartContainer.innerHTML = `
-        <section class="detail-filter-panel">
-            <div class="result-header">
-                <div>
-                    <h2>分析対象条件</h2>
-                    <p class="result-meta">TOP画面で設定した分析対象条件を引き継いだうえで、この画面内で日付・属性・Activity 条件を軽く絞り込めます。</p>
-                </div>
-            </div>
+        <details class="detail-filter-panel">
+            <summary>分析対象条件を絞り込む</summary>
             <form id="detail-light-filter-form" class="detail-filter-form">
                 <label class="detail-filter-field">
                     <span>開始日</span>
@@ -4359,24 +4788,6 @@ function renderPatternChart(analysis, runId, impact = null) {
                 <label class="detail-filter-field">
                     <span>終了日</span>
                     <input id="detail-light-date-to" type="date">
-                </label>
-                <label class="detail-filter-field">
-                    <span id="detail-light-filter-label-1">グループ/カテゴリー フィルター①</span>
-                    <select id="detail-light-filter-value-1">
-                        <option value="">全て</option>
-                    </select>
-                </label>
-                <label class="detail-filter-field">
-                    <span id="detail-light-filter-label-2">グループ/カテゴリー フィルター②</span>
-                    <select id="detail-light-filter-value-2">
-                        <option value="">全て</option>
-                    </select>
-                </label>
-                <label class="detail-filter-field">
-                    <span id="detail-light-filter-label-3">グループ/カテゴリー フィルター③</span>
-                    <select id="detail-light-filter-value-3">
-                        <option value="">全て</option>
-                    </select>
                 </label>
                 <label class="detail-filter-field">
                     <span>Activity 条件</span>
@@ -4401,9 +4812,9 @@ function renderPatternChart(analysis, runId, impact = null) {
             <div id="current-selection-state" class="selection-state-banner" data-selection-source="none">
                 <span class="selection-state-label">現在の選択状態</span>
                 <strong id="current-selection-state-title" class="selection-state-title">全体表示中</strong>
-                <p id="current-selection-state-meta" class="selection-state-meta">Variant Analysis の全体表示で解除できます。</p>
+                <p id="current-selection-state-meta" class="selection-state-meta">Pattern / Variant 一覧の全体表示で解除できます。</p>
             </div>
-        </section>
+        </details>
         <div class="process-explorer-shell">
             <div class="process-explorer-map-panel">
                 <div id="process-map-viewport" class="process-map-viewport"></div>
@@ -4415,7 +4826,7 @@ function renderPatternChart(analysis, runId, impact = null) {
                 </div>
                 <section class="process-explorer-control">
                     <div class="process-explorer-control-head">
-                        <span>Patterns</span>
+                        <span>表示ルート</span>
                         <strong id="process-map-patterns-value">${initialFlowSettings.patterns}%</strong>
                     </div>
                     <div class="process-explorer-slider-wrap">
@@ -4435,7 +4846,7 @@ function renderPatternChart(analysis, runId, impact = null) {
                 </section>
                 <section class="process-explorer-control">
                     <div class="process-explorer-control-head">
-                        <span>Activities</span>
+                        <span>表示アクティビティ</span>
                         <strong id="process-map-activities-value">${initialFlowSettings.activities}%</strong>
                     </div>
                     <div class="process-explorer-slider-wrap">
@@ -4455,43 +4866,14 @@ function renderPatternChart(analysis, runId, impact = null) {
                 </section>
                 <section class="process-explorer-control">
                     <div class="process-explorer-control-head">
-                        <span>Connections</span>
-                        <strong id="process-map-connections-value">${initialFlowSettings.connections}%</strong>
-                    </div>
-                    <div class="process-explorer-slider-wrap">
-                        <span class="process-explorer-slider-top">100%</span>
-                        <input
-                            id="process-map-connections-slider"
-                            class="process-explorer-slider"
-                            type="range"
-                            min="10"
-                            max="100"
-                            step="10"
-                            value="${initialFlowSettings.connections}"
-                        >
-                        <span class="process-explorer-slider-bottom">10%</span>
-                    </div>
-                    <p id="process-map-connections-meta" class="process-explorer-meta"></p>
-                </section>
-                <section class="process-explorer-control">
-                    <div class="process-explorer-control-head">
                         <span>Labels</span>
-                        <strong id="process-map-labels-value">${initialFlowSettings.labels}%</strong>
+                        <strong>切替</strong>
                     </div>
-                    <div class="process-explorer-slider-wrap">
-                        <span class="process-explorer-slider-top">100%</span>
-                        <input
-                            id="process-map-labels-slider"
-                            class="process-explorer-slider"
-                            type="range"
-                            min="0"
-                            max="100"
-                            step="10"
-                            value="${initialFlowSettings.labels}"
-                        >
-                        <span class="process-explorer-slider-bottom">0%</span>
+                    <div class="process-map-label-toggle" role="group" aria-label="フロー図ラベル表示">
+                        <button id="process-map-label-mode-count" type="button" class="process-map-label-toggle-button is-active" aria-pressed="true">件数</button>
+                        <button id="process-map-label-mode-duration" type="button" class="process-map-label-toggle-button" aria-pressed="false">平均所要時間</button>
                     </div>
-                    <p id="process-map-labels-meta" class="process-explorer-meta"></p>
+                    <p id="process-map-label-mode-meta" class="process-explorer-meta">表示中: 件数</p>
                 </section>
                 ${renderProcessRuleLegend()}
                 ${renderProcessHeatLegend()}
@@ -4500,19 +4882,19 @@ function renderPatternChart(analysis, runId, impact = null) {
         <section class="variant-panel">
             <div class="result-header variant-panel-header">
                 <div>
-                    <h3>Variant Analysis</h3>
-                    <p class="result-meta">Variant を検索・並び替えしながら表示できます。クリックすると対象 Variant のケースだけでフロー図を更新します。</p>
+                    <h3>Pattern / Variant 一覧</h3>
+                    <p class="result-meta">件数の多いルートを一覧で確認できます。行クリックでフロー図をそのルートに切り替え、詳細ボタンで個別ページへ移動できます。</p>
                 </div>
                 <button id="variant-reset-button" type="button" class="ghost-link process-explorer-button">全体表示</button>
             </div>
             <div class="variant-panel-summary">
                 <article id="variant-coverage-meta" class="variant-coverage-card">
-                    <span class="variant-coverage-label">Coverage</span>
+                    <span class="variant-coverage-label">上位カバー率</span>
                     <strong class="variant-coverage-value">計算中...</strong>
                 </article>
                 <article class="variant-selection-card">
                     <p id="variant-selection-title" class="variant-selection-title">全体表示中</p>
-                    <p id="variant-selection-meta" class="panel-note">Variant を選択すると、その Variant に属するケースだけでフロー図を再描画します。</p>
+                    <p id="variant-selection-meta" class="panel-note">Pattern / Variant を選択すると、そのルートに属するケースだけでフロー図を再描画します。</p>
                     <p id="variant-selection-sequence" class="variant-selection-sequence">現在は全ケースを使ったフロー図を表示しています。</p>
                     <div id="variant-selection-diff"></div>
                 </article>
@@ -4520,7 +4902,7 @@ function renderPatternChart(analysis, runId, impact = null) {
             <div class="variant-controls">
                 <label class="field">
                     <span>検索</span>
-                    <input id="variant-search-input" type="search" placeholder="Variant名 / activity名 で検索">
+                    <input id="variant-search-input" type="search" placeholder="Pattern名 / Activity名 で検索">
                 </label>
                 <label class="field">
                     <span>並び順</span>
@@ -4528,7 +4910,7 @@ function renderPatternChart(analysis, runId, impact = null) {
                         <option value="count">件数順</option>
                         <option value="ratio">比率順</option>
                         <option value="avg_case_duration_sec">平均所要時間順</option>
-                        <option value="activity_count">activity数順</option>
+                        <option value="activity_count">アクティビティ数順</option>
                     </select>
                 </label>
                 <label class="field">
@@ -4537,58 +4919,28 @@ function renderPatternChart(analysis, runId, impact = null) {
                         <option value="10">Top 10</option>
                         <option value="20">Top 20</option>
                         <option value="50">Top 50</option>
-                        <option value="all">All</option>
+                        <option value="100">Top 100</option>
+                        <option value="all">すべて</option>
                     </select>
                 </label>
             </div>
             <p id="variant-results-meta" class="panel-note">読み込み中...</p>
-            <div id="variant-list" class="variant-list"></div>
-        </section>
-        <section class="bottleneck-panel">
-            <div class="result-header variant-panel-header">
-                <div>
-                    <h3>Bottleneck Analysis</h3>
-                    <p class="result-meta">Top 5 waits ranked by average time to the next event.</p>
+            <div class="variant-list-table">
+                <div class="variant-list-head" aria-hidden="true">
+                    <span>順位</span>
+                    <span>Pattern / Variant</span>
+                    <span>件数</span>
+                    <span>比率</span>
+                    <span>平均所要時間</span>
+                    <span>ルート</span>
                 </div>
+                <div id="variant-list" class="variant-list"></div>
             </div>
-            <div class="bottleneck-grid">
-                <article class="bottleneck-group">
-                    <div class="bottleneck-group-head">
-                        <h4>Activity Bottlenecks</h4>
-                        <p class="panel-note">Average wait by activity.</p>
-                    </div>
-                    <div id="activity-bottleneck-list" class="bottleneck-list">
-                        <p class="panel-note">Loading...</p>
-                    </div>
-                </article>
-                <article class="bottleneck-group">
-                    <div class="bottleneck-group-head">
-                        <h4>Transition Bottlenecks</h4>
-                        <p class="panel-note">Average wait by transition.</p>
-                    </div>
-                    <div id="transition-bottleneck-list" class="bottleneck-list">
-                        <p class="panel-note">Loading...</p>
-                    </div>
-                </article>
-            </div>
+            <div id="variant-pagination" class="result-pagination variant-pagination hidden"></div>
         </section>
         ${buildImpactSectionHtml(impact)}
-        <section id="transition-case-panel" class="result-panel">
-            <div class="result-header">
-                <div>
-                    <h2>Bottleneck Case Drilldown</h2>
-                    <p class="result-meta">Activity または Transition のボトルネックを選択すると、時間の長いケースを表示します。</p>
-                </div>
-            </div>
-            <p class="empty-state">Activity または Transition のボトルネックを選択すると、時間の長いケースを表示します。</p>
-        </section>
-        <section id="case-trace-panel" class="result-panel">
-            <div class="result-header">
-                <div>
-                    <h2>Case ID 検索 / ケース追跡</h2>
-                    <p class="result-meta">run 全体から Case ID を検索し、通過イベントと待ち時間を確認します。</p>
-                </div>
-            </div>
+        <details id="case-trace-panel" class="result-panel">
+            <summary>Case ID 検索 / ケース追跡</summary>
             <form id="case-trace-form" class="case-trace-form">
                 <input
                     id="case-trace-input"
@@ -4602,9 +4954,9 @@ function renderPatternChart(analysis, runId, impact = null) {
                 <button type="submit" class="detail-link process-explorer-button process-explorer-button--primary">検索</button>
             </form>
             <div id="case-trace-result" class="case-trace-result">
-                <p class="empty-state">Case ID を入力すると、ケースの通過順序と待ち時間を表示します。</p>
+                <p class="empty-state">Case ID を入力すると、ケースの通過順序と各工程の所要時間を表示します。</p>
             </div>
-        </section>
+        </details>
     `;
     return initializePatternFlowExplorer(runId, impact);
 }
@@ -4671,6 +5023,11 @@ async function renderDetailPage() {
                 });
             };
         }
+        if (aiInsightsButton) {
+            aiInsightsButton.onclick = () => {
+                void syncAiInsightsPanel(runId, analysis.analysis_name, { forceRefresh: true });
+            };
+        }
 
         const renderAnalysisPage = async (rowOffset) => {
             const currentVersion = detailRequestVersion + 1;
@@ -4690,7 +5047,16 @@ async function renderDetailPage() {
                 }
 
                 renderSummary(pageData, pageAnalysis);
-                renderResult(pageAnalysis, runId, renderAnalysisPage);
+                if (analysisKey === "pattern") {
+                    resultPanel.className = "result-panel hidden";
+                    resultPanel.innerHTML = "";
+                } else {
+                    renderResult(pageAnalysis, runId, renderAnalysisPage);
+                }
+                syncDetailExportPanel(pageAnalysis.analysis_name, {
+                    filters: activeDetailFilters,
+                });
+                await syncAiInsightsPanel(runId, pageAnalysis.analysis_name);
                 hideStatus();
             } catch (error) {
                 if (currentVersion !== detailRequestVersion) {
@@ -4706,7 +5072,16 @@ async function renderDetailPage() {
         detailPageCopy.textContent = "指定した分析実行の全件結果を表示しています。";
         renderSummary(detailData, analysis);
         await renderChart(analysis, runId, detailData);
-        renderResult(analysis, runId, renderAnalysisPage);
+        if (analysisKey === "pattern") {
+            resultPanel.className = "result-panel hidden";
+            resultPanel.innerHTML = "";
+        } else {
+            renderResult(analysis, runId, renderAnalysisPage);
+        }
+        syncDetailExportPanel(analysis.analysis_name, {
+            filters: activeDetailFilters,
+        });
+        await syncAiInsightsPanel(runId, analysis.analysis_name);
         hideStatus();
     } catch (error) {
         summaryPanel.className = "summary-panel hidden";
@@ -4717,3 +5092,10 @@ async function renderDetailPage() {
 }
 
 void renderDetailPage();
+
+
+
+
+
+
+

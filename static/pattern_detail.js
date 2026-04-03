@@ -8,14 +8,10 @@ const casePanel = document.getElementById("pattern-case-panel");
 const pageTitle = document.getElementById("pattern-page-title");
 const pageCopy = document.getElementById("pattern-page-copy");
 let selectedTransitionKey = "";
-let currentPatternDetail = null;
 let currentRunId = "";
 let drilldownRows = [];
 let drilldownErrorMessage = "";
 
-// -----------------------------------------------------------------------------
-// Shared utilities
-// -----------------------------------------------------------------------------
 const sharedUi = window.ProcessMiningShared;
 const {
     buildTable,
@@ -31,9 +27,6 @@ const {
 const setStatus = (message, type = "info") => sharedUi.setStatus(statusPanel, message, type);
 const hideStatus = () => sharedUi.hideStatus(statusPanel);
 
-// -----------------------------------------------------------------------------
-// Pattern detail API helpers
-// -----------------------------------------------------------------------------
 function buildPatternTransitionCasesApiUrl(runId, fromActivity, toActivity, limit = 20) {
     const params = new URLSearchParams({
         from_activity: String(fromActivity || ""),
@@ -48,7 +41,7 @@ function buildPatternTransitionCasesApiUrl(runId, fromActivity, toActivity, limi
 function loadPatternTransitionCases(runId, fromActivity, toActivity, limit = 20) {
     return fetchJson(
         buildPatternTransitionCasesApiUrl(runId, fromActivity, toActivity, limit),
-        "Transition cases could not be loaded."
+        "遷移ケース詳細の取得に失敗しました。",
     );
 }
 
@@ -59,13 +52,10 @@ function buildPatternDetailApiUrl(runId) {
 function loadPatternDetail(runId) {
     return fetchJson(
         buildPatternDetailApiUrl(runId),
-        "処理順パターン詳細の取得に失敗しました。"
+        "処理順パターン詳細の取得に失敗しました。",
     );
 }
 
-// -----------------------------------------------------------------------------
-// Transition selection helpers
-// -----------------------------------------------------------------------------
 function getStepMetrics(detail) {
     return Array.isArray(detail?.step_metrics) ? detail.step_metrics : [];
 }
@@ -118,11 +108,11 @@ function buildStepMetricRowsHtml(stepMetrics) {
                         <th>順番</th>
                         <th>遷移</th>
                         <th>ケース数</th>
-                        <th>平均待ち時間(分)</th>
+                        <th>平均所要時間(分)</th>
                         <th>中央値(分)</th>
                         <th>最小(分)</th>
                         <th>最大(分)</th>
-                        <th>待ち時間比率(%)</th>
+                        <th>時間シェア(%)</th>
                     </tr>
                 </thead>
                 <tbody>${tableRowsHtml}</tbody>
@@ -131,7 +121,6 @@ function buildStepMetricRowsHtml(stepMetrics) {
     `;
 }
 
-// Keep bar and table selection in sync through a single transition key state.
 async function selectTransition(detail, nextTransitionKey) {
     const resolvedTransitionKey = String(nextTransitionKey || "");
     selectedTransitionKey = selectedTransitionKey === resolvedTransitionKey ? "" : resolvedTransitionKey;
@@ -166,22 +155,19 @@ function bindTransitionSelection(detail) {
     });
 }
 
-// -----------------------------------------------------------------------------
-// Pattern detail panel renderers
-// -----------------------------------------------------------------------------
 function renderSummary(detail) {
     const bottleneckLabel = detail.bottleneck_transition
         ? detail.bottleneck_transition.transition_label
-        : "算出なし";
+        : "該当なし";
 
     summaryPanel.className = "summary-panel";
     summaryPanel.innerHTML = `
         <article class="summary-card">
-            <span class="summary-label">入力ファイル</span>
+            <span class="summary-label">元ファイル</span>
             <strong>${escapeHtml(detail.source_file_name)}</strong>
         </article>
         <article class="summary-card">
-            <span class="summary-label">ケース数 / 構成比</span>
+            <span class="summary-label">ケース数 / 比率</span>
             <strong>${escapeHtml(detail.case_count)} / ${escapeHtml(formatNumber(detail.case_ratio_pct))}%</strong>
         </article>
         <article class="summary-card">
@@ -213,8 +199,8 @@ function renderStepPanel(detail) {
     stepPanel.innerHTML = `
         <div class="result-header">
             <div>
-                <h2>遷移別の待ち時間</h2>
-                <p class="result-meta">行クリックでも下部のケース一覧を切り替えられます。</p>
+                <h2>遷移ごとの所要時間</h2>
+                <p class="result-meta">同一パターン内で各遷移のケース統計を比較します。</p>
             </div>
         </div>
         ${buildStepMetricRowsHtml(getStepMetrics(detail))}
@@ -224,7 +210,7 @@ function renderStepPanel(detail) {
 function renderCasePanel(detail) {
     const caseRows = detail.case_examples.map((row) => ({
         "ケースID": row.case_id,
-        "総所要時間(分)": formatNumber(row.case_total_duration_min),
+        "ケース総時間(分)": formatNumber(row.case_total_duration_min),
         "開始時刻": formatDateTime(row.start_time),
         "終了時刻": formatDateTime(row.end_time),
     }));
@@ -249,18 +235,18 @@ function renderBottleneckPanel(detail) {
     const calloutHtml = bottleneck
         ? `
             <div class="bottleneck-callout">
-                <strong>Top bottleneck: ${escapeHtml(bottleneck.transition_label)}</strong>
+                <strong>最大ボトルネック: ${escapeHtml(bottleneck.transition_label)}</strong>
                 <p class="panel-note">
-                    Avg ${escapeHtml(formatNumber(bottleneck.avg_duration_min))} min /
-                    Median ${escapeHtml(formatNumber(bottleneck.median_duration_min))} min /
-                    Max ${escapeHtml(formatNumber(bottleneck.max_duration_min))} min /
-                    Share ${escapeHtml(formatNumber(bottleneck.wait_share_pct))}%
+                    平均 ${escapeHtml(formatNumber(bottleneck.avg_duration_min))} 分 /
+                    中央 ${escapeHtml(formatNumber(bottleneck.median_duration_min))} 分 /
+                    最大 ${escapeHtml(formatNumber(bottleneck.max_duration_min))} 分 /
+                    シェア ${escapeHtml(formatNumber(bottleneck.wait_share_pct))}%
                 </p>
             </div>
         `
         : `
             <div class="bottleneck-callout">
-                <strong>No bottleneck transition available.</strong>
+                <strong>ボトルネック遷移は見つかりませんでした。</strong>
             </div>
         `;
 
@@ -302,8 +288,8 @@ function renderBottleneckPanel(detail) {
     bottleneckPanel.innerHTML = `
         <div class="result-header">
             <div>
-                <h2>Bottleneck Analysis</h2>
-                <p class="result-meta">遷移バーをクリックすると、時間の長いケースを下部に表示します。</p>
+                <h2>ボトルネック分析</h2>
+                <p class="result-meta">遷移バーをクリックすると、時間が長いケース例を下に表示します。</p>
             </div>
         </div>
         <p class="panel-note">${escapeHtml(detail.pattern)}</p>
@@ -322,11 +308,11 @@ async function renderDrilldownPanel(detail) {
         drilldownPanel.innerHTML = `
             <div class="result-header">
                 <div>
-                    <h2>Transition Case Drilldown</h2>
-                    <p class="result-meta">遷移を選択すると、時間の長いケースを表示します。</p>
+                    <h2>遷移ケース詳細</h2>
+                    <p class="result-meta">遷移を選択すると、所要時間が長いケースを表示します。</p>
                 </div>
             </div>
-            <p class="empty-state">遷移を選択すると、時間の長いケースを表示します。</p>
+            <p class="empty-state">上の遷移バーまたは表を選択してください。</p>
         `;
         return;
     }
@@ -339,7 +325,7 @@ async function renderDrilldownPanel(detail) {
     drilldownPanel.innerHTML = `
         <div class="result-header">
             <div>
-                <h2>Transition Case Drilldown</h2>
+                <h2>遷移ケース詳細</h2>
                 <p class="result-meta">${escapeHtml(transitionLabel)}</p>
             </div>
         </div>
@@ -364,7 +350,7 @@ async function renderDrilldownPanel(detail) {
         drilldownPanel.innerHTML = `
             <div class="result-header">
                 <div>
-                    <h2>Transition Case Drilldown</h2>
+                    <h2>遷移ケース詳細</h2>
                     <p class="result-meta">${escapeHtml(transitionLabel)}</p>
                 </div>
             </div>
@@ -377,39 +363,35 @@ async function renderDrilldownPanel(detail) {
         drilldownPanel.innerHTML = `
             <div class="result-header">
                 <div>
-                    <h2>Transition Case Drilldown</h2>
+                    <h2>遷移ケース詳細</h2>
                     <p class="result-meta">${escapeHtml(transitionLabel)}</p>
                 </div>
             </div>
-            <p class="panel-note">上位 20 件を表示します。</p>
+            <p class="panel-note">上位 20 件を対象に表示します。</p>
             <p class="empty-state">該当するケースはありません。</p>
         `;
         return;
     }
 
     const rows = drilldownRows.map((row) => ({
-        case_id: row.case_id,
-        duration_text: row.duration_text,
-        duration_sec: formatDurationSeconds(row.duration_sec),
-        from_time: formatDateTime(row.from_time),
-        to_time: formatDateTime(row.to_time),
+        "ケースID": row.case_id,
+        "所要時間": row.duration_text,
+        "所要時間(sec)": formatDurationSeconds(row.duration_sec),
+        "開始時刻": formatDateTime(row.from_time),
+        "終了時刻": formatDateTime(row.to_time),
     }));
 
     drilldownPanel.innerHTML = `
         <div class="result-header">
             <div>
-                <h2>Transition Case Drilldown</h2>
+                <h2>遷移ケース詳細</h2>
                 <p class="result-meta">${escapeHtml(transitionLabel)}</p>
             </div>
         </div>
-        <p class="panel-note">${escapeHtml(drilldownRows.length)} 件を表示しています。duration 降順です。</p>
+        <p class="panel-note">${escapeHtml(drilldownRows.length)} 件を表示しています。所要時間の長い順です。</p>
         ${buildTable(rows)}
     `;
 }
-
-// -----------------------------------------------------------------------------
-// Page bootstrapping
-// -----------------------------------------------------------------------------
 
 async function renderPatternDetailPage() {
     const latestResult = loadLatestResult();
@@ -417,7 +399,7 @@ async function renderPatternDetailPage() {
     currentRunId = runId;
 
     if (!runId) {
-        setStatus("分析結果が見つかりません。TOP 画面で再分析してください。", "error");
+        setStatus("分析結果が見つかりません。TOP 画面で分析を実行してから詳細ページを開いてください。", "error");
         return;
     }
 
@@ -431,11 +413,17 @@ async function renderPatternDetailPage() {
     try {
         const detail = await loadPatternDetail(runId);
 
-        document.title = `${detail.analysis_name} 詳細 | Process Mining Workbench`;
-        pageTitle.textContent = `処理順パターン ${patternIndex + 1} の詳細`;
-        pageCopy.textContent = "選択したパターンに属するケースだけを抽出し、遷移ごとの待ち時間からボトルネックを確認します。";
+        const patternLabel = detail.pattern || `処理順パターン ${patternIndex + 1}`;
+        const patternMeta = [
+            `Pattern #${patternIndex + 1}`,
+            `${Number(detail.case_count || 0).toLocaleString("ja-JP")} cases`,
+            `${formatNumber(detail.case_ratio_pct)}%`,
+        ].join(" / ");
 
-        currentPatternDetail = detail;
+        document.title = `${patternLabel} | ProcessLens`;
+        pageTitle.textContent = patternLabel;
+        pageCopy.textContent = `${patternMeta}。各遷移の平均所要時間とケース例から、詰まりやすい箇所を確認できます。`;
+
         selectedTransitionKey = detail.bottleneck_transition?.transition_key || "";
         drilldownRows = [];
         drilldownErrorMessage = "";

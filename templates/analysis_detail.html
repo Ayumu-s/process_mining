@@ -23,9 +23,8 @@
             <span class="current">{{ analysis_name }}</span>
         </div>
         <div class="header-right">
-            <a href="/" class="hbtn">Dashboard</a>
-            <a href="/analysis/pattern" class="hbtn">Pattern</a>
-            <button id="detail-export-excel-button" type="button" class="hbtn primary">Excel Export</button>
+            <a href="/" class="hbtn">ダッシュボード</a>
+            <a href="/analysis/pattern" class="hbtn">パターン分析</a>
         </div>
     </header>
 
@@ -43,7 +42,7 @@
                 </a>
                 <a class="nav-item" href="/">
                     <div class="nav-dot gray">BK</div>
-                    TOPへ戻る
+                    ダッシュボードへ戻る
                 </a>
             </div>
             <div class="sidebar-section">
@@ -58,7 +57,7 @@
                 </a>
                 <a class="nav-item{% if analysis_key == 'pattern' %} active{% endif %}" href="/analysis/pattern">
                     <div class="nav-dot violet">PT</div>
-                    処理パターン
+                    処理順パターン分析
                 </a>
             </div>
         </aside>
@@ -69,15 +68,47 @@
                     <div>
                         <p class="eyebrow">ProcessLens Detail</p>
                         <h1 id="detail-page-title">{{ analysis_name }}</h1>
-                        <p id="detail-page-copy" class="hero-copy">分析条件適用後の詳細結果とドリルダウンを表示します。</p>
+                        <p id="detail-page-copy" class="hero-copy">分析条件に応じた詳細結果とドリルダウンを表示します。集計表、補助チャート、ケース単位の深掘りを同じ画面で確認できます。</p>
                     </div>
                     <div class="detail-hero-actions">
-                        <a href="/" class="ghost-link">TOPへ戻る</a>
+                        <a href="/" class="ghost-link">ダッシュボードへ戻る</a>
                     </div>
                 </section>
 
                 <section id="detail-status-panel" class="status-panel hidden"></section>
                 <section id="detail-summary-panel" class="summary-panel hidden"></section>
+
+                <section id="detail-export-panel" class="result-panel">
+                    <div class="result-header">
+                        <div>
+                            <h2 id="detail-export-title">Excelレポート</h2>
+                            <p id="detail-export-meta" class="result-meta">この分析画面に対応する内容だけを出力します。</p>
+                        </div>
+                        <button id="detail-export-excel-button" type="button" class="hbtn primary">この分析をExcel出力</button>
+                    </div>
+                    <div class="detail-export-body">
+                        <p id="detail-export-note" class="panel-note">現在の分析条件を反映した Excel を出力します。</p>
+                        <div id="detail-export-scope" class="detail-export-scope"></div>
+                    </div>
+                </section>
+
+                <section id="ai-insights-section" class="result-panel">
+                    <div class="result-header">
+                        <div>
+                            <h2 id="ai-insights-title">AI解説</h2>
+                            <p id="ai-insights-meta" class="result-meta">分析ごとに生成し、画面を切り替えても同じ条件なら再表示されます。</p>
+                        </div>
+                        <div class="ai-insights-actions">
+                            <span id="ai-insights-state" class="ai-insights-chip">未生成</span>
+                            <button id="ai-insights-btn" type="button" class="hbtn primary" style="white-space:nowrap;">
+                                AI解説を生成
+                            </button>
+                        </div>
+                    </div>
+                    <p id="ai-insights-note" class="panel-note">分析条件ごとに解説を保持します。</p>
+                    <div id="ai-insights-output" class="ai-insights-output hidden"></div>
+                </section>
+
                 <section id="detail-chart-panel" class="result-panel hidden">
                     <div class="result-header">
                         <div>

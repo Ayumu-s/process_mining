@@ -417,8 +417,10 @@ def filter_prepared_df(prepared_df, filter_params=None, filter_column_settings=N
     ]
     if activity_mode in {"include", "exclude"} and activity_values and "activity" in filtered_df.columns:
         activity_mask = filtered_df["activity"].astype(str).str.strip().isin(activity_values)
-        # Phase 1 keeps matching event rows even if a case becomes partial after filtering.
-        filtered_df = filtered_df[activity_mask] if activity_mode == "include" else filtered_df[~activity_mask]
+        # Case-level filtering: keep all events of cases that contain (or don't contain) the target activity.
+        matching_case_ids = filtered_df.loc[activity_mask, "case_id"].unique()
+        case_mask = filtered_df["case_id"].isin(matching_case_ids)
+        filtered_df = filtered_df[case_mask] if activity_mode == "include" else filtered_df[~case_mask]
 
     return filtered_df.copy()
 
@@ -1550,6 +1552,41 @@ def _parse_pattern_steps(row):
     ]
 
 
+def _get_transition_avg_duration_min(row):
+    raw_value = (
+        row.get(TRANSITION_ANALYSIS_CONFIG["display_columns"].get("avg_duration_min", ""))
+        or row.get(FLOW_TRANSITION_AVG_WAIT_COLUMN)
+        or row.get("avg_duration_min")
+    )
+    try:
+        return round(float(raw_value or 0.0), 2)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _build_selected_pattern_prepared_df(prepared_df, selected_pattern_rows):
+    if prepared_df is None or prepared_df.empty or not selected_pattern_rows:
+        return prepared_df.iloc[0:0].copy() if prepared_df is not None else None
+
+    selected_patterns = {
+        str(row.get(FLOW_PATTERN_COLUMN) or "").strip()
+        for row in selected_pattern_rows
+        if str(row.get(FLOW_PATTERN_COLUMN) or "").strip()
+    }
+    if not selected_patterns:
+        return prepared_df.iloc[0:0].copy()
+
+    case_pattern_df = build_case_pattern_table(prepared_df)
+    selected_case_ids = case_pattern_df.loc[
+        case_pattern_df["pattern"].isin(selected_patterns),
+        "case_id",
+    ]
+    if selected_case_ids.empty:
+        return prepared_df.iloc[0:0].copy()
+
+    return prepared_df[prepared_df["case_id"].isin(selected_case_ids)].copy()
+
+
 def _build_flow_graph(pattern_rows, transition_rows=None, frequency_rows=None):
     transition_rows = transition_rows or []
     frequency_rows = frequency_rows or []
@@ -1616,6 +1653,9 @@ def _build_flow_graph(pattern_rows, transition_rows=None, frequency_rows=None):
                     "source": step,
                     "target": next_step,
                     "count": 0,
+                    "avg_duration_min": 0.0,
+                    "avg_duration_sec": 0.0,
+                    "avg_duration_text": "",
                 }
 
             edge_map[edge_key]["count"] += case_count
@@ -1637,9 +1677,16 @@ def _build_flow_graph(pattern_rows, transition_rows=None, frequency_rows=None):
                 "source": source_name,
                 "target": target_name,
                 "count": 0,
+                "avg_duration_min": 0.0,
+                "avg_duration_sec": 0.0,
+                "avg_duration_text": "",
             }
 
         edge_map[edge_key]["count"] = max(edge_map[edge_key]["count"], transition_count)
+        avg_duration_min = _get_transition_avg_duration_min(row)
+        edge_map[edge_key]["avg_duration_min"] = avg_duration_min
+        edge_map[edge_key]["avg_duration_sec"] = round(avg_duration_min * 60, 2)
+        edge_map[edge_key]["avg_duration_text"] = _format_duration_text(avg_duration_min * 60)
 
     nodes = list(node_map.values())
     edges = [
@@ -1680,11 +1727,11 @@ def _filter_flow_graph(nodes, edges, activity_percent=100, connection_percent=10
     total_node_count = len(nodes)
     total_edge_count = len(edges)
 
-    if not total_node_count or not total_edge_count:
+    if not total_node_count:
         return {
             "nodes": [],
             "edges": [],
-            "available_activity_count": total_node_count,
+            "available_activity_count": 0,
             "visible_activity_count": 0,
             "available_connection_count": total_edge_count,
             "visible_connection_count": 0,
@@ -1715,17 +1762,14 @@ def _filter_flow_graph(nodes, edges, activity_percent=100, connection_percent=10
     )
     selected_edges = candidate_edges[:connection_limit]
 
-    visible_node_names = set()
-    for edge in selected_edges:
-        visible_node_names.add(edge["source"])
-        visible_node_names.add(edge["target"])
-
+    # Show all selected nodes regardless of whether they have visible edges.
+    # This prevents the flow from going empty when the slider reduces activity_percent
+    # to the point where selected nodes have no mutual edges.
     visible_nodes = [
         {
             **node,
         }
         for node in selected_nodes
-        if node["name"] in visible_node_names
     ]
     visible_edges = [
         {
@@ -1961,6 +2005,7 @@ def _apply_flow_layout(nodes, edges):
 
 def create_pattern_flow_snapshot(
     pattern_rows,
+    prepared_df=None,
     frequency_rows=None,
     pattern_percent=10,
     pattern_count=None,
@@ -1991,10 +2036,21 @@ def create_pattern_flow_snapshot(
     else:
         used_pattern_count = min(effective_pattern_count, requested_pattern_count)
     selected_pattern_rows = sorted_pattern_rows[:used_pattern_count]
+    selected_frequency_rows = list(frequency_rows or [])
+    selected_transition_rows = []
+
+    if prepared_df is not None:
+        selected_pattern_df = _build_selected_pattern_prepared_df(prepared_df, selected_pattern_rows)
+        if selected_pattern_df is not None and not selected_pattern_df.empty:
+            selected_transition_rows = convert_analysis_result_to_records(
+                create_transition_analysis(selected_pattern_df),
+                TRANSITION_ANALYSIS_CONFIG["display_columns"],
+            )
+
     nodes, edges = _build_flow_graph(
         pattern_rows=selected_pattern_rows,
-        transition_rows=[],
-        frequency_rows=frequency_rows,
+        transition_rows=selected_transition_rows,
+        frequency_rows=selected_frequency_rows,
     )
     filtered_graph = _filter_flow_graph(
         nodes=nodes,
@@ -2040,12 +2096,6 @@ def create_variant_flow_snapshot(
     if filtered_df.empty:
         raise ValueError("Variant was not found.")
 
-    frequency_df = create_frequency_analysis(filtered_df)
-    frequency_rows = convert_analysis_result_to_records(
-        frequency_df,
-        FREQUENCY_ANALYSIS_CONFIG["display_columns"],
-    )
-
     return create_pattern_flow_snapshot(
         pattern_rows=[
             {
@@ -2053,7 +2103,7 @@ def create_variant_flow_snapshot(
                 FLOW_PATTERN_COLUMN: variant_pattern,
             }
         ],
-        frequency_rows=frequency_rows,
+        prepared_df=filtered_df,
         pattern_percent=100,
         pattern_count=1,
         activity_percent=100,
@@ -2107,7 +2157,7 @@ def create_pattern_bottleneck_details(prepared_df, pattern):
             step_metrics_df["wait_share_pct"] = 0.0
 
         step_metrics_df["transition_label"] = (
-            step_metrics_df["activity"] + " 遶翫・" + step_metrics_df["next_activity"]
+            step_metrics_df["activity"] + " → " + step_metrics_df["next_activity"]
         )
         step_metrics = [
             {

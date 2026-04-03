@@ -7,8 +7,12 @@ ANALYSIS_CONFIG = {
         "case_ratio_pct": "ケース比率(%)",
         "avg_case_duration_min": "平均ケース時間(分)",
         "median_case_duration_min": "中央値ケース時間(分)",
+        "std_case_duration_min": "標準偏差ケース時間(分)",
         "min_case_duration_min": "最小ケース時間(分)",
         "max_case_duration_min": "最大ケース時間(分)",
+        "p75_case_duration_min": "75%点ケース時間(分)",
+        "p90_case_duration_min": "90%点ケース時間(分)",
+        "p95_case_duration_min": "95%点ケース時間(分)",
         "pattern": "処理順パターン",
     },
 }
@@ -45,8 +49,12 @@ def create_pattern_analysis(df):
             case_count=("case_id", "count"),
             avg_case_duration_min=("case_total_duration_min", "mean"),
             median_case_duration_min=("case_total_duration_min", "median"),
+            std_case_duration_min=("case_total_duration_min", "std"),
             min_case_duration_min=("case_total_duration_min", "min"),
             max_case_duration_min=("case_total_duration_min", "max"),
+            p75_case_duration_min=("case_total_duration_min", lambda x: x.quantile(0.75)),
+            p90_case_duration_min=("case_total_duration_min", lambda x: x.quantile(0.90)),
+            p95_case_duration_min=("case_total_duration_min", lambda x: x.quantile(0.95)),
         )
         .reset_index()
     )
@@ -59,8 +67,18 @@ def create_pattern_analysis(df):
         "median_case_duration_min",
         "min_case_duration_min",
         "max_case_duration_min",
+        "p75_case_duration_min",
+        "p90_case_duration_min",
+        "p95_case_duration_min",
     ]
     result[numeric_cols] = result[numeric_cols].round(2)
+
+    # 標準偏差はケースが1件のみのパターンで NaN になるため "-" で表示する。
+    result["std_case_duration_min"] = (
+        result["std_case_duration_min"]
+        .round(2)
+        .where(result["std_case_duration_min"].notna(), other="-")
+    )
 
     result = result.sort_values(["case_count", "pattern"], ascending=[False, True]).reset_index(drop=True)
 
@@ -69,8 +87,12 @@ def create_pattern_analysis(df):
         "case_ratio_pct",
         "avg_case_duration_min",
         "median_case_duration_min",
+        "std_case_duration_min",
         "min_case_duration_min",
         "max_case_duration_min",
+        "p75_case_duration_min",
+        "p90_case_duration_min",
+        "p95_case_duration_min",
         "pattern",
     ]
 

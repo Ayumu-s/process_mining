@@ -23,9 +23,9 @@
             <span class="current">イベントログ分析</span>
         </div>
         <div class="header-right">
-            <a href="/" class="hbtn">Dashboard</a>
-            <a href="/analysis/pattern" class="hbtn">Pattern</a>
-            <a href="#analyze-form" class="hbtn primary">New Analysis</a>
+            <a href="/" class="hbtn">ダッシュボード</a>
+            <a href="/analysis/pattern" class="hbtn">パターン分析</a>
+            <a href="#analyze-form" class="hbtn primary">新規分析</a>
         </div>
     </header>
 
@@ -58,7 +58,7 @@
                 </a>
                 <a class="nav-item" href="/analysis/pattern">
                     <div class="nav-dot violet">PT</div>
-                    処理パターン
+                    処理順パターン分析
                 </a>
             </div>
             <div class="sidebar-section">
@@ -79,8 +79,8 @@
                 <div class="page-title-block">
                     <div class="page-title">イベントログをブラウザで分析</div>
                     <div class="page-subtitle">
-                        CSV をアップロードし、列マッピングと分析条件を設定して分析します。
-                        ファイル未選択の場合は <a href="#analyze-form">{{ sample_file_name }}</a> を使います。
+                        CSV をアップロードし、列マッピングと分析条件を設定して結果を確認できます。
+                        ファイル未選択時は <a href="#analyze-form">{{ sample_file_name }}</a> をそのまま使えます。
                     </div>
                 </div>
 
@@ -107,7 +107,7 @@
                     <div class="step-arrow"></div>
                     <div class="step">
                         <div class="step-num">5</div>
-                        実行
+                        分析
                     </div>
                 </div>
 
@@ -116,20 +116,20 @@
                         <div class="section-head">
                             <div class="section-icon si-blue">CSV</div>
                             <div class="section-head-copy">
-                                <div class="section-title">ログ読み込み</div>
-                                <div class="section-desc">CSV ファイルを選択してください</div>
+                                <div class="section-title">CSV 読み込み</div>
+                                <div class="section-desc">分析対象のイベントログ CSV を選択します</div>
                             </div>
                         </div>
                         <div class="section-body">
                             <label class="upload-zone" for="csv-file-input">
                                 <input class="upload-input" type="file" name="csv_file" accept=".csv" id="csv-file-input">
                                 <div class="upload-title">ここに CSV をドロップ、またはクリックして選択</div>
-                                <div class="upload-sub">UTF-8 推奨 / ヘッダー行必須 / サンプルファイル利用可</div>
+                                <div class="upload-sub">UTF-8 推奨 / ヘッダー行あり / サンプルファイルも利用可能</div>
                             </label>
                             <div class="upload-result">
                                 <div class="upload-result-icon">OK</div>
                                 <div id="column-source-note" class="upload-result-copy hint" data-source-file-name="{{ sample_file_name }}">
-                                    現在は <code>{{ sample_file_name }}</code> の内容を基準に表示しています。
+                                    現在は <code>{{ sample_file_name }}</code> の設定例を表示しています。
                                 </div>
                             </div>
                         </div>
@@ -140,25 +140,25 @@
                             <div class="section-icon si-violet">MAP</div>
                             <div class="section-head-copy">
                                 <div class="section-title">列マッピング</div>
-                                <div class="section-desc">各役割に対応する列を指定してください</div>
+                                <div class="section-desc">Case ID / Activity / Timestamp に対応する列を選択します</div>
                             </div>
                         </div>
                         <div class="section-body">
                             <div class="grid-fields">
                                 <label class="field">
-                                    <span>Case ID列</span>
+                                    <span>Case ID 列</span>
                                     <select name="case_id_column" id="case-id-column-select">
                                         <option value="">選択してください</option>
                                     </select>
                                 </label>
                                 <label class="field">
-                                    <span>Activity列</span>
+                                    <span>Activity 列</span>
                                     <select name="activity_column" id="activity-column-select">
                                         <option value="">選択してください</option>
                                     </select>
                                 </label>
                                 <label class="field">
-                                    <span>Timestamp列</span>
+                                    <span>Timestamp 列</span>
                                     <select name="timestamp_column" id="timestamp-column-select">
                                         <option value="">選択してください</option>
                                     </select>
@@ -172,13 +172,13 @@
                             <div class="section-icon si-green">LOG</div>
                             <div class="section-head-copy">
                                 <div class="section-title">ログ診断</div>
-                                <div class="section-desc">品質チェックとログ全体の統計情報を表示します</div>
+                                <div class="section-desc">件数・期間・欠損・重複の状況を先に確認できます</div>
                             </div>
-                            <button type="button" id="run-diagnostics-button" class="hbtn primary">ログ診断実行</button>
+                            <button type="button" id="run-diagnostics-button" class="hbtn primary">ログ診断を実行</button>
                         </div>
                         <div class="section-body">
-                            <p class="section-note">必要な列を選択したあとに実行すると、件数・期間・欠損件数・列サマリーを確認できます。</p>
-                            <p class="section-note">ログ診断は読み込んだログ全体を対象に実行します。分析対象条件の絞り込みは分析実行時に適用されます。</p>
+                            <p class="section-note">分析を始める前に実行すると、件数、期間、欠損件数、重複状況、列サマリーを確認できます。</p>
+                            <p class="section-note">ログ診断は読み込み済みの設定をそのまま使います。条件を変えた後もすぐに再確認できます。</p>
                             <div id="log-diagnostics-panel" class="diagnostics-panel">
                                 <p class="empty-state">ログ診断を実行すると、件数・期間・欠損件数・列サマリーを表示します。</p>
                             </div>
@@ -189,8 +189,8 @@
                         <div class="section-head">
                             <div class="section-icon si-amber">FLT</div>
                             <div class="section-head-copy">
-                                <div class="section-title">分析対象条件</div>
-                                <div class="section-desc">フィルター条件と分析対象を設定してください</div>
+                                <div class="section-title">分析条件</div>
+                                <div class="section-desc">日付範囲と属性条件で対象ケースを絞り込みます</div>
                             </div>
                         </div>
                         <div class="section-body">
@@ -218,7 +218,7 @@
                                         <label class="field">
                                             <span id="filter-value-1-label">値</span>
                                             <select name="filter_value_1" id="filter-value-1-select" disabled>
-                                                <option value="">全て</option>
+                                                <option value="">すべて</option>
                                             </select>
                                         </label>
                                     </div>
@@ -236,7 +236,7 @@
                                         <label class="field">
                                             <span id="filter-value-2-label">値</span>
                                             <select name="filter_value_2" id="filter-value-2-select" disabled>
-                                                <option value="">全て</option>
+                                                <option value="">すべて</option>
                                             </select>
                                         </label>
                                     </div>
@@ -254,14 +254,14 @@
                                         <label class="field">
                                             <span id="filter-value-3-label">値</span>
                                             <select name="filter_value_3" id="filter-value-3-select" disabled>
-                                                <option value="">全て</option>
+                                                <option value="">すべて</option>
                                             </select>
                                         </label>
                                     </div>
                                 </section>
                             </div>
 
-                            <p id="filter-selection-note" class="section-note">開始日・終了日とフィルターごとの対象列と値を設定すると、分析対象を絞り込めます。</p>
+                            <p id="filter-selection-note" class="section-note">フィルターごとに対象列を設定すると、絞り込み値を選択できます。</p>
 
                             <div class="analysis-target-label">分析対象</div>
                             <div class="analysis-targets">
@@ -275,7 +275,7 @@
 
                             <div class="panel-actions">
                                 <button type="submit" id="submit-button" class="run-btn">分析を実行</button>
-                                <p class="run-btn-hint">TOP 画面では各分析の先頭 10 件を表示します。</p>
+                                <p class="run-btn-hint">トップ画面では各分析の先頭 10 件を表示します。</p>
                             </div>
                         </div>
                     </section>
