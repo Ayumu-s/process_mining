@@ -1,6 +1,7 @@
 ﻿from collections import OrderedDict
 from io import BytesIO
 from datetime import datetime, timezone
+import inspect
 import json
 from pathlib import Path
 import unicodedata
@@ -161,6 +162,21 @@ DEFAULT_HEADERS = {
 app = FastAPI(title="Process Mining Workbench")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+# Starlette <0.41: TemplateResponse(name, context)  context must have "request" key
+# Starlette >=0.41: TemplateResponse(request, name, context)
+_STARLETTE_OLD_TEMPLATE_API = (
+    list(inspect.signature(templates.TemplateResponse).parameters.keys())[0] == "name"
+)
+
+
+def _template_response(request: Request, name: str, context: dict):
+    ctx = {"request": request, **context}
+    if _STARLETTE_OLD_TEMPLATE_API:
+        return templates.TemplateResponse(name, ctx)
+    return templates.TemplateResponse(request, name, ctx)
+
+
 RUN_STORE = OrderedDict()
 
 
@@ -2431,7 +2447,7 @@ def index(request: Request):
         include_diagnostics=False,
     )
 
-    return templates.TemplateResponse(
+    return _template_response(
         request,
         "index.html",
         {
@@ -2446,7 +2462,7 @@ def index(request: Request):
 
 @app.get("/analysis/patterns/{pattern_index}")
 def pattern_detail_page(request: Request, pattern_index: int):
-    return templates.TemplateResponse(
+    return _template_response(
         request,
         "pattern_detail.html",
         {
@@ -2463,7 +2479,7 @@ def analysis_detail(request: Request, analysis_key):
     if analysis_key not in analysis_definitions:
         raise HTTPException(status_code=404, detail="Analysis key was not found.")
 
-    return templates.TemplateResponse(
+    return _template_response(
         request,
         "analysis_detail.html",
         {
