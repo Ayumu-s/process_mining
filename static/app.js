@@ -19,6 +19,7 @@ const csvFileInput = document.getElementById("csv-file-input");
 const columnSourceNote = document.getElementById("column-source-note");
 const diagnosticsPanel = document.getElementById("log-diagnostics-panel");
 const diagnosticsButton = document.getElementById("run-diagnostics-button");
+const resetFilterButton = document.getElementById("reset-filter-button");
 const filterSelectionNote = document.getElementById("filter-selection-note");
 const initialProfilePayloadElement = document.getElementById("initial-profile-payload");
 
@@ -972,6 +973,21 @@ filterColumnRefs.forEach((filterRef) => {
 
 diagnosticsButton?.addEventListener("click", () => {
     void runLogDiagnostics();
+});
+
+resetFilterButton?.addEventListener("click", () => {
+    if (analysisDateFromInput) analysisDateFromInput.value = "";
+    if (analysisDateToInput) analysisDateToInput.value = "";
+    filterColumnRefs.forEach((filterRef) => {
+        if (filterRef.columnSelect) filterRef.columnSelect.value = "";
+        replaceSelectOptions(filterRef.valueSelect, [], "", "全て");
+        if (filterRef.valueSelect) filterRef.valueSelect.disabled = true;
+    });
+    if (filterSelectionNote) {
+        filterSelectionNote.textContent = "フィルターごとに対象列を設定すると、絞り込み値を選択できます。";
+    }
+    hideStatus();
+    saveTopPageState();
 });
 
 const latestResult = loadLatestResult();
