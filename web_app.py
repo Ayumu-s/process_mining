@@ -51,7 +51,7 @@ from 共通スクリプト.analysis_service import (
 
 
 BASE_DIR = Path(__file__).resolve().parent
-SAMPLE_FILE = BASE_DIR / "sample_event_log.csv"
+SAMPLE_FILE = BASE_DIR / "process_mining_sample_10000行.csv"
 MAX_STORED_RUNS = 5
 PREVIEW_ROW_COUNT = 10
 PROCESS_FLOW_PATTERN_CAP = 300

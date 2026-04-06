@@ -1837,7 +1837,7 @@ button[type="submit"]:disabled,
 .process-map-node-group.is-dimmed,
 .process-map-edge.is-dimmed,
 .process-map-edge-label.is-dimmed {
-    opacity: 0.12 !important;
+    opacity: 0.25 !important;
 }
 
 /* Click-to-focus interactivity */
@@ -1847,13 +1847,12 @@ button[type="submit"]:disabled,
 }
 
 .process-map-svg.is-focusing .process-map-edge {
-    opacity: 0.03 !important; /* Dimmed further */
-    marker-end: none !important; /* Hide arrows when unfocused */
+    opacity: 0.15 !important;
     transition: opacity 0.3s ease;
 }
 
 .process-map-svg.is-focusing .process-map-edge-label {
-    opacity: 0.03 !important;
+    opacity: 0.15 !important;
     transition: opacity 0.3s ease;
 }
 

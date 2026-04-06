@@ -2553,49 +2553,74 @@ function buildProcessFlowData(patternRows, transitionRows = [], frequencyRows = 
         optimizeLayerBySwaps(layerNodes, edges, nodeLookup);
     }
     
-    // CELONIS STYLE: Extract main spine
-    // Find highest throughput path from top to bottom
-    const mainSpineNodes = new Set();
-    const mainSpineEdges = new Set();
-    
-    if (nodes.length > 0) {
-        // Start from node with layer 0 and highest weight
-        let currentNodes = nodes.filter(n => n.layer === 0).sort((a, b) => b.weight - a.weight);
-        if(currentNodes.length > 0) {
-            let currentNode = currentNodes[0];
-            mainSpineNodes.add(currentNode.name);
-            
-            // Greedily follow the heaviest outgoing edge
-            while (currentNode) {
-                const outgoing = edges.filter(e => e.source === currentNode.name && nodeLookup.get(e.target).layer > currentNode.layer);
-                if (outgoing.length === 0) break;
-                
-                // Sort by weight/count
-                outgoing.sort((a, b) => b.count - a.count);
-                const heaviestEdge = outgoing[0];
-                const nextNodeName = heaviestEdge.target;
-                
-                // Prevent infinite loops just in case
-                if(mainSpineNodes.has(nextNodeName)) break;
-                
-                mainSpineEdges.add(getProcessFlowEdgeKey(heaviestEdge));
-                mainSpineNodes.add(nextNodeName);
-                
-                currentNode = nodeLookup.get(nextNodeName);
-            }
-        }
-    }
-    
-    // Tag nodes and edges
-    nodes.forEach(node => {
-        node.isMainSpine = mainSpineNodes.has(node.name);
-    });
-    
-    edges.forEach(edge => {
-        edge.isMainSpine = mainSpineEdges.has(getProcessFlowEdgeKey(edge));
-    });
+    const { mainSpineNodes, mainSpineEdges } = applyProcessFlowMainSpine(nodes, edges);
 
     return { nodes, edges, mainSpineNodes, mainSpineEdges };
+}
+
+function applyProcessFlowMainSpine(nodes, edges) {
+    const mainSpineNodes = new Set();
+    const mainSpineEdges = new Set();
+
+    nodes.forEach((node) => {
+        node.isMainSpine = false;
+    });
+    edges.forEach((edge) => {
+        edge.isMainSpine = false;
+    });
+
+    if (!nodes.length) {
+        return { mainSpineNodes, mainSpineEdges };
+    }
+
+    const nodeLookup = new Map(nodes.map((node) => [node.name, node]));
+    const startNodes = nodes
+        .filter((node) => node.layer === 0)
+        .sort((left, right) => {
+            if (right.weight !== left.weight) {
+                return right.weight - left.weight;
+            }
+
+            return left.name.localeCompare(right.name, "ja");
+        });
+
+    let currentNode = startNodes[0] || null;
+    while (currentNode && !mainSpineNodes.has(currentNode.name)) {
+        currentNode.isMainSpine = true;
+        mainSpineNodes.add(currentNode.name);
+
+        const outgoing = edges
+            .filter((edge) => {
+                const targetNode = nodeLookup.get(edge.target);
+                return edge.source === currentNode.name && targetNode && targetNode.layer > currentNode.layer;
+            })
+            .sort((left, right) => {
+                if (right.count !== left.count) {
+                    return right.count - left.count;
+                }
+
+                const leftTarget = nodeLookup.get(left.target);
+                const rightTarget = nodeLookup.get(right.target);
+                const leftLayer = leftTarget ? leftTarget.layer : 0;
+                const rightLayer = rightTarget ? rightTarget.layer : 0;
+                if (leftLayer !== rightLayer) {
+                    return leftLayer - rightLayer;
+                }
+
+                return left.target.localeCompare(right.target, "ja");
+            });
+
+        if (!outgoing.length) {
+            break;
+        }
+
+        const selectedEdge = outgoing[0];
+        selectedEdge.isMainSpine = true;
+        mainSpineEdges.add(getProcessFlowEdgeKey(selectedEdge));
+        currentNode = nodeLookup.get(selectedEdge.target) || null;
+    }
+
+    return { mainSpineNodes, mainSpineEdges };
 }
 
 function filterProcessFlowData(sourceNodes, sourceEdges, activityPercent = 100, connectionPercent = 100) {
@@ -2774,7 +2799,7 @@ function buildProcessMapExportSvg() {
     // Reset transform for export to ensure it saves at 100% original size
     const exportWrap = clonedSvg.querySelector("g.viewport-wrap");
     if (exportWrap) {
-        exportWrap.style.transform = "none";
+        exportWrap.removeAttribute("transform");
     }
     
     const viewBox = clonedSvg.getAttribute("viewBox") || "0 0 1200 600";
@@ -4644,9 +4669,6 @@ function attachProcessMapInteractions(viewportElement) {
     let currentPanX = 0;
     let currentPanY = 0;
 
-    // We need a wrapper inside the SVG to apply transforms, or apply to root
-    const rootMatrix = svgElement.createSVGMatrix();
-
     svgElement.style.cursor = "grab";
 
     svgElement.addEventListener("mousedown", (e) => {
@@ -4749,10 +4771,13 @@ function attachProcessMapInteractions(viewportElement) {
     function applyTransform() {
         const gWrap = svgElement.querySelector(".viewport-wrap");
         if (!gWrap) return;
-        
-        const transformString = `translate(${currentPanX}px, ${currentPanY}px) scale(${currentScale})`;
-        gWrap.style.transform = transformString;
-        gWrap.style.transformOrigin = "0 0";
+
+        // Use the SVG transform attribute instead of CSS transform.
+        // CSS transforms on <g> can drop path/marker rendering at certain zoom levels.
+        gWrap.setAttribute(
+            "transform",
+            `translate(${currentPanX} ${currentPanY}) scale(${currentScale})`
+        );
         
         if (zoomIndicator) {
             zoomIndicator.textContent = Math.round(currentScale * 100) + "%";
@@ -5092,10 +5117,6 @@ async function renderDetailPage() {
 }
 
 void renderDetailPage();
-
-
-
-
 
 
 

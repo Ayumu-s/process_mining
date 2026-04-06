@@ -2,12 +2,12 @@ from pathlib import Path
 
 from 共通スクリプト.analysis_service import analyze_event_log
 
-INPUT_FILE = Path("sample_event_log.csv")
+INPUT_FILE = Path("process_mining_sample_10000行.csv")
 OUTPUT_ROOT_DIR = Path("出力ファイル")
 # 入力CSVのヘッダー名をここで合わせます。
 CASE_ID_COLUMN = "case_id"
 ACTIVITY_COLUMN = "activity"
-TIMESTAMP_COLUMN = "start_time"
+TIMESTAMP_COLUMN = "timestamp"
 
 
 def main():
