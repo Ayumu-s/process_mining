@@ -96,11 +96,7 @@
                             aria-controls="setup-accordion-body"
                         >
                             <div class="setup-accordion-copy">
-                                <div class="setup-accordion-title-row">
-                                    <span class="setup-accordion-kicker">SUMMARY</span>
-                                    <h2>分析設定サマリー</h2>
-                                </div>
-                                <p class="setup-accordion-note">ファイル・列マッピング・ログ診断の状況を1行で確認できます。</p>
+                                <h2>分析設定サマリー</h2>
                             </div>
                             <span class="setup-toggle-indicator" aria-hidden="true">▾</span>
                         </button>
@@ -173,31 +169,32 @@
                                     </div>
                                 </section>
 
-                                <details class="setup-card setup-card--full diagnostics-details">
+                                <details class="setup-card setup-card--full diagnostics-details" id="log-diagnostics-section" open>
                                     <summary class="diagnostics-details-summary">
                                         <div class="setup-card-head">
                                             <div class="section-icon si-green">LOG</div>
-                                            <div>
+                                            <div class="section-head-copy">
                                                 <h3>ログ診断</h3>
                                                 <p>件数、期間、欠損、重複の状況を分析前に確認します。</p>
                                             </div>
-                                            <div class="section-head-actions diagnostics-head-actions">
-                                                <label class="diagnostics-export-settings" for="diagnostics-sample-limit-input">
-                                                    <span>Excelサンプル件数</span>
-                                                    <input
-                                                        type="number"
-                                                        id="diagnostics-sample-limit-input"
-                                                        min="1"
-                                                        max="50000"
-                                                        step="1"
-                                                        value="3000"
-                                                    >
-                                                </label>
-                                                <button type="button" id="download-diagnostics-excel-button" class="hbtn">ログ診断をExcel出力</button>
-                                                <button type="button" id="run-diagnostics-button" class="hbtn primary">ログ診断を実行</button>
-                                            </div>
+                                            <span class="setup-toggle-indicator" aria-hidden="true">▾</span>
                                         </div>
                                     </summary>
+                                    <div class="diagnostics-actions">
+                                        <label class="diagnostics-export-settings" for="diagnostics-sample-limit-input">
+                                            <span>Excelサンプル件数</span>
+                                            <input
+                                                type="number"
+                                                id="diagnostics-sample-limit-input"
+                                                min="1"
+                                                max="50000"
+                                                step="1"
+                                                value="3000"
+                                            >
+                                        </label>
+                                        <button type="button" id="download-diagnostics-excel-button" class="hbtn">ログ診断をExcel出力</button>
+                                        <button type="button" id="run-diagnostics-button" class="hbtn primary">ログ診断を実行</button>
+                                    </div>
                                     <div class="setup-card-body">
                                         <p class="section-note">ログ診断は読み込み済み設定をそのまま使用します。条件変更後の再確認にも使えます。</p>
                                         <div id="log-diagnostics-panel" class="diagnostics-panel">

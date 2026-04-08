@@ -19,6 +19,7 @@ const resultPanels = document.getElementById("result-panels");
 const csvFileInput = document.getElementById("csv-file-input");
 const columnSourceNote = document.getElementById("column-source-note");
 const diagnosticsPanel = document.getElementById("log-diagnostics-panel");
+const diagnosticsSection = document.getElementById("log-diagnostics-section");
 const diagnosticsButton = document.getElementById("run-diagnostics-button");
 const diagnosticsExcelButton = document.getElementById("download-diagnostics-excel-button");
 const diagnosticsSampleLimitInput = document.getElementById("diagnostics-sample-limit-input");
@@ -1288,6 +1289,9 @@ async function runLogDiagnostics() {
     const currentVersion = diagnosticRequestVersion + 1;
     diagnosticRequestVersion = currentVersion;
     isRunningDiagnostics = true;
+    if (diagnosticsSection) {
+        diagnosticsSection.open = true;
+    }
     syncSubmitState();
     diagnosticsPanel.innerHTML = '<p class="panel-note">読み込み中...</p>';
     setStatus("ログ診断を実行しています...", "info");

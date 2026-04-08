@@ -2489,7 +2489,7 @@ function renderFrequencyChart(analysis) {
         .slice(0, 5);
     const topFiveTotal = topFiveRows.reduce((sum, row) => sum + (Number(row["イベント件数"]) || 0), 0);
     const otherCount = Math.max(0, (allRows.reduce((sum, row) => sum + (Number(row["イベント件数"]) || 0), 0) - topFiveTotal));
-    const donutPalette = ["#1d4ed8", "#2563eb", "#3b82f6", "#60a5fa", "#93c5fd"];
+    const donutPalette = ["#1e40af", "#2563eb", "#3b82f6", "#60a5fa", "#93c5fd"];
     const donutSegments = [
         ...topFiveRows.map((row, index) => ({
             label: String(row["アクティビティ"] || `Top${index + 1}`),

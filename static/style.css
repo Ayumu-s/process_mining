@@ -1541,21 +1541,21 @@ button[type="submit"]:disabled,
 
 .process-explorer-sidebar {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 14px;
-    padding: 14px;
+    grid-template-columns: 1fr;
+    gap: 10px;
+    padding: 10px;
     border: 1px solid var(--line);
-    border-radius: 12px;
+    border-radius: 10px;
     background: #ffffff;
     align-items: start;
 }
 
 .process-explorer-legend {
     display: grid;
-    gap: 10px;
-    padding: 12px;
+    gap: 8px;
+    padding: 10px;
     border: 1px solid var(--line);
-    border-radius: 12px;
+    border-radius: 10px;
     background: #fbfcfe;
     justify-self: end;
     align-self: start;
@@ -1564,26 +1564,26 @@ button[type="submit"]:disabled,
 
 .process-rule-legend {
     display: grid;
-    gap: 10px;
-    padding: 12px;
+    gap: 8px;
+    padding: 10px;
     border: 1px solid var(--line);
-    border-radius: 12px;
+    border-radius: 10px;
     background: #fbfcfe;
     grid-column: 1 / -1;
 }
 
 .process-rule-legend-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-    gap: 8px;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 6px;
 }
 
 .process-rule-legend-item {
     display: grid;
-    gap: 8px;
-    padding: 10px;
+    gap: 4px;
+    padding: 6px 8px;
     border: 1px solid #e2e8f0;
-    border-radius: 10px;
+    border-radius: 8px;
     background: #ffffff;
     transition: border-color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease;
 }
@@ -1696,7 +1696,7 @@ button[type="submit"]:disabled,
 
 .process-rule-legend-copy strong {
     color: var(--text);
-    font-size: 0.84rem;
+    font-size: 0.72rem;
     line-height: 1.4;
 }
 
@@ -1704,7 +1704,7 @@ button[type="submit"]:disabled,
 .process-rule-legend-note {
     margin: 0;
     color: var(--muted);
-    font-size: 0.76rem;
+    font-size: 0.7rem;
     line-height: 1.5;
 }
 
@@ -1730,7 +1730,7 @@ button[type="submit"]:disabled,
     display: grid;
     grid-template-columns: 1fr;
     justify-items: end;
-    gap: 6px;
+    gap: 4px;
 }
 
 .process-explorer-legend-boundary {
@@ -1744,7 +1744,7 @@ button[type="submit"]:disabled,
 .process-explorer-legend-swatches {
     display: grid;
     grid-template-columns: 1fr;
-    gap: 7px;
+    gap: 4px;
     width: 92px;
     justify-self: end;
 }
@@ -1822,7 +1822,7 @@ button[type="submit"]:disabled,
 
 .process-explorer-control {
     display: grid;
-    gap: 8px;
+    gap: 6px;
     align-content: start;
 }
 
@@ -3419,7 +3419,7 @@ tbody tr:hover td {
     }
 
     .dashboard-grid {
-        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     }
 
     .process-map-viewport {
@@ -4483,7 +4483,7 @@ tbody tr:hover td {
 }
 
 .app-shell--detail .dashboard-grid {
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .app-shell--detail .summary-card {
@@ -4522,6 +4522,14 @@ tbody tr:hover td {
 
 .diagnostics-details > .setup-card-body {
     padding: 0 18px 22px;
+}
+
+.diagnostics-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 18px 0;
 }
 
 .diagnostics-details .section-head-actions {
