@@ -1223,6 +1223,12 @@ button[type="submit"]:disabled,
     line-height: 1.5;
 }
 
+.grid-auto {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+}
+
 .dashboard-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -3422,6 +3428,10 @@ tbody tr:hover td {
         grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     }
 
+    .app-shell--detail .grid-auto {
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)) !important;
+    }
+
     .process-map-viewport {
         height: clamp(340px, 52vh, 430px);
         min-height: 340px;
@@ -4482,6 +4492,10 @@ tbody tr:hover td {
     padding: 16px;
 }
 
+.app-shell--detail .grid-auto {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)) !important;
+}
+
 .app-shell--detail .dashboard-grid {
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
@@ -4590,7 +4604,7 @@ tbody tr:hover td {
     background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
 }
 
-.detail-donut-card {
+.detail-pie-card {
     display: grid;
     justify-items: center;
     gap: 14px;
@@ -4600,51 +4614,85 @@ tbody tr:hover td {
     background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
 }
 
-.detail-donut-svg {
-    display: block;
+.detail-pie-chart {
+    position: relative;
     width: 180px;
     height: 180px;
+    border-radius: 50%;
 }
 
-.detail-donut-center {
+.detail-pie-hole {
+    position: absolute;
+    top: 50%;
+    left: 50%;
     display: grid;
     gap: 4px;
+    width: 104px;
+    height: 104px;
+    padding: 12px;
+    border-radius: 50%;
+    background: #ffffff;
     text-align: center;
+    place-content: center;
+    transform: translate(-50%, -50%);
+    box-shadow: inset 0 0 0 1px rgba(226, 232, 240, 0.9);
 }
 
-.detail-donut-center span,
-.detail-donut-center small {
+.detail-pie-center-label,
+.detail-pie-center-meta {
     color: var(--muted);
+    font-size: 0.72rem;
+    line-height: 1.4;
 }
 
-.detail-donut-center strong {
+.detail-pie-center-value {
     color: var(--text);
     font-size: 1.5rem;
+    line-height: 1.1;
 }
 
-.detail-donut-legend {
+.detail-pie-legend {
     width: 100%;
     display: grid;
     gap: 8px;
 }
 
-.detail-donut-legend-item {
-    display: flex;
+.detail-pie-legend-item {
+    display: grid;
+    grid-template-columns: 10px minmax(0, 1fr) auto;
     align-items: center;
     gap: 8px;
     color: var(--text);
-    font-size: 0.88rem;
+    font-size: 0.84rem;
 }
 
-.detail-donut-dot {
+.detail-pie-dot {
     width: 10px;
     height: 10px;
     border-radius: 999px;
-    flex: 0 0 auto;
+}
+
+.detail-pie-legend-label {
+    min-width: 0;
+}
+
+.detail-pie-legend-value {
+    color: var(--muted-strong);
+    font-variant-numeric: tabular-nums;
 }
 
 .summary-panel--pattern-detail {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.summary-panel--pattern-detail > .grid-auto,
+.summary-panel--pattern-detail > .summary-details-extra {
+    grid-column: 1 / -1;
+    width: 100%;
+}
+
+.summary-panel--pattern-detail > .grid-auto {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .summary-card--wide {

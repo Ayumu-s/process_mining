@@ -1160,8 +1160,8 @@ function buildVariantCoverageHtml(coverage) {
         return '<p class="panel-note">カバー率を計算できませんでした。</p>';
     }
 
-    const coveredCount = Number(coverage.covered_case_count || 0);
-    const totalCount = Number(coverage.total_case_count || 0);
+    const totalCount = Math.max(0, Number(coverage.total_case_count || 0));
+    const coveredCount = Math.min(totalCount, Math.max(0, Number(coverage.covered_case_count || 0)));
     const otherCount = Math.max(0, totalCount - coveredCount);
     const coverageRatio = totalCount > 0 ? coveredCount / totalCount : 0;
     const coveragePct = Math.round(coverageRatio * 100);
@@ -1210,6 +1210,7 @@ function buildVariantSearchText(variant) {
 
 function buildVariantCoveragePayload(variantItems, totalCaseCount, displayLimit = 10, options = {}) {
     const isAllDisplay = Boolean(options.isAllDisplay);
+    const safeTotalCaseCount = Math.max(0, Number(totalCaseCount || 0));
     const safeLimit = isAllDisplay
         ? variantItems.length
         : Math.max(0, Number(displayLimit) || 0);
@@ -1219,18 +1220,19 @@ function buildVariantCoveragePayload(variantItems, totalCaseCount, displayLimit 
     const displayLabel = isAllDisplay
         ? "全件カバー率"
         : `上位${Number(coveredItems.length || 0).toLocaleString("ja-JP")}件カバー率`;
-    const coveredCaseCount = coveredItems.reduce(
+    const coveredCaseCountRaw = coveredItems.reduce(
         (sum, variant) => sum + Number(variant.count || 0),
         0,
     );
+    const coveredCaseCount = Math.min(safeTotalCaseCount, Math.max(0, coveredCaseCountRaw));
 
     return {
         display_label: displayLabel,
         displayed_variant_count: coveredItems.length,
         covered_case_count: coveredCaseCount,
-        total_case_count: Number(totalCaseCount || 0),
-        ratio: totalCaseCount
-            ? coveredCaseCount / Number(totalCaseCount)
+        total_case_count: safeTotalCaseCount,
+        ratio: safeTotalCaseCount
+            ? coveredCaseCount / safeTotalCaseCount
             : 0,
     };
 }
@@ -2399,52 +2401,48 @@ function buildChartLimitButtons(activeLimit, supportedLimits) {
 }
 
 function buildDonutChartMarkup(segments, total, centerTitle, centerValue) {
-    const radius = 72;
-    const circumference = 2 * Math.PI * radius;
-    let offset = 0;
+    const normalizedSegments = segments
+        .map((segment) => ({
+            ...segment,
+            ratio: Math.max(0, Number(segment.ratio || 0)),
+        }))
+        .filter((segment) => segment.ratio > 0);
+    const totalRatio = normalizedSegments.reduce((sum, segment) => sum + segment.ratio, 0);
+    let currentAngle = 0;
+    const gradientStops = [];
 
-    const segmentRings = segments.map((segment) => {
-        const ratio = Math.max(0, Math.min(1, Number(segment.ratio || 0)));
-        const dashLength = circumference * ratio;
-        const dashArray = `${dashLength} ${Math.max(0, circumference - dashLength)}`;
-        const ringMarkup = `
-            <circle
-                class="detail-donut-segment"
-                cx="100"
-                cy="100"
-                r="${radius}"
-                fill="none"
-                stroke="${escapeHtml(segment.color)}"
-                stroke-width="18"
-                stroke-linecap="round"
-                stroke-dasharray="${dashArray}"
-                stroke-dashoffset="${-offset}"
-            >
-                <title>${escapeHtml(segment.tooltip)}</title>
-            </circle>
-        `;
-        offset += dashLength;
-        return ringMarkup;
-    }).join("");
+    normalizedSegments.forEach((segment) => {
+        const normalizedRatio = totalRatio > 0 ? segment.ratio / totalRatio : 0;
+        const startAngle = currentAngle;
+        const endAngle = currentAngle + normalizedRatio * 360;
+        gradientStops.push(`${segment.color} ${startAngle.toFixed(2)}deg ${endAngle.toFixed(2)}deg`);
+        currentAngle = endAngle;
+    });
+
+    const gradient = gradientStops.length
+        ? `conic-gradient(${gradientStops.join(", ")})`
+        : "conic-gradient(#e2e8f0 0deg 360deg)";
 
     return `
-        <div class="detail-donut-card">
-            <svg viewBox="0 0 200 200" class="detail-donut-svg" role="img" aria-label="${escapeHtml(centerTitle)}">
-                <circle cx="100" cy="100" r="${radius}" fill="none" stroke="#e2e8f0" stroke-width="18"></circle>
-                ${segmentRings}
-            </svg>
-            <div class="detail-donut-center">
-                <span>${escapeHtml(centerTitle)}</span>
-                <strong>${escapeHtml(centerValue)}</strong>
-                <small>全 ${escapeHtml(Number(total || 0).toLocaleString("ja-JP"))} 件</small>
+        <div class="detail-pie-card">
+            <div class="detail-pie-chart" role="img" aria-label="${escapeHtml(centerTitle)}" style="background:${escapeHtml(gradient)}">
+                <div class="detail-pie-hole">
+                    <span class="detail-pie-center-label">${escapeHtml(centerTitle)}</span>
+                    <strong class="detail-pie-center-value">${escapeHtml(centerValue)}</strong>
+                    <small class="detail-pie-center-meta">全 ${escapeHtml(Number(total || 0).toLocaleString("ja-JP"))} 件</small>
+                </div>
             </div>
-            <div class="detail-donut-legend">
-                ${segments.map((segment) => `
-                    <div class="detail-donut-legend-item">
-                        <span class="detail-donut-dot" style="background:${escapeHtml(segment.color)}"></span>
-                        <span>${escapeHtml(segment.label)}</span>
-                    </div>
-                `).join("")}
+            <div class="detail-pie-legend">
+                ${normalizedSegments.map((segment) => {
+                    const normalizedRatio = totalRatio > 0 ? segment.ratio / totalRatio : 0;
+                    return `
+                        <div class="detail-pie-legend-item" title="${escapeHtml(segment.tooltip || "")}">
+                            <span class="detail-pie-dot" style="background:${escapeHtml(segment.color)}"></span>
+                            <span class="detail-pie-legend-label">${escapeHtml(segment.label)}</span>
+                            <span class="detail-pie-legend-value">${escapeHtml((normalizedRatio * 100).toFixed(1))}%</span>
+                        </div>
+                    `;
+                }).join("")}
             </div>
         </div>
     `;
@@ -3873,6 +3871,7 @@ async function initializePatternFlowExplorer(runId, impact = null) {
     let caseTraceTransitions = new Set();
     let variants = [];
     let variantCoverage = null;
+    let variantCoverageTotalCaseCount = 0;
     let variantErrorMessage = "";
     let variantViewState = getDefaultVariantViewState();
     let variantDiffState = buildVariantDiffState([], null);
@@ -4788,7 +4787,8 @@ async function initializePatternFlowExplorer(runId, impact = null) {
                 caseCount: Number(variantPayload.filtered_case_count || 0),
                 eventCount: Number(variantPayload.filtered_event_count || 0),
             };
-            variantCoverage = buildVariantCoveragePayload(variants, filteredCounts.caseCount, 10);
+            variantCoverageTotalCaseCount = filteredCounts.caseCount;
+            variantCoverage = buildVariantCoveragePayload(variants, variantCoverageTotalCaseCount, 10);
             renderFilterSummary();
 
             if (selectedVariantId !== null && !variants.some((variant) => Number(variant.variant_id) === Number(selectedVariantId))) {
@@ -4804,6 +4804,7 @@ async function initializePatternFlowExplorer(runId, impact = null) {
             variantErrorMessage = error.message;
             variants = [];
             variantCoverage = null;
+            variantCoverageTotalCaseCount = 0;
             filteredCounts = {
                 caseCount: 0,
                 eventCount: 0,
@@ -4876,7 +4877,7 @@ async function initializePatternFlowExplorer(runId, impact = null) {
         activitiesSlider.disabled = selectedVariantId !== null;
         variantCoverage = buildVariantCoveragePayload(
             variantPageState.limitedVariants,
-            filteredCounts.caseCount,
+            variantCoverageTotalCaseCount,
             variantPageState.maxVisibleCount,
             { isAllDisplay: variantPageState.isAllDisplay }
         );
