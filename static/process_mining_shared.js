@@ -94,7 +94,7 @@
         } catch (error) {
             clearTimeout(timeoutId);
             if (error.name === "AbortError") {
-                throw new Error("サーバーからの応答がタイムアウトしました。データ量を絞らして再試行してください。");
+                throw new Error("サーバーからの応答がタイムアウトしました。データ量を絞って再試行してください。");
             }
             throw error;
         }

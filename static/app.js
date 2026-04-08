@@ -1,6 +1,7 @@
 const PREVIEW_ROW_COUNT = 10;
 const STORAGE_KEY = "processMiningLastResult";
 const TOP_PAGE_STATE_KEY = "processMiningTopPageState";
+const DASHBOARD_SUPPLEMENT_KEY = "processMiningDashboardSupplement";
 const FLOW_SELECTION_STORAGE_KEY = "processMiningFlowSelection";
 const TRANSITION_DRILLDOWN_STORAGE_KEY = "processMiningTransitionDrilldown";
 const FILTER_SLOT_KEYS = ["filter_value_1", "filter_value_2", "filter_value_3"];
@@ -19,9 +20,19 @@ const csvFileInput = document.getElementById("csv-file-input");
 const columnSourceNote = document.getElementById("column-source-note");
 const diagnosticsPanel = document.getElementById("log-diagnostics-panel");
 const diagnosticsButton = document.getElementById("run-diagnostics-button");
+const diagnosticsExcelButton = document.getElementById("download-diagnostics-excel-button");
+const diagnosticsSampleLimitInput = document.getElementById("diagnostics-sample-limit-input");
 const resetFilterButton = document.getElementById("reset-filter-button");
 const filterSelectionNote = document.getElementById("filter-selection-note");
 const initialProfilePayloadElement = document.getElementById("initial-profile-payload");
+const insightPanel = document.getElementById("insight-panel");
+const setupSection = document.getElementById("setup-section");
+const setupToggleButton = document.getElementById("setup-toggle-button");
+const setupSourceTag = document.getElementById("setup-source-tag");
+const setupMappingTag = document.getElementById("setup-mapping-tag");
+const setupVolumeTag = document.getElementById("setup-volume-tag");
+const topExportDiagnosticsButton = document.getElementById("top-export-diagnostics-button");
+const topOpenCsvButton = document.getElementById("top-open-csv-button");
 
 const caseIdColumnSelect = document.getElementById("case-id-column-select");
 const activityColumnSelect = document.getElementById("activity-column-select");
@@ -54,18 +65,22 @@ const filterColumnRefs = [
 ];
 
 const defaultSourceFileName = String(columnSourceNote?.dataset?.sourceFileName || "").trim();
+const DEFAULT_LOG_DIAGNOSTIC_SAMPLE_ROW_LIMIT = 3000;
 
 let isLoadingProfile = false;
 let isAnalyzing = false;
 let isRunningDiagnostics = false;
+let isDownloadingDiagnosticsExcel = false;
 let profileRequestVersion = 0;
 let diagnosticRequestVersion = 0;
+let dashboardSupplementRequestVersion = 0;
 let restoredTopPageState = loadTopPageState();
 let requiresFileReselection = false;
 let currentProfilePayload = mergeProfilePayload(
     loadInitialProfilePayload(),
     restoredTopPageState?.profilePayload,
 );
+let currentDashboardSupplement = loadDashboardSupplement();
 
 function setStatus(message, type = "info") {
     statusPanel.textContent = message;
@@ -84,6 +99,267 @@ function escapeHtml(value) {
         .replaceAll(">", "&gt;")
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;");
+}
+
+function formatNumber(value) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) {
+        return String(value ?? "-");
+    }
+    return numericValue.toLocaleString("ja-JP");
+}
+
+function formatPercent(value, digits = 1) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) {
+        return "-";
+    }
+    return `${numericValue.toFixed(digits)}%`;
+}
+
+function loadDashboardSupplement() {
+    const storedValue = sessionStorage.getItem(DASHBOARD_SUPPLEMENT_KEY);
+    if (!storedValue) {
+        return null;
+    }
+
+    try {
+        return JSON.parse(storedValue);
+    } catch {
+        sessionStorage.removeItem(DASHBOARD_SUPPLEMENT_KEY);
+        return null;
+    }
+}
+
+function saveDashboardSupplement(payload) {
+    currentDashboardSupplement = payload || null;
+    try {
+        if (!payload) {
+            sessionStorage.removeItem(DASHBOARD_SUPPLEMENT_KEY);
+            return;
+        }
+        sessionStorage.setItem(DASHBOARD_SUPPLEMENT_KEY, JSON.stringify(payload));
+    } catch {
+        // Ignore storage failures and keep the current render only.
+    }
+}
+
+function clearDashboardSupplement() {
+    currentDashboardSupplement = null;
+    try {
+        sessionStorage.removeItem(DASHBOARD_SUPPLEMENT_KEY);
+    } catch {
+        // Ignore storage failures and keep the current render only.
+    }
+}
+
+function setSetupSectionOpen(isOpen) {
+    if (!setupSection || !setupToggleButton) {
+        return;
+    }
+
+    setupSection.classList.toggle("is-open", Boolean(isOpen));
+    setupToggleButton.setAttribute("aria-expanded", String(Boolean(isOpen)));
+}
+
+function getResolvedMappingLabel(selectElement, fallbackValue = "") {
+    const directValue = String(selectElement?.value || "").trim();
+    if (directValue) {
+        return directValue;
+    }
+    return String(fallbackValue || "").trim();
+}
+
+function getCurrentSelectedAnalysisKeys() {
+    if (!form) {
+        return [];
+    }
+    return Array.from(form.querySelectorAll('input[name="analysis_keys"]:checked'))
+        .map((input) => String(input.value || "").trim())
+        .filter(Boolean);
+}
+
+function syncAnalysisSelectionChips() {
+    if (!form) {
+        return;
+    }
+
+    form.querySelectorAll(".target-check").forEach((labelElement) => {
+        const checkbox = labelElement.querySelector('input[name="analysis_keys"]');
+        labelElement.classList.toggle("checked", Boolean(checkbox?.checked));
+    });
+}
+
+function getDashboardAnalysisKey(analyses = {}) {
+    if (analyses?.pattern) {
+        return "pattern";
+    }
+    if (analyses?.transition) {
+        return "transition";
+    }
+    if (analyses?.frequency) {
+        return "frequency";
+    }
+    return Object.keys(analyses || {})[0] || "";
+}
+
+function updateSetupSummary(resultData = loadLatestResult(), supplement = currentDashboardSupplement) {
+    if (setupSourceTag) {
+        const sourceFileName = String(
+            currentProfilePayload?.source_file_name
+            || resultData?.source_file_name
+            || defaultSourceFileName
+            || "",
+        ).trim();
+        setupSourceTag.textContent = sourceFileName
+            ? `ファイル: ${sourceFileName}`
+            : "ファイル: 未選択";
+    }
+
+    if (setupMappingTag) {
+        const defaultSelection = currentProfilePayload?.default_selection || {};
+        const mappingLabels = [
+            getResolvedMappingLabel(caseIdColumnSelect, defaultSelection.case_id_column),
+            getResolvedMappingLabel(activityColumnSelect, defaultSelection.activity_column),
+            getResolvedMappingLabel(timestampColumnSelect, defaultSelection.timestamp_column),
+        ].filter(Boolean);
+        setupMappingTag.textContent = mappingLabels.length === 3
+            ? `列: ${mappingLabels.join(" / ")}`
+            : "列: ケースID / アクティビティ / タイムスタンプ";
+    }
+
+    if (!setupVolumeTag) {
+        return;
+    }
+
+    const diagnostics = currentProfilePayload?.diagnostics;
+    const dashboard = supplement?.dashboard;
+    if (dashboard?.has_data) {
+        setupVolumeTag.textContent = `件数: ${formatNumber(dashboard.total_cases)} ケース / ${formatNumber(dashboard.total_records)} イベント / ${formatNumber(dashboard.activity_type_count)} アクティビティ`;
+        return;
+    }
+
+    if (diagnostics) {
+        setupVolumeTag.textContent = `件数: ${formatNumber(diagnostics.case_count)} ケース / ${formatNumber(diagnostics.record_count)} レコード / ${formatNumber(diagnostics.activity_type_count)} アクティビティ`;
+        return;
+    }
+
+    if (resultData?.case_count || resultData?.event_count) {
+        setupVolumeTag.textContent = `件数: ${formatNumber(resultData.case_count)} ケース / ${formatNumber(resultData.event_count)} イベント`;
+        return;
+    }
+
+    setupVolumeTag.textContent = "件数: ログ診断未実行";
+}
+
+function buildPreviewMessage(analysis, previewRows) {
+    const totalRowCount = Number(analysis?.row_count ?? analysis?.rows?.length ?? 0);
+    return totalRowCount > previewRows.length
+        ? `先頭 ${previewRows.length} 件を表示 / 全 ${formatNumber(totalRowCount)} 件`
+        : `全 ${formatNumber(totalRowCount)} 件を表示`;
+}
+
+function getDashboardPreviewHeaders(analysisKey) {
+    switch (analysisKey) {
+    case "frequency":
+        return ["アクティビティ", "イベント件数", "ケース数", "平均処理時間(分)"];
+    case "transition":
+        return ["遷移名", "ケース数", "平均所要時間(分)", "中央値所要時間(分)", "割合(%)"];
+    case "pattern":
+        return ["パターン", "ケース数", "比率(%)", "平均ケース処理時間(分)"];
+    default:
+        return [];
+    }
+}
+
+function buildDashboardPreviewRows(analysisKey, rows = []) {
+    const previewHeaders = getDashboardPreviewHeaders(analysisKey);
+
+    return rows.slice(0, 5).map((row, rowIndex) => {
+        if (analysisKey === "transition") {
+            const transitionName = row["遷移名"]
+                || [row["前処理アクティビティ名"], row["後処理アクティビティ名"]]
+                    .filter(Boolean)
+                    .join(" → ");
+            return {
+                "遷移名": transitionName,
+                "ケース数": row["ケース数"] ?? row["遷移件数"] ?? "-",
+                "平均所要時間(分)": row["平均所要時間(分)"] ?? row["平均時間(分)"] ?? "-",
+                "中央値所要時間(分)": row["中央値所要時間(分)"] ?? row["中央値時間(分)"] ?? "-",
+                "割合(%)": row["割合(%)"] ?? row["遷移比率(%)"] ?? "-",
+                __rowIndex: rowIndex,
+            };
+        }
+
+        if (analysisKey === "pattern") {
+            const patternText = String(
+                row["パターン"]
+                || row["処理順パターン"]
+                || row["パターン / バリアント"]
+                || ""
+            ).trim();
+            const patternSteps = patternText
+                .split(/\s*(?:→|->|⇒)\s*/u)
+                .map((step) => step.trim())
+                .filter(Boolean);
+            const compactPattern = patternSteps.length > 3
+                ? `${patternSteps.slice(0, 3).join(" → ")} → ...（全${patternSteps.length}ステップ）`
+                : patternText;
+            return {
+                "パターン": compactPattern || "-",
+                "ケース数": row["ケース数"] ?? "-",
+                "比率(%)": row["比率(%)"] ?? row["ケース比率(%)"] ?? "-",
+                "平均ケース処理時間(分)": row["平均ケース処理時間(分)"] ?? row["平均処理時間(分)"] ?? "-",
+                __rowIndex: rowIndex,
+            };
+        }
+
+        const normalizedRow = {};
+        previewHeaders.forEach((header) => {
+            normalizedRow[header] = row[header] ?? "-";
+        });
+        normalizedRow.__rowIndex = rowIndex;
+        return normalizedRow;
+    });
+}
+
+function renderInsightPanel(supplement, state = "ready") {
+    if (!insightPanel) {
+        return;
+    }
+
+    if (state === "hidden") {
+        insightPanel.className = "dashboard-insight hidden";
+        insightPanel.innerHTML = "";
+        return;
+    }
+
+    const insightTexts = Array.isArray(supplement?.insights?.items)
+        ? supplement.insights.items.map((item) => String(item?.text || "").trim()).filter(Boolean)
+        : [];
+    let chipLabel = "AI 要約";
+    let bodyText = insightTexts.join(" ");
+
+    if (state === "loading") {
+        chipLabel = "読込中";
+        bodyText = "分析結果をもとに、ダッシュボード向けの要点を整理しています。";
+    } else if (state === "error") {
+        chipLabel = "取得失敗";
+        bodyText = "ダッシュボード用の要約取得に失敗しました。分析結果の表プレビューはそのまま確認できます。";
+    } else if (!bodyText) {
+        chipLabel = "準備中";
+        bodyText = "分析を実行すると、この画面向けのインサイトを表示します。";
+    }
+
+    insightPanel.className = "dashboard-insight";
+    insightPanel.dataset.state = state;
+    insightPanel.innerHTML = `
+        <div class="dashboard-insight-head">
+            <div class="dashboard-insight-title">AI インサイト</div>
+            <span class="dashboard-insight-chip">${escapeHtml(chipLabel)}</span>
+        </div>
+        <p class="dashboard-insight-text">${escapeHtml(bodyText)}</p>
+    `;
 }
 
 function buildDefaultProfilePayload() {
@@ -132,9 +408,24 @@ function mergeProfilePayload(basePayload, nextPayload) {
 }
 
 function syncSubmitState() {
-    submitButton.disabled = isLoadingProfile || isAnalyzing || isRunningDiagnostics;
+    const isBusy = (
+        isLoadingProfile
+        || isAnalyzing
+        || isRunningDiagnostics
+        || isDownloadingDiagnosticsExcel
+    );
+    submitButton.disabled = isBusy;
     if (diagnosticsButton) {
-        diagnosticsButton.disabled = isLoadingProfile || isAnalyzing || isRunningDiagnostics;
+        diagnosticsButton.disabled = isBusy;
+    }
+    if (diagnosticsExcelButton) {
+        diagnosticsExcelButton.disabled = isBusy;
+    }
+    if (topExportDiagnosticsButton) {
+        topExportDiagnosticsButton.disabled = isBusy;
+    }
+    if (topOpenCsvButton) {
+        topOpenCsvButton.disabled = isBusy;
     }
 }
 
@@ -203,21 +494,171 @@ function buildTable(rows, options = {}) {
     `;
 }
 
+function splitPatternSteps(patternText) {
+    return String(patternText || "")
+        .split(/\s*(?:→|->|⇒)\s*/u)
+        .map((step) => step.trim())
+        .filter(Boolean);
+}
+
+function hasRepeatedPatternStep(patternText) {
+    const steps = splitPatternSteps(patternText);
+    return new Set(steps).size < steps.length;
+}
+
+function countRepeatedPatternSteps(patternText) {
+    const steps = splitPatternSteps(patternText);
+    return Math.max(0, steps.length - new Set(steps).size);
+}
+
+function calculateRepeatRatePct(patternText) {
+    const steps = splitPatternSteps(patternText);
+    if (!steps.length) {
+        return 0;
+    }
+    return Math.round((countRepeatedPatternSteps(patternText) / steps.length) * 10000) / 100;
+}
+
+function buildPatternReviewFlag(repeatRatePct) {
+    return Number(repeatRatePct || 0) >= 20 ? "要確認" : "";
+}
+
+function buildPatternSimpleComment(repeatCount, repeatRatePct) {
+    if (Number(repeatRatePct || 0) >= 20) {
+        return `繰り返し率が ${Number(repeatRatePct || 0).toFixed(2)}% と高く、再確認や差戻しが発生している可能性があります。`;
+    }
+    if (Number(repeatCount || 0) > 0) {
+        return `同一アクティビティの繰り返しが ${Number(repeatCount || 0)} 回あります。`;
+    }
+    return "繰り返しは確認されません。";
+}
+
+function normalizePatternAnalysisRow(row) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+        return row;
+    }
+
+    const patternText = (
+        row["処理順パターン"]
+        || row["パターン"]
+        || row.pattern
+        || row["代表ルート"]
+        || ""
+    );
+    const repeatFlag = hasRepeatedPatternStep(patternText) ? "○" : "";
+    const repeatCount = countRepeatedPatternSteps(patternText);
+    const repeatRatePct = calculateRepeatRatePct(patternText);
+    const reviewFlag = buildPatternReviewFlag(repeatRatePct);
+    const simpleComment = buildPatternSimpleComment(repeatCount, repeatRatePct);
+    const normalizedEntries = [];
+    let hasRepeatColumn = false;
+    let hasRepeatCountColumn = false;
+    let hasRepeatRateColumn = false;
+    let hasReviewFlagColumn = false;
+    let hasCommentColumn = false;
+
+    Object.entries(row).forEach(([key, value]) => {
+        if (key === "業務ラベル") {
+            normalizedEntries.push(["繰り返し", repeatFlag]);
+            hasRepeatColumn = true;
+            return;
+        }
+        if (key === "繰り返し") {
+            normalizedEntries.push(["繰り返し", repeatFlag]);
+            hasRepeatColumn = true;
+            return;
+        }
+        if (key === "繰り返し回数") {
+            normalizedEntries.push(["繰り返し回数", repeatCount]);
+            hasRepeatCountColumn = true;
+            return;
+        }
+        if (key === "繰り返し率(%)") {
+            normalizedEntries.push(["繰り返し率(%)", repeatRatePct]);
+            hasRepeatRateColumn = true;
+            return;
+        }
+        if (key === "確認区分") {
+            normalizedEntries.push(["確認区分", reviewFlag]);
+            hasReviewFlagColumn = true;
+            return;
+        }
+        if (key === "簡易コメント") {
+            normalizedEntries.push(["簡易コメント", simpleComment]);
+            hasCommentColumn = true;
+            return;
+        }
+        if (key === "評価") {
+            return;
+        }
+
+        normalizedEntries.push([key, value]);
+    });
+
+    if (!hasRepeatColumn) {
+        const repeatEntry = ["繰り返し", repeatFlag];
+        normalizedEntries.unshift(repeatEntry);
+    }
+    if (!hasRepeatCountColumn) {
+        normalizedEntries.splice(Math.min(1, normalizedEntries.length), 0, ["繰り返し回数", repeatCount]);
+    }
+    if (!hasRepeatRateColumn) {
+        normalizedEntries.splice(Math.min(2, normalizedEntries.length), 0, ["繰り返し率(%)", repeatRatePct]);
+    }
+    if (!hasReviewFlagColumn) {
+        normalizedEntries.splice(Math.min(3, normalizedEntries.length), 0, ["確認区分", reviewFlag]);
+    }
+    if (!hasCommentColumn) {
+        normalizedEntries.splice(Math.min(4, normalizedEntries.length), 0, ["簡易コメント", simpleComment]);
+    }
+
+    return Object.fromEntries(normalizedEntries);
+}
+
+function normalizeLatestResult(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+        return data;
+    }
+
+    const analyses = data.analyses;
+    if (!analyses || typeof analyses !== "object" || Array.isArray(analyses)) {
+        return data;
+    }
+
+    const patternAnalysis = analyses.pattern;
+    if (!patternAnalysis || !Array.isArray(patternAnalysis.rows)) {
+        return data;
+    }
+
+    return {
+        ...data,
+        analyses: {
+            ...analyses,
+            pattern: {
+                ...patternAnalysis,
+                rows: patternAnalysis.rows.map((row) => normalizePatternAnalysisRow(row)),
+            },
+        },
+    };
+}
+
 function saveLatestResult(data) {
+    const normalizedData = normalizeLatestResult(data);
+    clearDashboardSupplement();
     try {
-        sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        sessionStorage.setItem(STORAGE_KEY, JSON.stringify(normalizedData));
         sessionStorage.removeItem(FLOW_SELECTION_STORAGE_KEY);
         sessionStorage.removeItem(TRANSITION_DRILLDOWN_STORAGE_KEY);
     } catch {
         try {
             const fallbackData = {
-                run_id: data.run_id,
-                source_file_name: data.source_file_name,
-                selected_analysis_keys: data.selected_analysis_keys,
-                case_count: data.case_count,
-                event_count: data.event_count,
-                applied_filters: data.applied_filters,
-                column_settings: data.column_settings,
+                run_id: normalizedData.run_id,
+                source_file_name: normalizedData.source_file_name,
+                selected_analysis_keys: normalizedData.selected_analysis_keys,
+                case_count: normalizedData.case_count,
+                event_count: normalizedData.event_count,
+                applied_filters: normalizedData.applied_filters,
+                column_settings: normalizedData.column_settings,
                 analyses: {},
             };
             sessionStorage.setItem(STORAGE_KEY, JSON.stringify(fallbackData));
@@ -236,7 +677,7 @@ function loadLatestResult() {
     }
 
     try {
-        return JSON.parse(storedValue);
+        return normalizeLatestResult(JSON.parse(storedValue));
     } catch {
         sessionStorage.removeItem(STORAGE_KEY);
         return null;
@@ -269,6 +710,9 @@ function buildTopPageState() {
         filter_value_state: getCurrentFilterValueState(),
         date_from: String(analysisDateFromInput?.value || "").trim(),
         date_to: String(analysisDateToInput?.value || "").trim(),
+        diagnostics_sample_limit: String(
+            diagnosticsSampleLimitInput?.value || DEFAULT_LOG_DIAGNOSTIC_SAMPLE_ROW_LIMIT,
+        ).trim(),
     };
 }
 
@@ -302,6 +746,11 @@ function restoreTopPageState(state) {
     }
     if (analysisDateToInput) {
         analysisDateToInput.value = state.date_to || "";
+    }
+    if (diagnosticsSampleLimitInput) {
+        diagnosticsSampleLimitInput.value = String(
+            state.diagnostics_sample_limit || DEFAULT_LOG_DIAGNOSTIC_SAMPLE_ROW_LIMIT,
+        ).trim();
     }
 
     filterColumnRefs.forEach((filterRef, index) => {
@@ -486,22 +935,22 @@ function renderFilterValueSelectors(profilePayload) {
 
     filterSelectionNote.textContent = selectedFilters.length
         ? `現在の分析対象条件: ${selectedFilters.join(" / ")}`
-        : "フィルターごとに対象列を設定すると、絞り込み値を選択できます。";
+        : "分析対象条件ごとに対象列を設定すると、絞り込み値を選択できます。";
 }
 
 function buildMissingCountText(diagnostics) {
     const missingCounts = diagnostics?.missing_counts || {};
     const items = [
-        `Case ID ${missingCounts.case_id ?? "-"}`,
-        `Activity ${missingCounts.activity ?? "-"}`,
-        `Timestamp ${missingCounts.timestamp ?? "-"}`,
+        `ケースID ${missingCounts.case_id ?? "-"}`,
+        `アクティビティ ${missingCounts.activity ?? "-"}`,
+        `タイムスタンプ ${missingCounts.timestamp ?? "-"}`,
     ];
     return items.join(" / ");
 }
 
 function buildLogPeriodText(diagnostics) {
     if (!diagnostics?.time_range?.min || !diagnostics?.time_range?.max) {
-        return "Case ID / Activity / Timestamp を選択すると表示します。";
+        return "ケースID / アクティビティ / タイムスタンプを選択すると表示します。";
     }
     return `${diagnostics.time_range.min} 〜 ${diagnostics.time_range.max}`;
 }
@@ -614,6 +1063,8 @@ function renderProfilePayload(profilePayload) {
     renderFilterValueSelectors(currentProfilePayload);
     renderDiagnostics(currentProfilePayload);
     updateColumnSourceNote(currentProfilePayload?.source_file_name || "");
+    updateSetupSummary(loadLatestResult(), currentDashboardSupplement);
+    syncAnalysisSelectionChips();
 }
 
 function appendMappingSettings(formData) {
@@ -623,6 +1074,34 @@ function appendMappingSettings(formData) {
             formData.set(fieldName, fieldValue);
         }
     });
+}
+
+function getDiagnosticsSampleLimit() {
+    const rawValue = String(
+        diagnosticsSampleLimitInput?.value || DEFAULT_LOG_DIAGNOSTIC_SAMPLE_ROW_LIMIT,
+    ).trim();
+    const numericValue = Number.parseInt(rawValue, 10);
+    if (!Number.isFinite(numericValue) || numericValue <= 0) {
+        return DEFAULT_LOG_DIAGNOSTIC_SAMPLE_ROW_LIMIT;
+    }
+
+    return numericValue;
+}
+
+function appendDiagnosticsSettings(formData) {
+    appendMappingSettings(formData);
+    formData.set("sample_row_limit", String(getDiagnosticsSampleLimit()));
+}
+
+function triggerFileDownload(blob, fileName) {
+    const downloadUrl = URL.createObjectURL(blob);
+    const downloadLink = document.createElement("a");
+    downloadLink.href = downloadUrl;
+    downloadLink.download = fileName;
+    document.body.appendChild(downloadLink);
+    downloadLink.click();
+    downloadLink.remove();
+    URL.revokeObjectURL(downloadUrl);
 }
 
 async function fetchLogProfile(file) {
@@ -650,7 +1129,7 @@ async function fetchLogDiagnostics(file) {
     if (file) {
         formData.append("csv_file", file);
     }
-    appendMappingSettings(formData);
+    appendDiagnosticsSettings(formData);
 
     const response = await fetch("/api/log-diagnostics", {
         method: "POST",
@@ -663,6 +1142,58 @@ async function fetchLogDiagnostics(file) {
     }
 
     return payload;
+}
+
+async function downloadLogDiagnosticsExcel() {
+    const validationError = (
+        validateFileSelectionState()
+        || validateColumnSelections()
+        || validateFilterColumnSelections()
+    );
+    if (validationError) {
+        setStatus(validationError, "error");
+        return;
+    }
+
+    const formData = new FormData();
+    const selectedFile = csvFileInput?.files?.[0] || null;
+    if (selectedFile) {
+        formData.append("csv_file", selectedFile);
+    }
+    appendDiagnosticsSettings(formData);
+
+    isDownloadingDiagnosticsExcel = true;
+    syncSubmitState();
+    setStatus("ログ診断Excelを出力しています...", "info");
+
+    try {
+        const response = await fetch("/api/log-diagnostics-excel", {
+            method: "POST",
+            body: formData,
+        });
+
+        if (!response.ok) {
+            let errorMessage = "ログ診断Excelの出力に失敗しました。";
+            try {
+                const payload = await response.json();
+                errorMessage = payload.error || errorMessage;
+            } catch {
+                // Keep the default message when the response body is not JSON.
+            }
+            throw new Error(errorMessage);
+        }
+
+        const blob = await response.blob();
+        const downloadFileName = getDownloadFileName(response, "log_diagnostics.xlsx");
+        triggerFileDownload(blob, downloadFileName);
+        setStatus("ログ診断Excelを出力しました。", "success");
+        saveTopPageState();
+    } catch (error) {
+        setStatus(error.message, "error");
+    } finally {
+        isDownloadingDiagnosticsExcel = false;
+        syncSubmitState();
+    }
 }
 
 async function refreshLogProfile() {
@@ -760,11 +1291,11 @@ function validateColumnSelections() {
     const timestampColumn = String(timestampColumnSelect?.value || "").trim();
 
     if (!caseIdColumn || !activityColumn || !timestampColumn) {
-        return "Case ID列 / Activity列 / Timestamp列を選択してください。";
+        return "ケースID列 / アクティビティ列 / タイムスタンプ列を選択してください。";
     }
 
     if (new Set([caseIdColumn, activityColumn, timestampColumn]).size !== 3) {
-        return "Case ID列 / Activity列 / Timestamp列にはそれぞれ異なる列を選択してください。";
+        return "ケースID列 / アクティビティ列 / タイムスタンプ列にはそれぞれ異なる列を選択してください。";
     }
 
     return "";
@@ -844,63 +1375,225 @@ function buildAppliedFilterSummary(appliedFilters = {}, columnSettings = {}) {
     return appliedItems.length ? appliedItems.join(" / ") : "フィルタ未適用";
 }
 
-function renderSummary(data) {
+async function fetchDashboardSupplementPayload(runId, analysisKey) {
+    const params = new URLSearchParams({
+        row_limit: "0",
+        include_dashboard: "true",
+        include_impact: "false",
+        include_root_cause: "false",
+        include_insights: "false",
+    });
+    const response = await fetch(
+        `/api/runs/${encodeURIComponent(runId)}/analyses/${encodeURIComponent(analysisKey)}?${params.toString()}`,
+    );
+    const payload = await response.json();
+
+    if (!response.ok) {
+        throw new Error(payload.error || "ダッシュボード要約の取得に失敗しました。");
+    }
+
+    return payload;
+}
+
+async function hydrateDashboardSupplement(runId, analyses = {}) {
+    const analysisKey = getDashboardAnalysisKey(analyses);
+    if (!runId || !analysisKey) {
+        clearDashboardSupplement();
+        updateSetupSummary(loadLatestResult(), null);
+        return;
+    }
+
+    if (
+        currentDashboardSupplement?.run_id === runId
+        && currentDashboardSupplement?.analysis_key === analysisKey
+    ) {
+        const latestResult = loadLatestResult();
+        if (latestResult?.run_id === runId) {
+            renderSummary(latestResult, currentDashboardSupplement);
+            updateSetupSummary(latestResult, currentDashboardSupplement);
+        }
+        return;
+    }
+
+    const requestVersion = dashboardSupplementRequestVersion + 1;
+    dashboardSupplementRequestVersion = requestVersion;
+
+    try {
+        const payload = await fetchDashboardSupplementPayload(runId, analysisKey);
+        if (requestVersion !== dashboardSupplementRequestVersion) {
+            return;
+        }
+
+        const supplement = {
+            run_id: payload.run_id,
+            analysis_key: analysisKey,
+            dashboard: payload.dashboard || {},
+            impact: payload.impact || {},
+        };
+        saveDashboardSupplement(supplement);
+
+        const latestResult = loadLatestResult();
+        if (latestResult?.run_id === runId) {
+            renderSummary(latestResult, supplement);
+            updateSetupSummary(latestResult, supplement);
+        }
+    } catch {
+        if (requestVersion !== dashboardSupplementRequestVersion) {
+            return;
+        }
+        clearDashboardSupplement();
+
+        const latestResult = loadLatestResult();
+        if (latestResult?.run_id === runId) {
+            renderSummary(latestResult, null);
+            updateSetupSummary(latestResult, null);
+        }
+    }
+}
+
+function renderSummary(data, supplement = currentDashboardSupplement) {
+    if (!data) {
+        summaryPanel.className = "summary-panel hidden";
+        summaryPanel.innerHTML = "";
+        return;
+    }
+
+    const matchedSupplement = supplement?.run_id === data.run_id ? supplement : null;
+    const dashboard = matchedSupplement?.dashboard || {};
     const appliedFilterSummary = buildAppliedFilterSummary(data.applied_filters, data.column_settings);
-    summaryPanel.className = "summary-panel";
+    const caseAndEventText = `${formatNumber(data.case_count)} / ${formatNumber(data.event_count)}`;
+    const caseAndEventSubtext = dashboard?.activity_type_count
+        ? `${formatNumber(dashboard.activity_type_count)} アクティビティ種別`
+        : `${formatNumber(Object.keys(data.analyses || {}).length)} 分析を表示`;
+    const avgDurationText = dashboard?.avg_case_duration_text || "算出中";
+    const avgDurationSubtext = dashboard?.median_case_duration_text
+        ? `中央値 ${dashboard.median_case_duration_text} / 最大 ${dashboard.max_case_duration_text}`
+        : "詳細要約を取得すると中央値と最大値を表示します。";
+    const top10CoverageText = Number.isFinite(Number(dashboard?.top10_variant_coverage_pct))
+        ? formatPercent(dashboard.top10_variant_coverage_pct, 1)
+        : "算出中";
+    const top10CoverageSubtext = dashboard?.max_case_duration_text
+        ? `最長ケース処理時間 ${dashboard.max_case_duration_text}`
+        : "上位10パターンのカバー率を集計中です。";
+    const bottleneckHeadline = dashboard?.top_bottleneck_transition_label || "最大ボトルネックを集計中";
+    const bottleneckSubtext = dashboard?.top_bottleneck_avg_wait_text
+        ? `平均待ち時間 ${dashboard.top_bottleneck_avg_wait_text} / ${Number(dashboard.top_bottleneck_avg_wait_hours || 0).toFixed(2)} 時間`
+        : "要約の取得後に平均待ち時間を表示します。";
+
+    summaryPanel.className = "summary-panel dashboard-summary-panel";
     summaryPanel.innerHTML = `
-        <article class="summary-card">
-            <span class="summary-label">入力ファイル</span>
-            <strong>${escapeHtml(data.source_file_name)}</strong>
-        </article>
-        <article class="summary-card">
-            <span class="summary-label">ケース数</span>
-            <strong>${escapeHtml(data.case_count)}</strong>
-        </article>
-        <article class="summary-card">
-            <span class="summary-label">イベント数</span>
-            <strong>${escapeHtml(data.event_count)}</strong>
-        </article>
-        <p class="summary-inline-note">適用条件: ${escapeHtml(appliedFilterSummary)}</p>
+        <div class="dashboard-kpi-grid">
+            <article class="summary-card">
+                <span class="summary-label">ケース数 / イベント数</span>
+                <strong>${escapeHtml(caseAndEventText)}</strong>
+                <p class="dashboard-summary-sub">${escapeHtml(caseAndEventSubtext)}</p>
+            </article>
+            <article class="summary-card">
+                <span class="summary-label">平均ケース処理時間</span>
+                <strong>${escapeHtml(avgDurationText)}</strong>
+                <p class="dashboard-summary-sub">${escapeHtml(avgDurationSubtext)}</p>
+            </article>
+            <article class="summary-card">
+                <span class="summary-label">上位10パターン カバー率</span>
+                <strong>${escapeHtml(top10CoverageText)}</strong>
+                <p class="dashboard-summary-sub">${escapeHtml(top10CoverageSubtext)}</p>
+            </article>
+            <article class="summary-card summary-card--warning">
+                <span class="summary-label">最大ボトルネック</span>
+                <strong>${escapeHtml(bottleneckHeadline)}</strong>
+                <p class="dashboard-summary-sub">${escapeHtml(bottleneckSubtext)}</p>
+            </article>
+        </div>
+        <p class="dashboard-summary-note">適用条件: ${escapeHtml(appliedFilterSummary)}</p>
     `;
 }
 
-function buildResultHeader(analysisKey, analysis, previewRows) {
-    const totalRowCount = analysis.row_count ?? analysis.rows.length;
-    const previewMessage = totalRowCount > previewRows.length
-        ? `先頭 ${previewRows.length} 件を表示 / 全 ${totalRowCount} 件`
-        : `全 ${totalRowCount} 件を表示`;
+function setActiveAnalysisTab(activeKey) {
+    resultPanels.querySelectorAll("[data-analysis-tab]").forEach((buttonElement) => {
+        buttonElement.classList.toggle(
+            "active",
+            String(buttonElement.dataset.analysisTab || "") === String(activeKey || ""),
+        );
+    });
 
-    return `
-        <div class="result-header">
-            <div>
-                <h2>${escapeHtml(analysis.analysis_name)}</h2>
-                <p class="result-meta">${escapeHtml(previewMessage)}</p>
-            </div>
-            <a href="${buildAnalysisDetailHref(analysisKey, analysis.run_id || "")}" class="detail-link">詳細ページ</a>
-        </div>
-    `;
+    resultPanels.querySelectorAll("[data-analysis-panel]").forEach((panelElement) => {
+        panelElement.classList.toggle(
+            "active",
+            String(panelElement.dataset.analysisPanel || "") === String(activeKey || ""),
+        );
+    });
 }
 
 function renderAnalysisPanels(analyses, runId) {
-    resultPanels.innerHTML = "";
+    const analysisEntries = Object.entries(analyses || {});
+    if (!analysisEntries.length) {
+        resultPanels.className = "result-stack hidden";
+        resultPanels.innerHTML = "";
+        return;
+    }
 
-    Object.entries(analyses || {}).forEach(([analysisKey, analysis]) => {
-        const previewRows = (analysis.rows || [])
-            .slice(0, PREVIEW_ROW_COUNT)
-            .map((row, index) => ({ ...row, __rowIndex: index }));
-        const section = document.createElement("section");
-        section.className = "result-panel";
-        section.innerHTML = `
-            ${buildResultHeader(analysisKey, { ...analysis, run_id: runId }, previewRows)}
-            ${buildTable(previewRows, { analysisKey, runId })}
-        `;
-        resultPanels.appendChild(section);
+    const firstAnalysisKey = analysisEntries[0][0];
+    resultPanels.className = "analysis-section dashboard-analysis-shell";
+    resultPanels.innerHTML = `
+        <div class="tab-bar dashboard-tab-bar">
+            ${analysisEntries.map(([analysisKey, analysis], index) => `
+                <button
+                    type="button"
+                    class="tab dashboard-tab ${index === 0 ? "active" : ""}"
+                    data-analysis-tab="${escapeHtml(analysisKey)}"
+                >
+                    ${escapeHtml(analysis.analysis_name || analysisKey)}
+                </button>
+            `).join("")}
+        </div>
+        <div class="tab-content dashboard-tab-content">
+            ${analysisEntries.map(([analysisKey, analysis], index) => {
+                const previewRows = buildDashboardPreviewRows(analysisKey, analysis.rows || []);
+
+                return `
+                    <section
+                        class="tab-panel dashboard-tab-panel ${index === 0 ? "active" : ""}"
+                        data-analysis-panel="${escapeHtml(analysisKey)}"
+                    >
+                        <div class="dashboard-preview-shell">
+                            <div class="dashboard-preview-head">
+                                <div>
+                                    <h2>${escapeHtml(analysis.analysis_name || analysisKey)}</h2>
+                                    <p class="dashboard-preview-meta">${escapeHtml(buildPreviewMessage(analysis, previewRows))}</p>
+                                </div>
+                                <a href="${buildAnalysisDetailHref(analysisKey, runId || "")}" class="detail-link">詳細ページ</a>
+                            </div>
+                            ${buildTable(previewRows, { analysisKey, runId })}
+                            <div class="dashboard-preview-foot">
+                                <a href="${buildAnalysisDetailHref(analysisKey, runId || "")}" class="detail-link">詳細ページで続きを見る</a>
+                            </div>
+                        </div>
+                    </section>
+                `;
+            }).join("")}
+        </div>
+    `;
+
+    resultPanels.querySelectorAll("[data-analysis-tab]").forEach((buttonElement) => {
+        buttonElement.addEventListener("click", () => {
+            setActiveAnalysisTab(buttonElement.dataset.analysisTab || firstAnalysisKey);
+        });
     });
 }
 
 function renderDashboard(data) {
-    renderSummary(data);
-    renderAnalysisPanels(data.analyses, data.run_id || "");
+    const normalizedData = normalizeLatestResult(data);
+    const matchedSupplement = currentDashboardSupplement?.run_id === normalizedData.run_id
+        ? currentDashboardSupplement
+        : null;
+
+    renderSummary(normalizedData, matchedSupplement);
+    renderAnalysisPanels(normalizedData.analyses, normalizedData.run_id || "");
+    updateSetupSummary(normalizedData, matchedSupplement);
+
+    if (normalizedData.run_id) {
+        void hydrateDashboardSupplement(normalizedData.run_id, normalizedData.analyses || {});
+    }
 }
 
 form.addEventListener("submit", async (event) => {
@@ -916,6 +1609,7 @@ form.addEventListener("submit", async (event) => {
     syncSubmitState();
     setStatus("分析を実行しています...", "info");
     summaryPanel.className = "summary-panel hidden";
+    resultPanels.className = "result-stack";
     resultPanels.innerHTML = "";
 
     try {
@@ -933,6 +1627,7 @@ form.addEventListener("submit", async (event) => {
         saveLatestResult(data);
         renderDashboard(data);
         saveTopPageState();
+        setSetupSectionOpen(false);
 
         setStatus("分析が完了しました。", "success");
     } catch (error) {
@@ -943,8 +1638,22 @@ form.addEventListener("submit", async (event) => {
     }
 });
 
+setupToggleButton?.addEventListener("click", () => {
+    setSetupSectionOpen(!setupSection?.classList.contains("is-open"));
+});
+
+topExportDiagnosticsButton?.addEventListener("click", () => {
+    void downloadLogDiagnosticsExcel();
+});
+
+topOpenCsvButton?.addEventListener("click", () => {
+    setSetupSectionOpen(true);
+    csvFileInput?.click();
+});
+
 csvFileInput?.addEventListener("change", () => {
     requiresFileReselection = false;
+    setSetupSectionOpen(true);
     void refreshLogProfile();
 });
 
@@ -952,6 +1661,7 @@ csvFileInput?.addEventListener("change", () => {
     .forEach((element) => {
         element?.addEventListener("change", () => {
             hideStatus();
+            updateSetupSummary(loadLatestResult(), currentDashboardSupplement);
             saveTopPageState();
             void refreshLogProfile();
         });
@@ -971,8 +1681,25 @@ filterColumnRefs.forEach((filterRef) => {
     });
 });
 
+form.querySelectorAll('input[name="analysis_keys"]').forEach((element) => {
+    element.addEventListener("change", () => {
+        hideStatus();
+        syncAnalysisSelectionChips();
+        saveTopPageState();
+    });
+});
+
+diagnosticsSampleLimitInput?.addEventListener("change", () => {
+    hideStatus();
+    saveTopPageState();
+});
+
 diagnosticsButton?.addEventListener("click", () => {
     void runLogDiagnostics();
+});
+
+diagnosticsExcelButton?.addEventListener("click", () => {
+    void downloadLogDiagnosticsExcel();
 });
 
 resetFilterButton?.addEventListener("click", () => {
@@ -984,7 +1711,7 @@ resetFilterButton?.addEventListener("click", () => {
         if (filterRef.valueSelect) filterRef.valueSelect.disabled = true;
     });
     if (filterSelectionNote) {
-        filterSelectionNote.textContent = "フィルターごとに対象列を設定すると、絞り込み値を選択できます。";
+        filterSelectionNote.textContent = "分析対象条件ごとに対象列を設定すると、絞り込み値を選択できます。";
     }
     hideStatus();
     saveTopPageState();
@@ -997,6 +1724,9 @@ if (latestResult) {
 
 renderProfilePayload(currentProfilePayload);
 restoreTopPageState(restoredTopPageState);
+syncAnalysisSelectionChips();
+updateSetupSummary(latestResult, currentDashboardSupplement);
+setSetupSectionOpen(Boolean(requiresFileReselection));
 saveTopPageState();
 syncSubmitState();
 hideStatus();

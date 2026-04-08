@@ -42,17 +42,17 @@ DEFAULT_ANALYSIS_KEYS = ["frequency", "transition", "pattern"]
 FLOW_FREQUENCY_ACTIVITY_COLUMN = "アクティビティ"
 FLOW_FREQUENCY_EVENT_COUNT_COLUMN = "イベント件数"
 FLOW_FREQUENCY_CASE_COUNT_COLUMN = "ケース数"
-FLOW_FREQUENCY_AVG_DURATION_COLUMN = "平均時間(分)"
+FLOW_FREQUENCY_AVG_DURATION_COLUMN = "平均処理時間(分)"
 FLOW_FREQUENCY_RATIO_COLUMN = "イベント比率(%)"
 FLOW_TRANSITION_FROM_COLUMN = "前処理アクティビティ名"
 FLOW_TRANSITION_TO_COLUMN = "後処理アクティビティ名"
 FLOW_TRANSITION_COUNT_COLUMN = "遷移件数"
-FLOW_TRANSITION_AVG_WAIT_COLUMN = "平均待ち時間(分)"
+FLOW_TRANSITION_AVG_WAIT_COLUMN = "平均所要時間(分)"
 FLOW_TRANSITION_RATIO_COLUMN = "遷移比率(%)"
 FLOW_PATTERN_CASE_COUNT_COLUMN = "ケース数"
 FLOW_PATTERN_COLUMN = "処理順パターン"
 FLOW_PATTERN_CASE_RATIO_COLUMN = "ケース比率(%)"
-FLOW_PATTERN_AVG_CASE_DURATION_COLUMN = "平均ケース時間(分)"
+FLOW_PATTERN_AVG_CASE_DURATION_COLUMN = "平均ケース処理時間(分)"
 FLOW_PATH_SEPARATOR = "→"
 FLOW_PATTERN_CAP = 500
 FLOW_LAYOUT_SWEEP_ITERATIONS = 4
@@ -88,7 +88,7 @@ def resolve_analysis_keys(selected_analysis_keys=None):
         analysis_keys = selected_analysis_keys
 
     if not analysis_keys:
-        raise ValueError("Please select at least one analysis key.")
+        raise ValueError("少なくとも1つの分析を選択してください。")
 
     return analysis_keys
 
@@ -123,7 +123,7 @@ def analyze_prepared_event_log(
 
     for analysis_key in analysis_keys:
         if analysis_key not in ANALYSIS_DEFINITIONS:
-            raise ValueError(f"Unsupported analysis key: {analysis_key}")
+            raise ValueError(f"未対応の分析種別です: {analysis_key}")
 
         definition = ANALYSIS_DEFINITIONS[analysis_key]
         result_df = definition["create_function"](prepared_df)
@@ -160,7 +160,7 @@ def analyze_prepared_event_log(
 
 def create_analysis_records(prepared_df, analysis_key):
     if analysis_key not in ANALYSIS_DEFINITIONS:
-        raise ValueError(f"Unsupported analysis key: {analysis_key}")
+        raise ValueError(f"未対応の分析種別です: {analysis_key}")
 
     definition = ANALYSIS_DEFINITIONS[analysis_key]
     analysis_config = definition["config"]
@@ -1039,7 +1039,7 @@ def _build_frequency_insights(items, analysis_rows, max_items):
         items,
         max_items,
         "top_activity",
-        f"最も件数が多い activity は「{top_activity}」で、{top_event_count:,} 件（全イベントの {top_ratio:.1f}%）を占めています。",
+        f"最も件数が多いアクティビティは「{top_activity}」で、{top_event_count:,} 件（全イベントの {top_ratio:.1f}%）を占めています。",
         ["analysis"],
     )
 
@@ -1048,7 +1048,7 @@ def _build_frequency_insights(items, analysis_rows, max_items):
         items,
         max_items,
         "event_distribution",
-        f"上位3 activity で全イベントの {top3_ratio:.1f}% を占めており、イベント分布の偏りを確認できます。",
+        f"上位3アクティビティで全イベントの {top3_ratio:.1f}% を占めており、イベント分布の偏りを確認できます。",
         ["analysis"],
     )
 
@@ -1057,7 +1057,7 @@ def _build_frequency_insights(items, analysis_rows, max_items):
             items,
             max_items,
             "activity_concentration",
-            f"「{top_activity}」への集中度が高く、単一 activity への依存が大きい構成です。",
+            f"「{top_activity}」への集中度が高く、単一アクティビティへの依存が大きい構成です。",
             ["analysis"],
         )
         return
@@ -1072,7 +1072,7 @@ def _build_frequency_insights(items, analysis_rows, max_items):
         items,
         max_items,
         "slowest_activity",
-        f"平均処理時間が最も長い activity は「{longest_activity}」で、平均 {longest_avg_duration:.2f} 分です。",
+        f"平均処理時間が最も長いアクティビティは「{longest_activity}」で、平均 {longest_avg_duration:.2f} 分です。",
         ["analysis"],
     )
 
@@ -1152,7 +1152,7 @@ def _build_transition_insights(items, analysis_rows, max_items):
             items,
             max_items,
             "slowest_transition_wait",
-            f"平均待ち時間が最も長い遷移は「{transition_label}」で、平均 {longest_wait_value:.2f} 分です。",
+            f"平均所要時間が最も長い遷移は「{transition_label}」で、平均 {longest_wait_value:.2f} 分です。",
             ["analysis"],
         )
 
@@ -1251,7 +1251,7 @@ def create_rule_based_insights(
     )
 
     if normalized_analysis_key == "frequency":
-        insights_payload["description"] = "頻度分析の上位 activity とイベント分布の偏りを要約しています。"
+        insights_payload["description"] = "頻度分析の上位アクティビティとイベント分布の偏りを要約しています。"
         _build_frequency_insights(insights_payload["items"], analysis_rows, safe_max_items)
     elif normalized_analysis_key == "transition":
         insights_payload["description"] = "前後処理分析から、ループ・差戻し・遷移の特徴を要約しています。"
@@ -1278,7 +1278,7 @@ def create_rule_based_insights(
                 "top_impact_transition",
                 (
                     f"改善インパクトが最大の遷移は「{str(top_impact_row['transition_label'])}」で、"
-                    f"平均待ち時間 {top_impact_row['avg_duration_text']}、"
+                    f"平均所要時間 {top_impact_row['avg_duration_text']}、"
                     f"{int(top_impact_row['case_count']):,} ケースに発生しています。"
                 ),
                 ["impact"],
@@ -1289,8 +1289,8 @@ def create_rule_based_insights(
                 safe_max_items,
                 "top_activity_bottleneck",
                 (
-                    f"平均待ち時間が最大の Activity bottleneck は「{top_activity_bottleneck['activity']}」で、"
-                    f"平均待ち時間 {_format_duration_text(top_activity_bottleneck['avg_duration_sec'])} です。"
+                    f"平均所要時間が最大のアクティビティボトルネックは「{top_activity_bottleneck['activity']}」で、"
+                    f"平均所要時間 {_format_duration_text(top_activity_bottleneck['avg_duration_sec'])} です。"
                 ),
                 ["bottleneck"],
             )
@@ -1300,9 +1300,9 @@ def create_rule_based_insights(
                 safe_max_items,
                 "top_transition_bottleneck",
                 (
-                    f"平均待ち時間が最大の Transition bottleneck は"
+                    f"平均所要時間が最大の遷移ボトルネックは"
                     f"「{top_transition_bottleneck['from_activity']} {FLOW_PATH_SEPARATOR} {top_transition_bottleneck['to_activity']}」で、"
-                    f"平均待ち時間 {_format_duration_text(top_transition_bottleneck['avg_duration_sec'])} です。"
+                    f"平均所要時間 {_format_duration_text(top_transition_bottleneck['avg_duration_sec'])} です。"
                 ),
                 ["bottleneck"],
             )
@@ -1312,7 +1312,7 @@ def create_rule_based_insights(
             insights_payload["items"],
             safe_max_items,
             "top10_variant_coverage",
-            f"上位10 Variant で全ケースの {float(resolved_dashboard_summary['top10_variant_coverage_pct']):.1f}% をカバーしています。",
+            f"上位10バリアントで全ケースの {float(resolved_dashboard_summary['top10_variant_coverage_pct']):.1f}% をカバーしています。",
             ["dashboard", "variant"],
         )
 
@@ -1325,7 +1325,7 @@ def create_rule_based_insights(
                 insights_payload["items"],
                 safe_max_items,
                 "attention_activities",
-                f"「{display_names}」{suffix} の activity が含まれており、差戻しや再提出が発生している可能性があります。",
+                f"「{display_names}」{suffix} のアクティビティが含まれており、差戻しや再提出が発生している可能性があります。",
                 ["prepared_df"],
             )
 
@@ -1465,7 +1465,7 @@ def create_activity_case_drilldown(
 def create_case_trace_details(prepared_df, case_id):
     normalized_case_id = str(case_id or "").strip()
     if not normalized_case_id:
-        raise ValueError("Case ID is required.")
+        raise ValueError("ケースIDが必要です。")
 
     case_df = prepared_df[prepared_df["case_id"] == normalized_case_id].copy()
     if case_df.empty:
@@ -1585,6 +1585,42 @@ def _build_selected_pattern_prepared_df(prepared_df, selected_pattern_rows):
         return prepared_df.iloc[0:0].copy()
 
     return prepared_df[prepared_df["case_id"].isin(selected_case_ids)].copy()
+
+
+def select_pattern_rows_for_flow(
+    pattern_rows,
+    pattern_percent=10,
+    pattern_count=None,
+    pattern_cap=FLOW_PATTERN_CAP,
+):
+    cap = max(0, int(pattern_cap or 0))
+    requested_pattern_percent = clamp_flow_percent(pattern_percent)
+    sorted_pattern_rows = sorted(
+        pattern_rows,
+        key=lambda row: (
+            -int(row.get(FLOW_PATTERN_CASE_COUNT_COLUMN) or 0),
+            str(row.get(FLOW_PATTERN_COLUMN) or ""),
+        ),
+    )
+    effective_pattern_count = min(len(sorted_pattern_rows), cap)
+    requested_pattern_count = None if pattern_count is None else max(0, int(pattern_count or 0))
+    if requested_pattern_count is None:
+        used_pattern_count = _calculate_flow_limit(
+            effective_pattern_count,
+            requested_pattern_percent,
+        )
+    else:
+        used_pattern_count = min(effective_pattern_count, requested_pattern_count)
+
+    return {
+        "requested_percent": requested_pattern_percent,
+        "requested_count": requested_pattern_count,
+        "total_pattern_count": len(sorted_pattern_rows),
+        "effective_pattern_count": effective_pattern_count,
+        "used_pattern_count": used_pattern_count,
+        "cap": cap,
+        "selected_pattern_rows": sorted_pattern_rows[:used_pattern_count],
+    }
 
 
 def _build_flow_graph(pattern_rows, transition_rows=None, frequency_rows=None):
@@ -2006,6 +2042,7 @@ def _apply_flow_layout(nodes, edges):
 def create_pattern_flow_snapshot(
     pattern_rows,
     prepared_df=None,
+    transition_rows=None,
     frequency_rows=None,
     pattern_percent=10,
     pattern_count=None,
@@ -2014,32 +2051,19 @@ def create_pattern_flow_snapshot(
     pattern_cap=FLOW_PATTERN_CAP,
 ):
     frequency_rows = frequency_rows or []
-    cap = max(0, int(pattern_cap or 0))
-    requested_pattern_percent = clamp_flow_percent(pattern_percent)
     requested_activity_percent = clamp_flow_percent(activity_percent)
     requested_connection_percent = clamp_flow_percent(connection_percent)
-    sorted_pattern_rows = sorted(
+    pattern_selection = select_pattern_rows_for_flow(
         pattern_rows,
-        key=lambda row: (
-            -int(row.get(FLOW_PATTERN_CASE_COUNT_COLUMN) or 0),
-            str(row.get(FLOW_PATTERN_COLUMN) or ""),
-        ),
+        pattern_percent=pattern_percent,
+        pattern_count=pattern_count,
+        pattern_cap=pattern_cap,
     )
-
-    effective_pattern_count = min(len(sorted_pattern_rows), cap)
-    requested_pattern_count = None if pattern_count is None else max(0, int(pattern_count or 0))
-    if requested_pattern_count is None:
-        used_pattern_count = _calculate_flow_limit(
-            effective_pattern_count,
-            requested_pattern_percent,
-        )
-    else:
-        used_pattern_count = min(effective_pattern_count, requested_pattern_count)
-    selected_pattern_rows = sorted_pattern_rows[:used_pattern_count]
+    selected_pattern_rows = pattern_selection["selected_pattern_rows"]
     selected_frequency_rows = list(frequency_rows or [])
-    selected_transition_rows = []
+    selected_transition_rows = list(transition_rows or [])
 
-    if prepared_df is not None:
+    if not selected_transition_rows and prepared_df is not None:
         selected_pattern_df = _build_selected_pattern_prepared_df(prepared_df, selected_pattern_rows)
         if selected_pattern_df is not None and not selected_pattern_df.empty:
             selected_transition_rows = convert_analysis_result_to_records(
@@ -2061,12 +2085,12 @@ def create_pattern_flow_snapshot(
 
     return {
         "pattern_window": {
-            "requested_percent": requested_pattern_percent,
-            "requested_count": requested_pattern_count,
-            "total_pattern_count": len(sorted_pattern_rows),
-            "effective_pattern_count": effective_pattern_count,
-            "used_pattern_count": used_pattern_count,
-            "cap": cap,
+            "requested_percent": pattern_selection["requested_percent"],
+            "requested_count": pattern_selection["requested_count"],
+            "total_pattern_count": pattern_selection["total_pattern_count"],
+            "effective_pattern_count": pattern_selection["effective_pattern_count"],
+            "used_pattern_count": pattern_selection["used_pattern_count"],
+            "cap": pattern_selection["cap"],
         },
         "activity_window": {
             "requested_percent": requested_activity_percent,
@@ -2094,7 +2118,7 @@ def create_variant_flow_snapshot(
     filtered_df = filter_prepared_df_by_pattern(prepared_df, variant_pattern)
 
     if filtered_df.empty:
-        raise ValueError("Variant was not found.")
+        raise ValueError("バリアントが見つかりません。")
 
     return create_pattern_flow_snapshot(
         pattern_rows=[
@@ -2106,8 +2130,8 @@ def create_variant_flow_snapshot(
         prepared_df=filtered_df,
         pattern_percent=100,
         pattern_count=1,
-        activity_percent=100,
-        connection_percent=100,
+        activity_percent=activity_percent,
+        connection_percent=connection_percent,
         pattern_cap=1,
     )
 
@@ -2116,7 +2140,7 @@ def create_pattern_bottleneck_details(prepared_df, pattern):
     pattern_df = filter_prepared_df_by_pattern(prepared_df, pattern)
 
     if pattern_df.empty:
-        raise ValueError("Pattern was not found.")
+        raise ValueError("パターンが見つかりません。")
 
     pattern_df = pattern_df.sort_values(["case_id", "sequence_no"]).copy()
     transition_df = build_duration_interval_table(pattern_df)

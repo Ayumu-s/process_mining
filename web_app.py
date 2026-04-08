@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import inspect
 import json
 from pathlib import Path
+import shutil
 import unicodedata
 from urllib.parse import quote
 from uuid import uuid4
@@ -17,12 +18,17 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from openpyxl import Workbook
+from openpyxl.chart import BarChart, PieChart, Reference
+from openpyxl.chart.data_source import AxDataSource, StrRef
+from openpyxl.chart.label import DataLabelList
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from 共通スクリプト.Excel出力.excel_exporter import build_excel_bytes
 from 共通スクリプト.analysis_service import (
     DEFAULT_ANALYSIS_KEYS,
+    FLOW_PATTERN_CASE_COUNT_COLUMN,
+    FLOW_PATTERN_COLUMN,
     create_activity_case_drilldown,
     analyze_prepared_event_log,
     create_analysis_records,
@@ -31,7 +37,6 @@ from 共通スクリプト.analysis_service import (
     create_dashboard_summary,
     create_impact_summary,
     create_log_diagnostics,
-    create_pattern_index_entries,
     create_rule_based_insights,
     create_root_cause_summary,
     create_transition_case_drilldown,
@@ -47,15 +52,37 @@ from 共通スクリプト.analysis_service import (
     merge_filter_params,
     normalize_filter_params,
     normalize_filter_column_settings,
+    select_pattern_rows_for_flow,
+)
+from 共通スクリプト.duckdb_service import (
+    persist_prepared_parquet,
+    query_activity_case_drilldown,
+    query_analysis_records,
+    query_bottleneck_summary,
+    query_case_trace_details,
+    query_dashboard_summary,
+    query_filtered_meta,
+    query_impact_summary,
+    query_pattern_bottleneck_details,
+    query_period_text,
+    query_root_cause_summary,
+    query_transition_records_for_patterns,
+    query_transition_case_drilldown,
+    query_variant_summary,
 )
 
 
 BASE_DIR = Path(__file__).resolve().parent
 SAMPLE_FILE = BASE_DIR / "process_mining_sample_10000行.csv"
+RUN_STORAGE_DIR = BASE_DIR / "storage" / "runs"
 MAX_STORED_RUNS = 5
 PREVIEW_ROW_COUNT = 10
+DEFAULT_LOG_DIAGNOSTIC_SAMPLE_ROW_LIMIT = 3000
+MAX_LOG_DIAGNOSTIC_SAMPLE_ROW_LIMIT = 50000
 PROCESS_FLOW_PATTERN_CAP = 300
 MAX_PATTERN_FLOW_CACHE = 24
+LARGE_DATASET_FLOW_FAST_PATH_THRESHOLD = 1_000_000
+PARQUET_ONLY_PREPARED_DF_THRESHOLD = 1_000_000
 FILTER_PARAM_NAMES = (
     "date_from",
     "date_to",
@@ -70,14 +97,21 @@ FILTER_LABEL_NAMES = ("filter_label_1", "filter_label_2", "filter_label_3")
 REPORT_SHEET_NAMES = {
     "summary": "サマリー",
     "ai_insights": "AI解説",
+    "pattern_conclusion": "結論サマリー",
+    "pattern_dashboard": "サマリーダッシュボード",
     "frequency": "頻度分析",
     "transition": "前後処理分析",
     "pattern": "処理順パターン分析",
-    "variant": "Variant分析",
+    "pattern_summary": "パターンサマリー",
+    "variant": "バリアント分析",
     "bottleneck": "ボトルネック分析",
     "impact": "改善インパクト分析",
     "drilldown": "ドリルダウン",
     "case_trace": "ケース追跡",
+}
+LOG_DIAGNOSTIC_SHEET_NAMES = {
+    "summary": "ログ診断",
+    "sample": "ログサンプル",
 }
 REPORT_HEADER_LABELS = {
     "run_id": "実行ID",
@@ -88,44 +122,65 @@ REPORT_HEADER_LABELS = {
     "exported_at": "出力日時",
     "case_count": "対象ケース数",
     "event_count": "対象イベント数",
-    "applied_filters": "適用フィルタ条件",
-    "selected_variant": "選択中Variant",
-    "selected_activity": "選択中Activity",
+    "applied_filters": "適用条件",
+    "selected_variant": "選択中バリアント",
+    "selected_activity": "選択中アクティビティ",
     "selected_transition": "選択中遷移",
-    "selected_case_id": "選択中Case ID",
+    "selected_case_id": "選択中ケースID",
     "rank": "順位",
-    "pattern_variant": "Pattern / Variant",
-    "variant_id": "Variant ID",
+    "pattern_variant": "パターン / バリアント",
+    "repeat_flag": "繰り返し",
+    "repeat_count": "繰り返し回数",
+    "repeat_rate_pct": "繰り返し率(%)",
+    "repeat_rate_band": "繰り返し率区分",
+    "review_flag": "確認区分",
+    "avg_case_duration_diff_min": "平均処理時間差分(分)",
+    "improvement_priority_score": "改善優先度スコア",
+    "overall_impact_pct": "全体影響度(%)",
+    "fastest_pattern_flag": "最短処理",
+    "simple_comment": "簡易コメント",
+    "variant_id": "バリアントID",
     "count": "件数",
     "case_count": "対象ケース数",
     "ratio": "比率",
+    "cumulative_case_ratio_pct": "累積カバー率(%)",
     "pattern": "パターン",
-    "activity_count": "Activity数",
-    "avg_case_duration": "平均所要時間",
-    "avg_case_duration_min": "平均ケース時間(分)",
-    "avg_duration": "平均処理時間",
-    "avg_duration_text": "平均処理時間",
-    "avg_duration_min": "平均処理時間(分)",
-    "median_duration_min": "中央値処理時間(分)",
-    "min_duration_min": "最小処理時間(分)",
-    "median_duration_text": "中央値処理時間",
-    "max_duration": "最大処理時間",
-    "max_duration_text": "最大処理時間",
-    "max_duration_min": "最大処理時間(分)",
-    "total_duration_min": "合計処理時間(分)",
+    "activity_count": "アクティビティ数",
+    "avg_case_duration": "平均ケース処理時間",
+    "avg_case_duration_min": "平均ケース処理時間(分)",
+    "std_case_duration_min": "標準偏差ケース処理時間(分)",
+    "min_case_duration_min": "最短処理時間(分)",
+    "max_case_duration_min": "最長処理時間(分)",
+    "p75_case_duration_min": "75%点ケース処理時間(分)",
+    "p90_case_duration_min": "90%点ケース処理時間(分)",
+    "p95_case_duration_min": "95%点ケース処理時間(分)",
+    "avg_duration": "平均所要時間",
+    "avg_duration_text": "平均所要時間",
+    "avg_duration_min": "平均所要時間(分)",
+    "median_duration_min": "中央値所要時間(分)",
+    "std_duration_min": "標準偏差(分)",
+    "min_duration_min": "最小所要時間(分)",
+    "median_duration_text": "中央値所要時間",
+    "max_duration": "最大所要時間",
+    "max_duration_text": "最大所要時間",
+    "max_duration_min": "最大所要時間(分)",
+    "total_duration_min": "合計所要時間(分)",
+    "p75_duration_min": "75%点(分)",
+    "p90_duration_min": "90%点(分)",
+    "p95_duration_min": "95%点(分)",
     "impact_score": "改善インパクト",
     "impact_share_pct": "改善インパクト比率(%)",
     "wait_share_pct": "構成比(%)",
     "case_id": "ケースID",
     "from_time": "開始時刻",
     "to_time": "終了時刻",
-    "activity": "Activity",
-    "next_activity": "次Activity",
+    "activity": "アクティビティ",
+    "next_activity": "次アクティビティ",
     "sequence_no": "ステップ順",
     "transition": "遷移",
     "transition_label": "遷移",
     "duration_text": "所要時間",
-    "total_duration": "総所要時間",
+    "total_duration": "総処理時間",
     "start_time": "開始時刻",
     "end_time": "終了時刻",
 }
@@ -156,7 +211,68 @@ EXCEL_BOLD_FONT = Font(bold=True, size=10, color="1F2937")
 DEFAULT_HEADERS = {
     "case_id_column": "case_id",
     "activity_column": "activity",
-    "timestamp_column": "start_time",
+    "timestamp_column": "timestamp",
+}
+CASE_ID_COLUMN_CANDIDATES = [
+    "case_id",
+    "Case ID",
+    "CASE_ID",
+    "caseId",
+    "CaseID",
+    "caseid",
+    "ケースID",
+    "案件ID",
+    "case_no",
+    "CaseNo",
+    "case_number",
+    "CaseNumber",
+]
+ACTIVITY_COLUMN_CANDIDATES = [
+    "activity",
+    "Activity",
+    "ACTIVITY",
+    "activity_name",
+    "ActivityName",
+    "task",
+    "Task",
+    "event",
+    "Event",
+    "action",
+    "Action",
+    "アクティビティ",
+    "アクティビティ名",
+    "処理",
+    "工程",
+    "ステップ",
+]
+TIMESTAMP_COLUMN_CANDIDATES = [
+    "timestamp",
+    "Timestamp",
+    "TIMESTAMP",
+    "start_time",
+    "StartTime",
+    "start_timestamp",
+    "日時",
+    "タイムスタンプ",
+    "開始日時",
+    "event_timestamp",
+    "EventTimestamp",
+    "time",
+    "Time",
+    "datetime",
+    "DateTime",
+    "date",
+    "Date",
+]
+COLUMN_CANDIDATES = {
+    "case_id_column": CASE_ID_COLUMN_CANDIDATES,
+    "activity_column": ACTIVITY_COLUMN_CANDIDATES,
+    "timestamp_column": TIMESTAMP_COLUMN_CANDIDATES,
+}
+COLUMN_DISPLAY_LABELS = {
+    "case_id_column": "ケースID",
+    "activity_column": "アクティビティ",
+    "timestamp_column": "タイムスタンプ",
 }
 
 app = FastAPI(title="Process Mining Workbench")
@@ -180,13 +296,83 @@ def _template_response(request: Request, name: str, context: dict):
 RUN_STORE = OrderedDict()
 
 
+def _normalize_header_name(value):
+    return str(value or "").strip()
+
+
+def _build_header_lookup(headers):
+    exact_lookup = {}
+    casefold_lookup = {}
+
+    for header in headers:
+        normalized_header = _normalize_header_name(header)
+        if not normalized_header:
+            continue
+        exact_lookup.setdefault(normalized_header, normalized_header)
+        casefold_lookup.setdefault(normalized_header.casefold(), normalized_header)
+
+    return exact_lookup, casefold_lookup
+
+
+def suggest_column_name(headers, field_name, preferred_name=""):
+    exact_lookup, casefold_lookup = _build_header_lookup(headers)
+    requested_name = _normalize_header_name(preferred_name)
+
+    if requested_name:
+        exact_match = exact_lookup.get(requested_name)
+        if exact_match:
+            return exact_match
+
+        casefold_match = casefold_lookup.get(requested_name.casefold())
+        if casefold_match:
+            return casefold_match
+
+    for candidate_name in COLUMN_CANDIDATES.get(field_name, []):
+        normalized_candidate = _normalize_header_name(candidate_name)
+        if not normalized_candidate:
+            continue
+
+        exact_match = exact_lookup.get(normalized_candidate)
+        if exact_match:
+            return exact_match
+
+        casefold_match = casefold_lookup.get(normalized_candidate.casefold())
+        if casefold_match:
+            return casefold_match
+
+    return ""
+
+
+def resolve_required_column_name(headers, field_name, preferred_name=""):
+    resolved_name = suggest_column_name(headers, field_name, preferred_name)
+    if resolved_name:
+        return resolved_name
+
+    requested_name = (
+        _normalize_header_name(preferred_name)
+        or DEFAULT_HEADERS.get(field_name)
+        or (COLUMN_CANDIDATES.get(field_name) or [""])[0]
+    )
+    available_headers = ", ".join(
+        normalized_header
+        for normalized_header in (_normalize_header_name(header) for header in headers)
+        if normalized_header
+    ) or "(なし)"
+    field_label = COLUMN_DISPLAY_LABELS.get(field_name, field_name)
+    raise ValueError(
+        f"{field_label}列 '{requested_name}' が見つかりません。"
+        f"CSVのヘッダーを確認してください。利用可能な列: {available_headers}"
+    )
+
+
 def build_column_selection_payload(headers):
-    header_set = set(headers)
     return {
         "headers": headers,
         "default_selection": {
-            field_name: (
-                default_header if default_header in header_set else ""
+            field_name: suggest_column_name(
+                headers,
+                field_name,
+                default_header,
             )
             for field_name, default_header in DEFAULT_HEADERS.items()
         },
@@ -195,9 +381,9 @@ def build_column_selection_payload(headers):
 
 def validate_selected_columns(case_id_column, activity_column, timestamp_column):
     selected_columns = {
-        "Case ID": case_id_column,
-        "Activity": activity_column,
-        "Timestamp": timestamp_column,
+        "ケースID": case_id_column,
+        "アクティビティ": activity_column,
+        "タイムスタンプ": timestamp_column,
     }
 
     missing_fields = [
@@ -206,11 +392,11 @@ def validate_selected_columns(case_id_column, activity_column, timestamp_column)
         if not str(column_name or "").strip()
     ]
     if missing_fields:
-        raise ValueError(f"Please select: {' / '.join(missing_fields)}")
+        raise ValueError(f"次の列を選択してください: {' / '.join(missing_fields)}")
 
     normalized_columns = [column_name.strip() for column_name in selected_columns.values()]
     if len(set(normalized_columns)) != len(normalized_columns):
-        raise ValueError("Case ID / Activity / Timestamp にはそれぞれ異なる列を選択してください。")
+        raise ValueError("ケースID列 / アクティビティ列 / タイムスタンプ列にはそれぞれ異なる列を選択してください。")
 
 
 def validate_filter_column_settings(filter_column_settings):
@@ -258,6 +444,20 @@ def get_static_version():
     )
 
 
+def get_run_storage_dir(run_id):
+    return RUN_STORAGE_DIR / str(run_id)
+
+
+def get_run_prepared_parquet_path(run_id):
+    return get_run_storage_dir(run_id) / "prepared.parquet"
+
+
+def cleanup_run_storage(run_id):
+    run_storage_dir = get_run_storage_dir(run_id)
+    if run_storage_dir.exists():
+        shutil.rmtree(run_storage_dir, ignore_errors=True)
+
+
 def save_run_data(
     source_file_name,
     selected_analysis_keys,
@@ -267,15 +467,19 @@ def save_run_data(
     base_filter_params,
 ):
     run_id = uuid4().hex
+    prepared_row_count = int(len(prepared_df))
+    pattern_rows = ((result or {}).get("analyses", {}).get("pattern") or {}).get("rows", [])
     RUN_STORE[run_id] = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source_file_name": source_file_name,
         "selected_analysis_keys": selected_analysis_keys,
         "prepared_df": prepared_df,
+        "prepared_row_count": prepared_row_count,
+        "prepared_parquet_path": None,
         "result": result,
         "column_settings": column_settings,
         "base_filter_params": base_filter_params,
-        "pattern_index_entries": None,
+        "pattern_index_entries": build_pattern_index_entries_from_rows(pattern_rows),
         "pattern_flow_cache": OrderedDict(),
         "variant_cache": {},
         "bottleneck_cache": {},
@@ -285,12 +489,16 @@ def save_run_data(
         "insights_cache": {},
         "ai_insights_cache": {},
         "analysis_cache": {},
-        "filter_options": None,
+        "filter_options": get_filter_options(
+            prepared_df,
+            filter_column_settings=column_settings,
+        ),
     }
     RUN_STORE.move_to_end(run_id)
 
     while len(RUN_STORE) > MAX_STORED_RUNS:
-        RUN_STORE.popitem(last=False)
+        removed_run_id, _ = RUN_STORE.popitem(last=False)
+        cleanup_run_storage(removed_run_id)
 
     return run_id
 
@@ -299,10 +507,27 @@ def get_run_data(run_id):
     run_data = RUN_STORE.get(run_id)
 
     if not run_data:
-        raise HTTPException(status_code=404, detail="Run data was not found.")
+        raise HTTPException(status_code=404, detail="実行データが見つかりません。")
 
     RUN_STORE.move_to_end(run_id)
     return run_data
+
+
+def has_parquet_backing(run_data):
+    prepared_parquet_path = run_data.get("prepared_parquet_path")
+    return bool(prepared_parquet_path and Path(prepared_parquet_path).exists())
+
+
+def get_run_variant_pattern(run_data, variant_id=None, pattern_index=None, filter_params=None):
+    if pattern_index is not None:
+        _, _, _, pattern = get_pattern_summary_row(run_data, pattern_index)
+        return pattern
+
+    if variant_id is not None:
+        variant_item = get_variant_item(run_data, variant_id, filter_params=filter_params)
+        return variant_item["pattern"]
+
+    return None
 
 
 def get_request_filter_params(request: Request):
@@ -348,6 +573,49 @@ def build_filtered_meta(prepared_df):
         "case_count": int(prepared_df["case_id"].nunique()) if not prepared_df.empty else 0,
         "event_count": int(len(prepared_df)),
     }
+
+
+def get_filtered_meta_for_run(run_data, filter_params=None, variant_pattern=None):
+    if has_parquet_backing(run_data):
+        return query_filtered_meta(
+            run_data["prepared_parquet_path"],
+            filter_params=filter_params,
+            filter_column_settings=run_data.get("column_settings"),
+            variant_pattern=variant_pattern,
+        )
+
+    filtered_df = get_filtered_prepared_df(
+        run_data,
+        filter_params=filter_params,
+        variant_id=None,
+        pattern_index=None,
+    )
+    if variant_pattern:
+        filtered_df = filter_prepared_df_by_pattern(filtered_df, variant_pattern)
+    return build_filtered_meta(filtered_df)
+
+
+def get_base_filtered_prepared_df(run_data, filter_params=None):
+    prepared_df = run_data.get("prepared_df")
+    if prepared_df is None:
+        raise HTTPException(
+            status_code=500,
+            detail="内部データの再計算に必要なメモリ上のイベントログがありません。",
+        )
+
+    filter_cache_key = build_filter_cache_key(filter_params)
+    if is_unfiltered_request(filter_cache_key):
+        return prepared_df, {
+            "case_count": int(run_data["result"]["case_count"]),
+            "event_count": int(run_data["result"]["event_count"]),
+        }
+
+    filtered_df = filter_prepared_df(
+        prepared_df,
+        filter_params,
+        filter_column_settings=run_data.get("column_settings"),
+    )
+    return filtered_df, build_filtered_meta(filtered_df)
 
 
 def build_column_settings_payload(column_settings):
@@ -417,6 +685,27 @@ def build_analysis_payload(analysis, row_limit=None, row_offset=0):
     }
 
 
+def extract_pattern_text_from_row(row):
+    for column_name, value in (row or {}).items():
+        normalized_column_name = str(column_name or "").lower()
+        normalized_value = str(value or "").strip()
+        if not normalized_value:
+            continue
+        if "pattern" in normalized_column_name or "パターン" in str(column_name or ""):
+            return normalized_value
+    return ""
+
+
+def build_pattern_index_entries_from_rows(pattern_rows):
+    return [
+        {
+            "index": int(index),
+            "pattern": extract_pattern_text_from_row(row),
+        }
+        for index, row in enumerate(pattern_rows or [])
+    ]
+
+
 def get_pattern_index_for_pattern(run_data, pattern_text):
     normalized_pattern = str(pattern_text or "").strip()
     if not normalized_pattern:
@@ -425,6 +714,15 @@ def get_pattern_index_for_pattern(run_data, pattern_text):
     pattern_analysis = run_data["result"]["analyses"].get("pattern")
     if not pattern_analysis:
         return None
+
+    pattern_index_entries = run_data.get("pattern_index_entries")
+    if pattern_index_entries is None:
+        pattern_index_entries = build_pattern_index_entries_from_rows(pattern_analysis.get("rows", []))
+        run_data["pattern_index_entries"] = pattern_index_entries
+
+    for pattern_index, entry in enumerate(pattern_index_entries):
+        if str(entry.get("pattern") or "").strip() == normalized_pattern:
+            return pattern_index
 
     for pattern_index, row in enumerate(pattern_analysis.get("rows", [])):
         for column_name, value in row.items():
@@ -441,10 +739,13 @@ def get_pattern_index_for_pattern(run_data, pattern_text):
 
 
 def build_variant_response_item(variant_item, run_data=None):
+    activities = variant_item["activities"]
+    repeated_activity_count = len(activities) - len({str(activity or "").strip() for activity in activities if str(activity or "").strip()})
+    repeat_flag = variant_item.get("repeat_flag", "○" if repeated_activity_count > 0 else "")
     return {
         "variant_id": variant_item["variant_id"],
-        "activities": variant_item["activities"],
-        "activity_count": variant_item.get("activity_count", len(variant_item["activities"])),
+        "activities": activities,
+        "activity_count": variant_item.get("activity_count", len(activities)),
         "pattern": variant_item.get("pattern", ""),
         "pattern_index": (
             get_pattern_index_for_pattern(run_data, variant_item.get("pattern"))
@@ -455,6 +756,7 @@ def build_variant_response_item(variant_item, run_data=None):
         "ratio": variant_item["ratio"],
         "avg_case_duration_sec": variant_item.get("avg_case_duration_sec", 0.0),
         "avg_case_duration_text": variant_item.get("avg_case_duration_text", "0s"),
+        "repeat_flag": repeat_flag,
     }
 
 
@@ -926,7 +1228,7 @@ def build_filter_summary_text(filter_params, column_settings):
 
     activity_values = normalized_filters.get("activity_values")
     if activity_values:
-        activity_label = "Activity 含む" if normalized_filters.get("activity_mode") != "exclude" else "Activity 除外"
+        activity_label = "アクティビティ 含む" if normalized_filters.get("activity_mode") != "exclude" else "アクティビティ 除外"
         summary_items.append(f"{activity_label}: {activity_values}")
 
     return " / ".join(summary_items) if summary_items else "未適用"
@@ -1029,9 +1331,26 @@ def resolve_pattern_detail_sheet_count(pattern_display_limit, available_count):
 def build_pattern_overview_rows(pattern_rows, variant_items, pattern_column_label, analysis_definitions):
     pattern_config = analysis_definitions.get("pattern", {}).get("config", {})
     pattern_display_columns = pattern_config.get("display_columns", {})
+    repeat_flag_label = pattern_display_columns.get("repeat_flag", "繰り返し")
+    repeat_count_label = pattern_display_columns.get("repeat_count", "繰り返し回数")
+    repeat_rate_label = pattern_display_columns.get("repeat_rate_pct", "繰り返し率(%)")
+    repeat_rate_band_label = pattern_display_columns.get("repeat_rate_band", "繰り返し率区分")
+    review_flag_label = pattern_display_columns.get("review_flag", "確認区分")
+    avg_case_duration_diff_label = pattern_display_columns.get("avg_case_duration_diff_min", "平均処理時間差分(分)")
+    improvement_priority_score_label = pattern_display_columns.get("improvement_priority_score", "改善優先度スコア")
+    overall_impact_pct_label = pattern_display_columns.get("overall_impact_pct", "全体影響度(%)")
+    fastest_pattern_flag_label = pattern_display_columns.get("fastest_pattern_flag", "最短処理")
+    simple_comment_label = pattern_display_columns.get("simple_comment", "簡易コメント")
     case_count_label = pattern_display_columns.get("case_count", "ケース数")
     case_ratio_label = pattern_display_columns.get("case_ratio_pct", "ケース比率(%)")
-    avg_case_duration_label = pattern_display_columns.get("avg_case_duration_min", "平均ケース時間(分)")
+    cumulative_case_ratio_label = pattern_display_columns.get("cumulative_case_ratio_pct", "累積カバー率(%)")
+    avg_case_duration_label = pattern_display_columns.get("avg_case_duration_min", "平均ケース処理時間(分)")
+    std_case_duration_label = pattern_display_columns.get("std_case_duration_min", "標準偏差ケース処理時間(分)")
+    min_case_duration_label = pattern_display_columns.get("min_case_duration_min", "最小ケース処理時間(分)")
+    max_case_duration_label = pattern_display_columns.get("max_case_duration_min", "最大ケース処理時間(分)")
+    p75_case_duration_label = pattern_display_columns.get("p75_case_duration_min", "75%点ケース処理時間(分)")
+    p90_case_duration_label = pattern_display_columns.get("p90_case_duration_min", "90%点ケース処理時間(分)")
+    p95_case_duration_label = pattern_display_columns.get("p95_case_duration_min", "95%点ケース処理時間(分)")
     variant_by_pattern = {
         str(variant_item.get("pattern") or "").strip(): variant_item
         for variant_item in (variant_items or [])
@@ -1050,14 +1369,381 @@ def build_pattern_overview_rows(pattern_rows, variant_items, pattern_column_labe
                     if variant_id
                     else f"Pattern #{index}"
                 ),
+                "repeat_flag": pattern_row.get(repeat_flag_label, ""),
+                "repeat_count": pattern_row.get(repeat_count_label, 0),
+                "repeat_rate_pct": pattern_row.get(repeat_rate_label, 0),
+                "repeat_rate_band": pattern_row.get(repeat_rate_band_label, ""),
+                "review_flag": pattern_row.get(review_flag_label, ""),
+                "avg_case_duration_diff_min": pattern_row.get(avg_case_duration_diff_label, 0),
+                "improvement_priority_score": pattern_row.get(improvement_priority_score_label, 0),
+                "overall_impact_pct": pattern_row.get(overall_impact_pct_label, 0),
+                "fastest_pattern_flag": pattern_row.get(fastest_pattern_flag_label, ""),
+                "simple_comment": pattern_row.get(simple_comment_label, ""),
                 "count": pattern_row.get(case_count_label, 0),
                 "ratio": pattern_row.get(case_ratio_label, 0),
+                "cumulative_case_ratio_pct": pattern_row.get(cumulative_case_ratio_label, 0),
                 "avg_case_duration_min": pattern_row.get(avg_case_duration_label, 0),
+                "std_case_duration_min": pattern_row.get(std_case_duration_label, 0),
+                "min_case_duration_min": pattern_row.get(min_case_duration_label, 0),
+                "max_case_duration_min": pattern_row.get(max_case_duration_label, 0),
+                "p75_case_duration_min": pattern_row.get(p75_case_duration_label, 0),
+                "p90_case_duration_min": pattern_row.get(p90_case_duration_label, 0),
+                "p95_case_duration_min": pattern_row.get(p95_case_duration_label, 0),
                 "pattern": pattern_text,
             }
         )
 
     return overview_rows
+
+
+def coerce_report_number(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def build_pattern_export_summary(pattern_rows, pattern_display_columns):
+    repeat_flag_label = pattern_display_columns.get("repeat_flag", "繰り返し")
+    repeat_count_label = pattern_display_columns.get("repeat_count", "繰り返し回数")
+    repeat_rate_label = pattern_display_columns.get("repeat_rate_pct", "繰り返し率(%)")
+    repeat_rate_band_label = pattern_display_columns.get("repeat_rate_band", "繰り返し率区分")
+    review_flag_label = pattern_display_columns.get("review_flag", "確認区分")
+    avg_case_duration_diff_label = pattern_display_columns.get("avg_case_duration_diff_min", "平均処理時間差分(分)")
+    improvement_priority_score_label = pattern_display_columns.get("improvement_priority_score", "改善優先度スコア")
+    overall_impact_pct_label = pattern_display_columns.get("overall_impact_pct", "全体影響度(%)")
+    fastest_pattern_flag_label = pattern_display_columns.get("fastest_pattern_flag", "最短処理")
+    simple_comment_label = pattern_display_columns.get("simple_comment", "簡易コメント")
+    case_count_label = pattern_display_columns.get("case_count", "ケース数")
+    case_ratio_label = pattern_display_columns.get("case_ratio_pct", "ケース比率(%)")
+    cumulative_case_ratio_label = pattern_display_columns.get("cumulative_case_ratio_pct", "累積カバー率(%)")
+    avg_case_duration_label = pattern_display_columns.get("avg_case_duration_min", "平均ケース処理時間(分)")
+    min_case_duration_label = pattern_display_columns.get("min_case_duration_min", "最小ケース処理時間(分)")
+    max_case_duration_label = pattern_display_columns.get("max_case_duration_min", "最大ケース処理時間(分)")
+    pattern_label = pattern_display_columns.get("pattern", "処理順パターン")
+
+    comparison_rows = []
+    repeated_patterns = []
+    improvement_targets = []
+    for index, pattern_row in enumerate(pattern_rows or [], start=1):
+        comparison_row = {
+            "順位": index,
+            "繰り返し": pattern_row.get(repeat_flag_label, ""),
+            "繰り返し回数": pattern_row.get(repeat_count_label, 0),
+            "繰り返し率(%)": pattern_row.get(repeat_rate_label, 0),
+            "繰り返し率区分": pattern_row.get(repeat_rate_band_label, ""),
+            "件数": pattern_row.get(case_count_label, 0),
+            "全体比率(%)": pattern_row.get(case_ratio_label, 0),
+            "平均処理時間(分)": pattern_row.get(avg_case_duration_label, 0),
+            "平均処理時間差分(分)": pattern_row.get(avg_case_duration_diff_label, 0),
+            "改善優先度スコア": pattern_row.get(improvement_priority_score_label, 0),
+            "全体影響度(%)": pattern_row.get(overall_impact_pct_label, 0),
+            "最短処理": pattern_row.get(fastest_pattern_flag_label, ""),
+            "最短処理時間(分)": pattern_row.get(min_case_duration_label, 0),
+            "最長処理時間(分)": pattern_row.get(max_case_duration_label, 0),
+            "確認区分": pattern_row.get(review_flag_label, ""),
+            "簡易コメント": pattern_row.get(simple_comment_label, ""),
+            "パターン": pattern_row.get(pattern_label, ""),
+        }
+        comparison_rows.append(comparison_row)
+        if str(pattern_row.get(review_flag_label, "")).strip() != "要確認":
+            pass
+        else:
+            repeated_patterns.append(comparison_row)
+        if (
+            coerce_report_number(pattern_row.get(repeat_rate_label, 0)) >= 10.0
+            and coerce_report_number(pattern_row.get(avg_case_duration_diff_label, 0)) > 0
+        ):
+            improvement_targets.append(comparison_row)
+
+    top3_rows = comparison_rows[:3]
+    top3_coverage_pct = (
+        coerce_report_number((pattern_rows or [])[2].get(cumulative_case_ratio_label, 0))
+        if len(pattern_rows or []) >= 3
+        else (
+            coerce_report_number((pattern_rows or [])[-1].get(cumulative_case_ratio_label, 0))
+            if pattern_rows
+            else 0.0
+        )
+    )
+    top10_coverage_pct = (
+        coerce_report_number((pattern_rows or [])[9].get(cumulative_case_ratio_label, 0))
+        if len(pattern_rows or []) >= 10
+        else (
+            coerce_report_number((pattern_rows or [])[-1].get(cumulative_case_ratio_label, 0))
+            if pattern_rows
+            else 0.0
+        )
+    )
+    repeated_case_ratio_pct = round(
+        sum(coerce_report_number(problem_row["全体比率(%)"]) for problem_row in repeated_patterns),
+        2,
+    )
+    improvement_targets = sorted(
+        improvement_targets,
+        key=lambda row: (
+            -coerce_report_number(row.get("改善優先度スコア"), 0),
+            -coerce_report_number(row.get("繰り返し率(%)"), 0),
+            -coerce_report_number(row.get("平均処理時間差分(分)"), 0),
+            -coerce_report_number(row.get("件数"), 0),
+            row.get("パターン", ""),
+        ),
+    )[:3]
+    fastest_pattern = min(
+        comparison_rows,
+        key=lambda row: (
+            coerce_report_number(row.get("平均処理時間(分)"), float("inf")),
+            row.get("順位", 0),
+        ),
+        default=None,
+    )
+    coverage_summary_text = (
+        f"上位3パターンで {round(top3_coverage_pct, 2):.2f}%、"
+        f"上位10パターンで {round(top10_coverage_pct, 2):.2f}% をカバーしています。"
+    )
+
+    return {
+        "top_patterns": top3_rows,
+        "comparison_rows": comparison_rows[:10],
+        "repeated_patterns": repeated_patterns,
+        "top3_coverage_pct": round(top3_coverage_pct, 2),
+        "top10_coverage_pct": round(top10_coverage_pct, 2),
+        "coverage_summary_text": coverage_summary_text,
+        "repeated_case_ratio_pct": repeated_case_ratio_pct,
+        "fastest_pattern": fastest_pattern or {},
+        "improvement_targets": improvement_targets,
+    }
+
+
+def calculate_pattern_time_impact_minutes(pattern_row):
+    return round(
+        max(0.0, coerce_report_number(pattern_row.get("平均処理時間差分(分)"), 0.0))
+        * max(0.0, coerce_report_number(pattern_row.get("件数"), 0.0)),
+        2,
+    )
+
+
+def build_pattern_issue_row(pattern_row):
+    repeat_rate_pct = coerce_report_number(pattern_row.get("繰り返し率(%)"), 0.0)
+    duration_diff_min = coerce_report_number(pattern_row.get("平均処理時間差分(分)"), 0.0)
+    pattern_text = str(pattern_row.get("パターン") or "").strip()
+
+    if repeat_rate_pct >= 30:
+        issue_text = f"繰り返し率が {repeat_rate_pct:.2f}% と高く、手戻りが多いパターンです。"
+        cause_text = "差戻しや再確認が発生しやすく、同じ工程を複数回通過している可能性があります。"
+        action_text = "差戻し発生条件を洗い出し、一次判定や入力チェックの前倒しを検討してください。"
+    elif repeat_rate_pct >= 10:
+        issue_text = f"繰り返し率が {repeat_rate_pct:.2f}% あり、再作業が混在しています。"
+        cause_text = "一部ケースで確認や承認のやり直しが発生し、処理が伸びている可能性があります。"
+        action_text = "繰り返しが起きる工程の条件分岐を整理し、再実行の発生源を減らしてください。"
+    else:
+        issue_text = f"繰り返しは少ないものの、平均処理時間が全体平均より {duration_diff_min:.2f} 分長いパターンです。"
+        cause_text = "特定工程の待ちや滞留により、パターン全体の処理時間が長くなっている可能性があります。"
+        action_text = "ボトルネック工程の担当・承認・待機条件を見直し、滞留時間の短縮を優先してください。"
+
+    return {
+        "問題点": issue_text,
+        "原因": cause_text,
+        "改善案": action_text,
+        "期待効果（時間短縮・分）": calculate_pattern_time_impact_minutes(pattern_row),
+        "対象パターン": pattern_text,
+    }
+
+
+def build_pattern_conclusion_summary(pattern_summary):
+    comparison_rows = pattern_summary.get("comparison_rows", [])
+    improvement_targets = pattern_summary.get("improvement_targets", [])
+    repeated_patterns = pattern_summary.get("repeated_patterns", [])
+    fastest_pattern = pattern_summary.get("fastest_pattern", {}) or {}
+    top_issue_candidates = improvement_targets[:3] if improvement_targets else comparison_rows[:3]
+    issue_rows = [build_pattern_issue_row(row) for row in top_issue_candidates]
+    total_impact_minutes = round(
+        sum(calculate_pattern_time_impact_minutes(row) for row in improvement_targets),
+        2,
+    )
+    overall_summary = (
+        f"上位10パターンで {coerce_report_number(pattern_summary.get('top10_coverage_pct', 0.0)):.2f}% をカバーし、"
+        f"要確認パターンは {len(repeated_patterns)} 件、改善対象TOP3で約 "
+        f"{round(sum(calculate_pattern_time_impact_minutes(row) for row in improvement_targets[:3]), 2):.2f} 分の短縮余地があります。"
+    )
+
+    return {
+        "overall_summary": overall_summary,
+        "issue_rows": issue_rows,
+        "total_impact_minutes": total_impact_minutes,
+        "total_impact_hours": round(total_impact_minutes / 60.0, 2),
+        "fastest_pattern": fastest_pattern,
+        "improvement_targets": improvement_targets[:3],
+    }
+
+
+def build_pattern_dashboard_summary(pattern_summary, pattern_conclusion):
+    top3_rows = pattern_summary.get("improvement_targets") or pattern_summary.get("comparison_rows", [])[:3]
+    problem_points = [
+        issue_row.get("問題点")
+        for issue_row in pattern_conclusion.get("issue_rows", [])
+        if str(issue_row.get("問題点") or "").strip()
+    ]
+    if not problem_points and pattern_summary.get("comparison_rows"):
+        problem_points = [
+            str(row.get("簡易コメント") or "").strip()
+            for row in pattern_summary.get("comparison_rows", [])[:3]
+            if str(row.get("簡易コメント") or "").strip()
+        ]
+
+    return {
+        "overall_summary": pattern_conclusion.get("overall_summary", ""),
+        "top3_rows": top3_rows,
+        "problem_points": problem_points[:3],
+        "top10_coverage_pct": pattern_summary.get("top10_coverage_pct", 0),
+        "total_impact_minutes": pattern_conclusion.get("total_impact_minutes", 0),
+    }
+
+
+def _set_chart_str_categories(chart, labels_ref):
+    """Set chart categories as strRef so Excel treats text labels correctly."""
+    label_formula = str(labels_ref)
+    for series in chart.ser:
+        series.cat = AxDataSource(strRef=StrRef(f=label_formula))
+
+
+def _ensure_chart_data_sheet(workbook):
+    sheet_name = "_chart_data"
+    if sheet_name in workbook.sheetnames:
+        return workbook[sheet_name]
+    data_sheet = workbook.create_sheet(title=sheet_name)
+    data_sheet.sheet_state = "hidden"
+    return data_sheet
+
+
+def _write_chart_data_block(workbook, block_label, comparison_rows, columns):
+    data_sheet = _ensure_chart_data_sheet(workbook)
+    start_row = (data_sheet.max_row or 0) + 2
+
+    data_sheet.cell(row=start_row, column=1, value=block_label)
+    header_row = start_row + 1
+    for col_offset, col_name in enumerate(columns):
+        data_sheet.cell(row=header_row, column=1 + col_offset, value=col_name)
+
+    for index, row in enumerate(comparison_rows, start=1):
+        data_row = header_row + index
+        data_sheet.cell(row=data_row, column=1, value=f"Pattern #{row.get('順位', index)}")
+        for col_offset, col_name in enumerate(columns):
+            if col_offset == 0:
+                continue
+            data_sheet.cell(
+                row=data_row, column=1 + col_offset,
+                value=coerce_report_number(row.get(col_name), 0.0),
+            )
+
+    return data_sheet, header_row, header_row + len(comparison_rows)
+
+
+def build_excel_anchor(column_letter, row_number):
+    return f"{column_letter}{max(1, int(row_number or 1))}"
+
+
+def sort_pattern_rows_by_avg_duration_desc(rows):
+    return sorted(
+        rows,
+        key=lambda row: (
+            -coerce_report_number(row.get("平均処理時間(分)"), 0.0),
+            row.get("順位", 0),
+        ),
+    )
+
+
+def append_pattern_dashboard_pie_chart(workbook, worksheet, comparison_rows, anchor="A1"):
+    if not comparison_rows:
+        return
+
+    data_sheet, header_row, max_row = _write_chart_data_block(
+        workbook, "dashboard_pie", comparison_rows, ["パターン", "件数"],
+    )
+
+    pie_chart = PieChart()
+    pie_chart.title = "上位10パターンの割合"
+    pie_chart.style = 10
+    pie_chart.height = 14.0
+    pie_chart.width = 16.0
+    pie_data = Reference(data_sheet, min_col=2, min_row=header_row, max_row=max_row)
+    pie_labels = Reference(data_sheet, min_col=1, min_row=header_row + 1, max_row=max_row)
+    pie_chart.add_data(pie_data, titles_from_data=True)
+    _set_chart_str_categories(pie_chart, pie_labels)
+    pie_chart.dLbls = DataLabelList(
+        showCatName=False,
+        showVal=False,
+        showPercent=True,
+        showSerName=False,
+        showLegendKey=False,
+        showLeaderLines=True,
+        dLblPos="bestFit",
+        separator="\n",
+    )
+    worksheet.add_chart(pie_chart, anchor)
+
+
+def append_pattern_conclusion_charts(workbook, worksheet, comparison_rows, pie_anchor="A1", bar_anchor="A20"):
+    if not comparison_rows:
+        return
+
+    data_sheet, header_row, max_row = _write_chart_data_block(
+        workbook, "conclusion_charts", comparison_rows,
+        ["パターン", "件数"],
+    )
+    bar_rows = sort_pattern_rows_by_avg_duration_desc(comparison_rows)
+    bar_data_sheet, bar_header_row, bar_max_row = _write_chart_data_block(
+        workbook,
+        "conclusion_duration_desc",
+        bar_rows,
+        ["パターン", "平均処理時間(分)"],
+    )
+
+    pie_chart = PieChart()
+    pie_chart.title = "上位10パターンの割合"
+    pie_chart.style = 10
+    pie_chart.height = 14.0
+    pie_chart.width = 16.0
+    pie_data = Reference(data_sheet, min_col=2, min_row=header_row, max_row=max_row)
+    pie_labels = Reference(data_sheet, min_col=1, min_row=header_row + 1, max_row=max_row)
+    pie_chart.add_data(pie_data, titles_from_data=True)
+    _set_chart_str_categories(pie_chart, pie_labels)
+    pie_chart.dLbls = DataLabelList(
+        showCatName=False,
+        showVal=False,
+        showPercent=True,
+        showSerName=False,
+        showLegendKey=False,
+        showLeaderLines=True,
+        dLblPos="bestFit",
+        separator="\n",
+    )
+    worksheet.add_chart(pie_chart, pie_anchor)
+
+    bar_chart = BarChart()
+    bar_chart.type = "bar"
+    bar_chart.style = 10
+    bar_chart.title = "平均処理時間の比較（長い順）"
+    bar_chart.height = 14.0
+    bar_chart.width = 16.0
+    bar_chart.legend = None
+    bar_chart.varyColors = False
+    bar_chart.gapWidth = 60
+    bar_chart.x_axis.scaling.orientation = "maxMin"
+    bar_chart.x_axis.tickLblPos = "low"
+    bar_chart.y_axis.crosses = "autoZero"
+    bar_chart.y_axis.delete = False
+    bar_data = Reference(bar_data_sheet, min_col=2, min_row=bar_header_row, max_row=bar_max_row)
+    bar_labels = Reference(bar_data_sheet, min_col=1, min_row=bar_header_row + 1, max_row=bar_max_row)
+    bar_chart.add_data(bar_data, titles_from_data=True)
+    _set_chart_str_categories(bar_chart, bar_labels)
+    bar_chart.dLbls = DataLabelList(
+        showVal=True,
+        showSerName=False,
+        showCatName=False,
+        dLblPos="outEnd",
+    )
+    worksheet.add_chart(bar_chart, bar_anchor)
 
 
 def append_pattern_detail_sheet(
@@ -1068,13 +1754,14 @@ def append_pattern_detail_sheet(
     pattern_column_label,
     analysis_definitions,
     variant_item=None,
+    pattern_detail=None,
 ):
     pattern_text = str(pattern_row.get(pattern_column_label) or "").strip()
     if not pattern_text:
         return
 
-    detail = create_pattern_bottleneck_details(filtered_df, pattern_text)
-    sheet_name = sanitize_workbook_sheet_name(f"Pattern{pattern_rank:02d}詳細")
+    detail = pattern_detail or create_pattern_bottleneck_details(filtered_df, pattern_text)
+    sheet_name = sanitize_workbook_sheet_name(f"パターン{pattern_rank:02d}詳細")
     detail_sheet = workbook.create_sheet(title=sheet_name)
     initialize_excel_worksheet(detail_sheet)
 
@@ -1088,16 +1775,26 @@ def append_pattern_detail_sheet(
         detail_sheet,
         f"Pattern #{pattern_rank} 詳細",
         [
-            ("Pattern / Variant", f"Pattern #{pattern_rank} / {variant_label}"),
+            ("パターン / バリアント", f"Pattern #{pattern_rank} / {variant_label}"),
+            ("繰り返し", pattern_row.get("繰り返し", "")),
+            ("繰り返し回数", pattern_row.get("繰り返し回数", 0)),
+            ("繰り返し率(%)", pattern_row.get("繰り返し率(%)", 0)),
+            ("繰り返し率区分", pattern_row.get("繰り返し率区分", "")),
+            ("確認区分", pattern_row.get("確認区分", "")),
+            ("平均処理時間差分(分)", pattern_row.get("平均処理時間差分(分)", 0)),
+            ("改善優先度スコア", pattern_row.get("改善優先度スコア", 0)),
+            ("全体影響度(%)", pattern_row.get("全体影響度(%)", 0)),
+            ("最短処理", pattern_row.get("最短処理", "")),
+            ("簡易コメント", pattern_row.get("簡易コメント", "")),
             ("ケース数", detail.get("case_count", 0)),
             ("ケース比率(%)", detail.get("case_ratio_pct", 0)),
-            ("平均ケース時間(分)", detail.get("avg_case_duration_min", 0)),
-            ("中央値ケース時間(分)", detail.get("median_case_duration_min", 0)),
-            ("最小ケース時間(分)", detail.get("min_case_duration_min", 0)),
-            ("最大ケース時間(分)", detail.get("max_case_duration_min", 0)),
+            ("平均ケース処理時間(分)", detail.get("avg_case_duration_min", 0)),
+            ("中央値ケース処理時間(分)", detail.get("median_case_duration_min", 0)),
+            ("最小ケース処理時間(分)", detail.get("min_case_duration_min", 0)),
+            ("最大ケース処理時間(分)", detail.get("max_case_duration_min", 0)),
             ("代表ルート", pattern_text),
             ("ボトルネック遷移", bottleneck_transition.get("transition_label", "該当なし")),
-            ("ボトルネック平均処理時間(分)", bottleneck_transition.get("avg_duration_min", 0)),
+            ("ボトルネック平均所要時間(分)", bottleneck_transition.get("avg_duration_min", 0)),
         ],
         description="上位パターンのケース概要、代表ルート、ボトルネック遷移をまとめています。",
     )
@@ -1133,11 +1830,11 @@ def append_pattern_detail_sheet(
     )
     next_row = append_table_to_worksheet(
         detail_sheet,
-        "ステップ別処理時間",
+        "ステップ別所要時間",
         step_metric_rows,
         step_metric_headers,
         start_row=next_row,
-        description="各ステップの処理時間と全体に占める比率を比較できます。",
+        description="各ステップの所要時間と全体に占める比率を比較できます。",
         no_wrap_headers=["遷移"],
         min_column_widths={"遷移": 32},
     )
@@ -1187,7 +1884,7 @@ def build_analysis_ai_prompt(ai_context):
     analysis_name = ai_context["analysis_name"]
     focus_map = {
         "frequency": {
-            "focus": "件数が集中している activity と、平均処理時間が長い activity を分けて解釈してください。",
+            "focus": "件数が集中しているアクティビティと、平均処理時間が長いアクティビティを分けて解釈してください。",
             "priority": "負荷集中、入力不備、担当偏り、差戻し起点を優先して原因仮説を述べてください。",
             "actions": "入口制御、担当割付、事前チェック、差戻し削減に直結する改善アクションを提案してください。",
         },
@@ -1224,16 +1921,16 @@ def build_analysis_ai_prompt(ai_context):
 - 総ケース数: {int(ai_context['dashboard_summary'].get('total_cases', 0)):,}
 - 総イベント数: {int(ai_context['dashboard_summary'].get('total_records', 0)):,}
 - 分析期間: {ai_context['period_text']}
-- 平均ケース所要時間: {ai_context['dashboard_summary'].get('avg_case_duration_text', '0s')}
-- 上位10 Variant カバー率: {float(ai_context['dashboard_summary'].get('top10_variant_coverage_pct', 0.0)):.2f}%
+- 平均ケース処理時間: {ai_context['dashboard_summary'].get('avg_case_duration_text', '0s')}
+- 上位10バリアントカバー率: {float(ai_context['dashboard_summary'].get('top10_variant_coverage_pct', 0.0)):.2f}%
 
 ## 現在の分析結果上位
 {serialize_ai_prompt_rows(ai_context['analysis_rows'], max_items=7)}
 
-## Activity ボトルネック
+## アクティビティボトルネック
 {serialize_ai_prompt_rows(ai_context['bottleneck_summary'].get('activity_bottlenecks', []), max_items=5)}
 
-## Transition ボトルネック
+## 遷移ボトルネック
 {serialize_ai_prompt_rows(ai_context['bottleneck_summary'].get('transition_bottlenecks', []), max_items=5)}
 
 ## 改善インパクト上位
@@ -1242,7 +1939,7 @@ def build_analysis_ai_prompt(ai_context):
 ## Root Cause 候補
 {serialize_ai_prompt_rows(ai_context['root_cause_summary'].get('rows', []), max_items=5)}
 
-## 主要 Variant
+## 主要バリアント
 {serialize_ai_prompt_rows(ai_context['variant_items'], max_items=5)}
 
 ## ルールベース要点
@@ -1301,18 +1998,18 @@ def build_ai_fallback_text(ai_context):
             f"件数の中心は「{top_row.get('アクティビティ', '不明')}」で、"
             f"{normalize_excel_cell_value(top_row.get('イベント件数', 0))} 件です。"
             if top_row
-            else "件数集中の中心 activity は特定できませんでした。"
+            else "件数集中の中心アクティビティは特定できませんでした。"
         )
         action_lines = [
             (
-                f"件数が集中する「{top_row.get('アクティビティ', '対象 activity')}」について、"
+                f"件数が集中する「{top_row.get('アクティビティ', '対象アクティビティ')}」について、"
                 "受付経路や担当者別件数を比較してください。"
             ),
             (
-                f"平均処理時間が長い「{top_activity_bottleneck['activity']}」の前後で、"
+                f"平均所要時間が長い「{top_activity_bottleneck['activity']}」の前後で、"
                 "入力不備や差戻しが発生していないか確認してください。"
                 if top_activity_bottleneck
-                else "上位 activity の担当別処理時間を比較してください。"
+                else "上位アクティビティの担当別処理時間を比較してください。"
             ),
         ]
     elif analysis_key == "transition":
@@ -1345,7 +2042,7 @@ def build_ai_fallback_text(ai_context):
         ]
     else:
         priority_text = (
-            f"改善インパクト最大の遷移は「{top_impact_row['transition_label']}」で、平均処理時間は {top_impact_row['avg_duration_text']} です。"
+            f"改善インパクト最大の遷移は「{top_impact_row['transition_label']}」で、平均所要時間は {top_impact_row['avg_duration_text']} です。"
             if top_impact_row
             else "改善インパクト上位の遷移は検出されませんでした。"
         )
@@ -1356,7 +2053,7 @@ def build_ai_fallback_text(ai_context):
                 else "上位パターンと例外パターンを比較し、どこで処理が分岐しているかを確認してください。"
             ),
             (
-                f"Activity「{top_activity_bottleneck['activity']}」について、担当者別の件数と平均処理時間を比較してください。"
+                f"アクティビティ「{top_activity_bottleneck['activity']}」について、担当者別の件数と平均所要時間を比較してください。"
                 if top_activity_bottleneck
                 else "改善インパクトが高い遷移を優先して、滞留の主因を確認してください。"
             ),
@@ -1414,7 +2111,11 @@ def build_empty_ai_summary(analysis_key, analysis_name):
 
 
 def get_cached_ai_summary(run_data, analysis_key, filter_params=None):
-    cache_key = (str(analysis_key or "").strip().lower(), build_filter_cache_key(filter_params))
+    cache_key = (
+        str(analysis_key or "").strip().lower(),
+        build_filter_cache_key(filter_params),
+        None,
+    )
     cached_payload = run_data.setdefault("ai_insights_cache", {}).get(cache_key)
     if cached_payload is None:
         return None
@@ -1430,54 +2131,101 @@ def build_ai_context_summary(
     analysis_key,
     filter_params=None,
     prepared_df=None,
+    variant_pattern=None,
     analysis=None,
     dashboard_summary=None,
     impact_summary=None,
     bottleneck_summary=None,
     root_cause_summary=None,
+    insights_summary=None,
+    variant_items=None,
     analysis_name=None,
 ):
     normalized_analysis_key = str(analysis_key or "").strip().lower()
     analysis_definitions = get_available_analysis_definitions()
-    resolved_analysis = analysis or get_analysis_data(run_data, normalized_analysis_key, filter_params=filter_params)
+    resolved_analysis = analysis or get_analysis_data(
+        run_data,
+        normalized_analysis_key,
+        filter_params=filter_params,
+        variant_pattern=variant_pattern,
+    )
     resolved_prepared_df = prepared_df
     if resolved_prepared_df is None:
-        resolved_prepared_df = filter_prepared_df(
-            run_data["prepared_df"],
-            filter_params,
-            filter_column_settings=run_data.get("column_settings"),
-        )
+        if has_parquet_backing(run_data) and normalized_analysis_key in {"frequency", "transition", "pattern"}:
+            resolved_prepared_df = pd.DataFrame(
+                columns=["case_id", "activity", "duration_sec", "start_time", "next_time", "timestamp"]
+            )
+        else:
+            resolved_prepared_df = filter_prepared_df(
+                run_data["prepared_df"],
+                filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+            )
+            if variant_pattern:
+                resolved_prepared_df = filter_prepared_df_by_pattern(
+                    resolved_prepared_df,
+                    variant_pattern,
+                )
     resolved_dashboard_summary = dashboard_summary or get_dashboard_summary(
         run_data,
         filter_params=filter_params,
         prepared_df=resolved_prepared_df,
+        variant_pattern=variant_pattern,
     )
     resolved_impact_summary = impact_summary or get_impact_summary(
         run_data,
         filter_params=filter_params,
         prepared_df=resolved_prepared_df,
+        variant_pattern=variant_pattern,
     )
-    resolved_bottleneck_summary = bottleneck_summary or get_bottleneck_summary(
-        run_data,
-        filter_params=filter_params,
-    )
+    resolved_bottleneck_summary = bottleneck_summary
+    if resolved_bottleneck_summary is None:
+        if variant_pattern:
+            if has_parquet_backing(run_data):
+                resolved_bottleneck_summary = query_bottleneck_summary(
+                    run_data["prepared_parquet_path"],
+                    filter_params=filter_params,
+                    filter_column_settings=run_data.get("column_settings"),
+                    variant_pattern=variant_pattern,
+                    limit=None,
+                )
+            else:
+                resolved_bottleneck_summary = create_bottleneck_summary(
+                    resolved_prepared_df,
+                    limit=None,
+                )
+        else:
+            resolved_bottleneck_summary = get_bottleneck_summary(
+                run_data,
+                filter_params=filter_params,
+            )
     resolved_root_cause_summary = root_cause_summary or get_root_cause_summary(
         run_data,
         filter_params=filter_params,
         prepared_df=resolved_prepared_df,
+        variant_pattern=variant_pattern,
     )
     resolved_analysis_name = (
         analysis_name
         or resolved_analysis.get("analysis_name")
         or analysis_definitions.get(normalized_analysis_key, {}).get("config", {}).get("analysis_name", analysis_key)
     )
-    period_text = build_prepared_df_period_text(resolved_prepared_df)
-    insights_summary = get_rule_based_insights_summary(
+    if has_parquet_backing(run_data) and (prepared_df is None or resolved_prepared_df.empty):
+        period_text = query_period_text(
+            run_data["prepared_parquet_path"],
+            filter_params=filter_params,
+            filter_column_settings=run_data.get("column_settings"),
+            variant_pattern=variant_pattern,
+        )
+    else:
+        period_text = build_prepared_df_period_text(resolved_prepared_df)
+    resolved_insights_summary = insights_summary or get_rule_based_insights_summary(
         run_data,
         normalized_analysis_key,
         analysis_rows=resolved_analysis.get("rows"),
         filter_params=filter_params,
         prepared_df=resolved_prepared_df,
+        variant_pattern=variant_pattern,
         dashboard_summary=resolved_dashboard_summary,
         impact_summary=resolved_impact_summary,
     )
@@ -1490,9 +2238,19 @@ def build_ai_context_summary(
         "impact_summary": resolved_impact_summary,
         "bottleneck_summary": resolved_bottleneck_summary,
         "root_cause_summary": resolved_root_cause_summary,
-        "variant_items": list(get_variant_items(run_data, filter_params=filter_params))[:5],
+        "variant_items": (
+            list(variant_items)[:5]
+            if variant_items is not None
+            else list(
+                get_variant_items(
+                    run_data,
+                    filter_params=filter_params,
+                    variant_pattern=variant_pattern,
+                )
+            )[:5]
+        ),
         "period_text": period_text,
-        "insights_summary": insights_summary,
+        "insights_summary": resolved_insights_summary,
     }
 
 
@@ -1501,18 +2259,26 @@ def build_ai_insights_summary(
     analysis_key,
     filter_params=None,
     prepared_df=None,
+    variant_pattern=None,
     analysis=None,
     dashboard_summary=None,
     impact_summary=None,
     bottleneck_summary=None,
     root_cause_summary=None,
+    insights_summary=None,
+    variant_items=None,
     analysis_name=None,
     force_refresh=False,
+    use_cache=True,
 ):
-    cache_key = (str(analysis_key or "").strip().lower(), build_filter_cache_key(filter_params))
+    cache_key = (
+        str(analysis_key or "").strip().lower(),
+        build_filter_cache_key(filter_params),
+        str(variant_pattern or "").strip() or None,
+    )
     cache = run_data.setdefault("ai_insights_cache", {})
 
-    if not force_refresh and cache_key in cache:
+    if use_cache and not force_refresh and cache_key in cache:
         return {
             **cache[cache_key],
             "generated": True,
@@ -1524,11 +2290,14 @@ def build_ai_insights_summary(
         analysis_key=analysis_key,
         filter_params=filter_params,
         prepared_df=prepared_df,
+        variant_pattern=variant_pattern,
         analysis=analysis,
         dashboard_summary=dashboard_summary,
         impact_summary=impact_summary,
         bottleneck_summary=bottleneck_summary,
         root_cause_summary=root_cause_summary,
+        insights_summary=insights_summary,
+        variant_items=variant_items,
         analysis_name=analysis_name,
     )
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -1540,14 +2309,15 @@ def build_ai_insights_summary(
             "analysis_key": ai_context["analysis_key"],
             "analysis_name": ai_context["analysis_name"],
             "mode": "rule_based",
-            "provider": "ルールベース要約",
+            "provider": "",
             "generated_at": generated_at,
             "period": ai_context["period_text"],
             "text": fallback_text,
             "highlights": [item["text"] for item in ai_context["insights_summary"].get("items", [])],
             "note": "対象データがないため、既存集計からの要約のみを表示しています。",
         }
-        cache[cache_key] = payload
+        if use_cache:
+            cache[cache_key] = payload
         return {
             **payload,
             "generated": True,
@@ -1562,21 +2332,22 @@ def build_ai_insights_summary(
                 "analysis_key": ai_context["analysis_key"],
                 "analysis_name": ai_context["analysis_name"],
                 "mode": "ollama",
-                "provider": "Ollama (qwen2.5:7b)",
+                "provider": "",
                 "generated_at": generated_at,
                 "period": ai_context["period_text"],
                 "text": ai_text,
                 "highlights": [item["text"] for item in ai_context["insights_summary"].get("items", [])],
                 "note": "現在の分析条件に対応する AI 解説を保存しました。画面を切り替えても同じ条件なら再表示されます。",
             }
-            cache[cache_key] = payload
+            if use_cache:
+                cache[cache_key] = payload
             return {
                 **payload,
                 "generated": True,
                 "cached": False,
             }
     except httpx.ConnectError:
-        error_message = "Ollama が起動していないため、ルールベース要約を掲載しています。"
+        error_message = "AI 解説を生成できなかったため、既存集計からの要約を掲載しています。"
     except Exception as exc:
         error_message = f"AI 解説の生成に失敗したため、ルールベース要約を掲載しています。({exc})"
     else:
@@ -1587,14 +2358,15 @@ def build_ai_insights_summary(
         "analysis_key": ai_context["analysis_key"],
         "analysis_name": ai_context["analysis_name"],
         "mode": "rule_based",
-        "provider": "ルールベース要約",
+        "provider": "",
         "generated_at": generated_at,
         "period": ai_context["period_text"],
         "text": fallback_text,
         "highlights": [item["text"] for item in ai_context["insights_summary"].get("items", [])],
         "note": error_message,
     }
-    cache[cache_key] = payload
+    if use_cache:
+        cache[cache_key] = payload
     return {
         **payload,
         "generated": True,
@@ -1611,7 +2383,7 @@ def get_analysis_export_sheet_keys(analysis_key):
     elif normalized_analysis_key == "transition":
         sheet_keys.extend(["transition", "bottleneck", "impact"])
     elif normalized_analysis_key == "pattern":
-        sheet_keys.append("pattern")
+        sheet_keys.extend(["pattern_summary", "pattern"])
     else:
         sheet_keys.append(normalized_analysis_key)
 
@@ -1636,15 +2408,15 @@ def build_detail_summary_kpi_rows(
     top_impact_row = impact_summary["rows"][0] if impact_summary.get("rows") else None
 
     common_rows = [
-        ("平均ケース所要時間", dashboard_summary.get("avg_case_duration_text", "0s")),
-        ("中央値ケース所要時間", dashboard_summary.get("median_case_duration_text", "0s")),
+        ("平均ケース処理時間", dashboard_summary.get("avg_case_duration_text", "0s")),
+        ("中央値ケース処理時間", dashboard_summary.get("median_case_duration_text", "0s")),
     ]
 
     if normalized_analysis_key == "frequency":
         return common_rows + [
-            ("最多 Activity", top_row.get("アクティビティ", "該当なし") if top_row else "該当なし"),
-            ("最多 Activity 件数", normalize_excel_cell_value(top_row.get("イベント件数", 0)) if top_row else 0),
-            ("上位10 Variantカバー率", f"{float(dashboard_summary.get('top10_variant_coverage_pct', 0.0)):.2f}%"),
+            ("最多アクティビティ", top_row.get("アクティビティ", "該当なし") if top_row else "該当なし"),
+            ("最多アクティビティ件数", normalize_excel_cell_value(top_row.get("イベント件数", 0)) if top_row else 0),
+            ("上位10バリアントカバー率", f"{float(dashboard_summary.get('top10_variant_coverage_pct', 0.0)):.2f}%"),
         ]
 
     if normalized_analysis_key == "transition":
@@ -1663,11 +2435,11 @@ def build_detail_summary_kpi_rows(
         return common_rows + [
             ("最頻出パターン", top_row.get("処理順パターン", top_row.get("パターン", "該当なし")) if top_row else "該当なし"),
             ("最頻出パターン比率", f"{float(top_row.get('ケース比率(%)', 0.0)):.2f}%" if top_row else "0.00%"),
-            ("上位10 Variantカバー率", f"{float(dashboard_summary.get('top10_variant_coverage_pct', 0.0)):.2f}%"),
+            ("上位10バリアントカバー率", f"{float(dashboard_summary.get('top10_variant_coverage_pct', 0.0)):.2f}%"),
         ]
 
     return common_rows + [
-        ("最大ケース所要時間", dashboard_summary.get("max_case_duration_text", "0s")),
+        ("最大ケース処理時間", dashboard_summary.get("max_case_duration_text", "0s")),
         ("最大ボトルネック遷移", top_transition_bottleneck_label),
     ]
 
@@ -1678,22 +2450,32 @@ def build_excel_ai_summary(
     analysis_name,
     filter_params,
     prepared_df,
-    frequency_analysis,
-    pattern_analysis,
+    variant_pattern,
     dashboard_summary,
     impact_summary,
     bottleneck_summary,
+    analysis=None,
+    root_cause_summary=None,
+    insights_summary=None,
+    variant_items=None,
+    use_cache=True,
 ):
     return build_ai_insights_summary(
         run_data=run_data,
         analysis_key=analysis_key,
         filter_params=filter_params,
         prepared_df=prepared_df,
+        variant_pattern=variant_pattern,
+        analysis=analysis,
         dashboard_summary=dashboard_summary,
         impact_summary=impact_summary,
         bottleneck_summary=bottleneck_summary,
+        root_cause_summary=root_cause_summary,
+        insights_summary=insights_summary,
+        variant_items=variant_items,
         analysis_name=analysis_name,
         force_refresh=False,
+        use_cache=use_cache,
     )
 
 
@@ -1725,41 +2507,121 @@ def build_detail_export_workbook_bytes(
     summary_sheet.title = sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["summary"])
     initialize_excel_worksheet(summary_sheet)
 
-    filtered_df = filter_prepared_df(
-        run_data["prepared_df"],
-        filter_params,
-        filter_column_settings=run_data.get("column_settings"),
-    )
-    filtered_meta = build_filtered_meta(filtered_df)
-    selected_analysis = get_analysis_data(run_data, analysis_key, filter_params=filter_params)
-    frequency_analysis = selected_analysis if analysis_key == "frequency" else {"rows": []}
-    pattern_analysis = selected_analysis if analysis_key == "pattern" else {"rows": []}
-    dashboard_summary = get_dashboard_summary(
-        run_data,
-        filter_params=filter_params,
-        prepared_df=filtered_df,
-    )
-    bottleneck_summary = get_bottleneck_summary(
+    variant_pattern = get_run_variant_pattern(
         run_data,
         variant_id=variant_id,
         filter_params=filter_params,
     )
-    impact_summary = get_impact_summary(
-        run_data,
-        filter_params=filter_params,
-        prepared_df=filtered_df,
-    )
+    if has_parquet_backing(run_data):
+        export_prepared_df = None
+        filtered_meta = get_filtered_meta_for_run(
+            run_data,
+            filter_params=filter_params,
+            variant_pattern=variant_pattern,
+        )
+        selected_analysis = get_analysis_data(
+            run_data,
+            analysis_key,
+            filter_params=filter_params,
+            variant_pattern=variant_pattern,
+        )
+        export_variant_items = get_variant_items(
+            run_data,
+            filter_params=filter_params,
+            variant_pattern=variant_pattern,
+        )
+        if variant_pattern:
+            bottleneck_summary = query_bottleneck_summary(
+                run_data["prepared_parquet_path"],
+                filter_params=filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+                variant_pattern=variant_pattern,
+                limit=None,
+            )
+        else:
+            bottleneck_summary = get_bottleneck_summary(
+                run_data,
+                variant_id=variant_id,
+                filter_params=filter_params,
+            )
+        dashboard_summary = get_dashboard_summary(
+            run_data,
+            filter_params=filter_params,
+            prepared_df=None,
+            variant_pattern=variant_pattern,
+        )
+        impact_summary = get_impact_summary(
+            run_data,
+            filter_params=filter_params,
+            prepared_df=None,
+            variant_pattern=variant_pattern,
+        )
+        root_cause_summary = get_root_cause_summary(
+            run_data,
+            filter_params=filter_params,
+            prepared_df=None,
+            variant_pattern=variant_pattern,
+        )
+        insights_summary = get_rule_based_insights_summary(
+            run_data,
+            analysis_key=analysis_key,
+            analysis_rows=selected_analysis.get("rows", []),
+            filter_params=filter_params,
+            prepared_df=None,
+            variant_pattern=variant_pattern,
+            dashboard_summary=dashboard_summary,
+            bottleneck_summary=bottleneck_summary,
+            impact_summary=impact_summary,
+        )
+    else:
+        export_prepared_df = get_filtered_prepared_df(
+            run_data,
+            variant_id=variant_id,
+            filter_params=filter_params,
+        )
+        filtered_meta = build_filtered_meta(export_prepared_df)
+        selected_analysis = create_analysis_records(export_prepared_df, analysis_key)
+        export_variant_items = create_variant_summary(export_prepared_df, limit=None)
+        bottleneck_summary = create_bottleneck_summary(export_prepared_df, limit=None)
+        dashboard_summary = create_dashboard_summary(
+            export_prepared_df,
+            variant_items=export_variant_items[:10],
+            bottleneck_summary=bottleneck_summary,
+            coverage_limit=10,
+        )
+        impact_summary = create_impact_summary(
+            export_prepared_df,
+            limit=None,
+        )
+        root_cause_summary = create_root_cause_summary(
+            export_prepared_df,
+            filter_column_settings=run_data.get("column_settings"),
+            limit=10,
+        )
+        insights_summary = create_rule_based_insights(
+            export_prepared_df,
+            analysis_key=analysis_key,
+            analysis_rows=selected_analysis.get("rows", []),
+            dashboard_summary=dashboard_summary,
+            bottleneck_summary=bottleneck_summary,
+            impact_summary=impact_summary,
+            max_items=5,
+        )
     ai_summary = build_excel_ai_summary(
         run_data=run_data,
         analysis_key=analysis_key,
         analysis_name=analysis_name,
         filter_params=filter_params,
-        prepared_df=filtered_df,
-        frequency_analysis=frequency_analysis,
-        pattern_analysis=pattern_analysis,
+        prepared_df=export_prepared_df,
+        variant_pattern=variant_pattern,
         dashboard_summary=dashboard_summary,
         impact_summary=impact_summary,
         bottleneck_summary=bottleneck_summary,
+        analysis=selected_analysis,
+        root_cause_summary=root_cause_summary,
+        insights_summary=insights_summary,
+        variant_items=export_variant_items[:5],
+        use_cache=variant_id is None,
     )
 
     from_activity, to_activity = parse_transition_selection(selected_transition_key)
@@ -1774,11 +2636,12 @@ def build_detail_export_workbook_bytes(
         (REPORT_HEADER_LABELS["case_count"], filtered_meta["case_count"]),
         (REPORT_HEADER_LABELS["event_count"], filtered_meta["event_count"]),
         (REPORT_HEADER_LABELS["applied_filters"], build_filter_summary_text(filter_params, run_data.get("column_settings"))),
-        (REPORT_HEADER_LABELS["selected_variant"], f"Variant #{variant_id}" if variant_id else "未選択"),
         (REPORT_HEADER_LABELS["selected_activity"], selected_activity or "未選択"),
         (REPORT_HEADER_LABELS["selected_transition"], selected_transition_label or "未選択"),
         (REPORT_HEADER_LABELS["selected_case_id"], case_id or "未選択"),
     ]
+    if variant_id is not None:
+        summary_rows.insert(8, (REPORT_HEADER_LABELS["selected_variant"], f"#{variant_id}"))
     next_row = append_key_value_rows(
         summary_sheet,
         REPORT_SHEET_NAMES["summary"],
@@ -1811,7 +2674,6 @@ def build_detail_export_workbook_bytes(
     initialize_excel_worksheet(ai_sheet)
     ai_meta_rows = [
         ("対象分析", analysis_name),
-        ("生成方式", ai_summary.get("provider", "")),
         ("分析期間", ai_summary.get("period", "不明")),
         ("出力時刻", ai_summary.get("generated_at", "")),
         ("補足", ai_summary.get("note", "")),
@@ -1820,7 +2682,7 @@ def build_detail_export_workbook_bytes(
         ai_sheet,
         REPORT_SHEET_NAMES["ai_insights"],
         ai_meta_rows,
-        description="Ollama が利用できる場合は AI 解説を、利用できない場合は既存集計からの要約を掲載します。",
+        description="現在の分析条件に対応する AI 解説、または既存集計からの要約を掲載します。",
     )
     next_row = append_text_block_to_worksheet(
         ai_sheet,
@@ -1847,7 +2709,7 @@ def build_detail_export_workbook_bytes(
             REPORT_SHEET_NAMES["frequency"],
             frequency_rows,
             frequency_headers,
-            description="Activity ごとの件数、ケース数、処理時間の代表値を確認できます。",
+            description="アクティビティごとの件数、ケース数、処理時間の代表値を確認できます。",
         )
 
     if "transition" in export_sheet_keys:
@@ -1860,51 +2722,208 @@ def build_detail_export_workbook_bytes(
             REPORT_SHEET_NAMES["transition"],
             transition_rows,
             transition_headers,
-            description="前後遷移ごとの件数、ケース数、平均時間を確認できます。",
+            description="前後遷移ごとの件数、ケース数、平均所要時間を確認できます。",
         )
 
     if "pattern" in export_sheet_keys:
-        pattern_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["pattern"]))
-        initialize_excel_worksheet(pattern_sheet)
         pattern_config = analysis_definitions.get("pattern", {}).get("config", {})
         pattern_display_columns = pattern_config.get("display_columns", {})
         pattern_column_label = pattern_display_columns.get("pattern", "処理順パターン")
-        pattern_variant_items = get_variant_items(run_data, filter_params=filter_params)
+        pattern_summary = build_pattern_export_summary(
+            selected_analysis["rows"],
+            pattern_display_columns,
+        )
+        pattern_conclusion = build_pattern_conclusion_summary(pattern_summary)
+        pattern_dashboard = build_pattern_dashboard_summary(pattern_summary, pattern_conclusion)
+        conclusion_sheet = workbook.create_sheet(
+            title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["pattern_conclusion"])
+        )
+        initialize_excel_worksheet(conclusion_sheet)
+        conclusion_next_row = append_key_value_rows(
+            conclusion_sheet,
+            REPORT_SHEET_NAMES["pattern_conclusion"],
+            [
+                ("全体要約", pattern_conclusion["overall_summary"]),
+                ("改善による時間インパクト(分)", pattern_conclusion["total_impact_minutes"]),
+                ("改善による時間インパクト(時間)", pattern_conclusion["total_impact_hours"]),
+                ("最短処理パターン", pattern_conclusion["fastest_pattern"].get("パターン", "該当なし")),
+                ("最短処理パターン平均処理時間(分)", pattern_conclusion["fastest_pattern"].get("平均処理時間(分)", 0)),
+            ],
+            description="処理順パターン分析の結論、改善優先度、想定時間効果をまとめています。",
+        )
+        conclusion_next_row = append_table_to_worksheet(
+            conclusion_sheet,
+            "問題点3つ",
+            pattern_conclusion["issue_rows"],
+            ["問題点", "原因", "改善案", "期待効果（時間短縮・分）", "対象パターン"],
+            start_row=conclusion_next_row,
+            description="改善対象パターンTOP3を中心に、問題点・原因・改善案・期待効果を整理しています。",
+            no_wrap_headers=["対象パターン"],
+            min_column_widths={"問題点": 40, "原因": 38, "改善案": 42, "対象パターン": 72},
+        )
+        append_pattern_conclusion_charts(
+            workbook,
+            conclusion_sheet,
+            pattern_summary["comparison_rows"],
+            pie_anchor=build_excel_anchor("A", conclusion_next_row + 1),
+            bar_anchor=build_excel_anchor("C", conclusion_next_row + 1),
+        )
+        dashboard_sheet = workbook.create_sheet(
+            title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["pattern_dashboard"])
+        )
+        initialize_excel_worksheet(dashboard_sheet)
+        dashboard_next_row = append_key_value_rows(
+            dashboard_sheet,
+            REPORT_SHEET_NAMES["pattern_dashboard"],
+            [
+                ("全体要約", pattern_dashboard["overall_summary"]),
+                ("上位10パターン累積カバー率(%)", pattern_dashboard["top10_coverage_pct"]),
+                ("改善による時間インパクト(分)", pattern_dashboard["total_impact_minutes"]),
+            ],
+            description="処理順パターン分析の主要サマリーをダッシュボード形式でまとめています。",
+        )
+        dashboard_next_row = append_table_to_worksheet(
+            dashboard_sheet,
+            "改善優先TOP3",
+            pattern_dashboard["top3_rows"],
+            ["順位", "パターン", "改善優先度スコア", "全体影響度(%)", "繰り返し率(%)", "平均処理時間差分(分)", "簡易コメント"],
+            start_row=dashboard_next_row,
+            description="改善優先度スコアが高い上位3パターンです。",
+            no_wrap_headers=["パターン", "簡易コメント"],
+            min_column_widths={"パターン": 72, "簡易コメント": 36},
+        )
+        dashboard_next_row = append_bullet_rows(
+            dashboard_sheet,
+            "問題点",
+            pattern_dashboard["problem_points"],
+            start_row=dashboard_next_row,
+            column_count=6,
+            empty_text="抽出できる問題点はありません。",
+        )
+        if "pattern_summary" in export_sheet_keys:
+            pattern_summary_sheet = workbook.create_sheet(
+                title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["pattern_summary"])
+            )
+            initialize_excel_worksheet(pattern_summary_sheet)
+            next_row = append_key_value_rows(
+                pattern_summary_sheet,
+                REPORT_SHEET_NAMES["pattern_summary"],
+                [
+                    ("上位3パターン累積カバー率(%)", pattern_summary["top3_coverage_pct"]),
+                    ("上位10パターン累積カバー率(%)", pattern_summary["top10_coverage_pct"]),
+                    ("カバー率要約", pattern_summary["coverage_summary_text"]),
+                    ("最短処理パターン", pattern_summary["fastest_pattern"].get("パターン", "該当なし")),
+                    ("最短処理パターン平均処理時間(分)", pattern_summary["fastest_pattern"].get("平均処理時間(分)", 0)),
+                    ("要確認パターン数", len(pattern_summary["repeated_patterns"])),
+                    ("要確認パターン影響比率(%)", pattern_summary["repeated_case_ratio_pct"]),
+                    ("要確認判定基準", "繰り返し率 30%以上"),
+                    ("改善対象抽出基準", "繰り返し率 10%以上 かつ 平均処理時間差分がプラス"),
+                ],
+                description="処理順パターンの上位カバー率と、繰り返し率が高いパターンをまとめています。",
+            )
+            next_row = append_table_to_worksheet(
+                pattern_summary_sheet,
+                "上位10パターン",
+                pattern_summary["comparison_rows"],
+                ["順位", "繰り返し", "繰り返し回数", "繰り返し率(%)", "繰り返し率区分", "件数", "全体比率(%)", "平均処理時間(分)", "平均処理時間差分(分)", "改善優先度スコア", "全体影響度(%)", "最短処理", "最短処理時間(分)", "最長処理時間(分)", "確認区分", "簡易コメント", "パターン"],
+                start_row=next_row,
+                description="件数上位10パターンの比率・処理時間・繰り返し率を比較できます。",
+                no_wrap_headers=["パターン", "簡易コメント"],
+                min_column_widths={"パターン": 72, "簡易コメント": 48},
+            )
+            next_row = append_table_to_worksheet(
+                pattern_summary_sheet,
+                "要確認パターン一覧",
+                pattern_summary["repeated_patterns"],
+                ["順位", "繰り返し", "繰り返し回数", "繰り返し率(%)", "繰り返し率区分", "件数", "全体比率(%)", "平均処理時間(分)", "平均処理時間差分(分)", "改善優先度スコア", "全体影響度(%)", "最短処理", "最短処理時間(分)", "最長処理時間(分)", "確認区分", "簡易コメント", "パターン"],
+                start_row=next_row,
+                description="繰り返し率が高く、確認を優先したいパターンを一覧化しています。",
+                no_wrap_headers=["パターン", "簡易コメント"],
+                min_column_widths={"パターン": 72, "簡易コメント": 48},
+            )
+            append_table_to_worksheet(
+                pattern_summary_sheet,
+                "改善対象パターンTOP3",
+                pattern_summary["improvement_targets"],
+                ["順位", "繰り返し", "繰り返し回数", "繰り返し率(%)", "繰り返し率区分", "件数", "全体比率(%)", "平均処理時間(分)", "平均処理時間差分(分)", "改善優先度スコア", "全体影響度(%)", "最短処理", "確認区分", "簡易コメント", "パターン"],
+                start_row=next_row,
+                description="繰り返し率が一定以上で、平均処理時間も全体平均より長い改善候補パターンです。",
+                no_wrap_headers=["パターン", "簡易コメント"],
+                min_column_widths={"パターン": 72, "簡易コメント": 48},
+            )
+
+        pattern_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["pattern"]))
+        initialize_excel_worksheet(pattern_sheet)
         pattern_rows, pattern_headers = localize_report_rows(
             build_pattern_overview_rows(
                 selected_analysis["rows"],
-                pattern_variant_items,
+                export_variant_items,
                 pattern_column_label,
                 analysis_definitions,
             ),
-            ["rank", "pattern_variant", "count", "ratio", "avg_case_duration_min", "pattern"],
+            [
+                "rank",
+                "pattern_variant",
+                "repeat_flag",
+                "repeat_count",
+                "repeat_rate_pct",
+                "repeat_rate_band",
+                "review_flag",
+                "count",
+                "ratio",
+                "cumulative_case_ratio_pct",
+                "avg_case_duration_min",
+                "avg_case_duration_diff_min",
+                "improvement_priority_score",
+                "overall_impact_pct",
+                "fastest_pattern_flag",
+                "std_case_duration_min",
+                "min_case_duration_min",
+                "max_case_duration_min",
+                "p75_case_duration_min",
+                "p90_case_duration_min",
+                "p95_case_duration_min",
+                "simple_comment",
+                "pattern",
+            ],
         )
         append_table_to_worksheet(
             pattern_sheet,
             REPORT_SHEET_NAMES["pattern"],
             pattern_rows,
             pattern_headers,
-            description="Pattern / Variant を 1 つの一覧にまとめ、件数・比率・平均ケース時間と代表ルートを比較できます。",
-            no_wrap_headers=["パターン"],
-            min_column_widths={"パターン": 80},
+            description="パターン / バリアントを 1 つの一覧にまとめ、繰り返し回数・繰り返し率・確認区分・件数・比率・累積カバー率・処理時間の代表値と代表ルートを比較できます。",
+            no_wrap_headers=["パターン", "簡易コメント"],
+            min_column_widths={"パターン": 80, "簡易コメント": 48},
         )
         variant_by_pattern = {
             str(variant_item.get("pattern") or "").strip(): variant_item
-            for variant_item in pattern_variant_items
+            for variant_item in export_variant_items
         }
         pattern_detail_count = resolve_pattern_detail_sheet_count(
             pattern_display_limit,
             len(selected_analysis.get("rows", [])),
         )
         for pattern_rank, pattern_row in enumerate(selected_analysis.get("rows", [])[:pattern_detail_count], start=1):
+            pattern_text = str(pattern_row.get(pattern_column_label) or "").strip()
+            pattern_detail = None
+            if has_parquet_backing(run_data) and pattern_text:
+                pattern_detail = query_pattern_bottleneck_details(
+                    run_data["prepared_parquet_path"],
+                    pattern_text,
+                    filter_params=filter_params,
+                    filter_column_settings=run_data.get("column_settings"),
+                    scope_variant_pattern=variant_pattern,
+                )
             append_pattern_detail_sheet(
                 workbook,
-                filtered_df,
+                export_prepared_df,
                 pattern_row,
                 pattern_rank,
                 pattern_column_label,
                 analysis_definitions,
                 variant_item=variant_by_pattern.get(str(pattern_row.get(pattern_column_label) or "").strip()),
+                pattern_detail=pattern_detail,
             )
 
     if "bottleneck" in export_sheet_keys:
@@ -1919,10 +2938,10 @@ def build_detail_export_workbook_bytes(
         )
         next_row = append_table_to_worksheet(
             bottleneck_sheet,
-            "Activityボトルネック",
+            "アクティビティボトルネック",
             activity_bottleneck_rows,
             activity_bottleneck_headers,
-            description="Activity 単位で滞留が大きい箇所を並べています。",
+            description="アクティビティ単位で所要時間が大きい箇所を並べています。",
         )
         transition_bottleneck_rows, transition_bottleneck_headers = localize_report_rows(
             build_bottleneck_export_rows(
@@ -1933,11 +2952,11 @@ def build_detail_export_workbook_bytes(
         )
         append_table_to_worksheet(
             bottleneck_sheet,
-            "Transitionボトルネック",
+            "遷移ボトルネック",
             transition_bottleneck_rows,
             transition_bottleneck_headers,
             start_row=next_row,
-            description="前後遷移ごとの平均処理時間・中央値・最大値を比較できます。",
+            description="前後遷移ごとの平均所要時間・中央値・最大値を比較できます。",
         )
 
     if "impact" in export_sheet_keys:
@@ -1967,28 +2986,44 @@ def build_detail_export_workbook_bytes(
         )
 
     selected_activity_name = str(selected_activity or "").strip()
-    drilldown_df = get_filtered_prepared_df(
-        run_data,
-        variant_id=variant_id,
-        filter_params=filter_params,
-    )
     drilldown_rows = []
     drilldown_title = REPORT_SHEET_NAMES["drilldown"]
     if from_activity and to_activity:
         drilldown_title = f"遷移ドリルダウン: {from_activity} → {to_activity}"
-        drilldown_rows = create_transition_case_drilldown(
-            drilldown_df,
-            from_activity=from_activity,
-            to_activity=to_activity,
-            limit=max(0, int(drilldown_limit)),
-        )
+        if has_parquet_backing(run_data):
+            drilldown_rows = query_transition_case_drilldown(
+                run_data["prepared_parquet_path"],
+                from_activity=from_activity,
+                to_activity=to_activity,
+                limit=max(0, int(drilldown_limit)),
+                filter_params=filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+                variant_pattern=variant_pattern,
+            )
+        else:
+            drilldown_rows = create_transition_case_drilldown(
+                export_prepared_df,
+                from_activity=from_activity,
+                to_activity=to_activity,
+                limit=max(0, int(drilldown_limit)),
+            )
     elif selected_activity_name:
-        drilldown_title = f"Activityドリルダウン: {selected_activity_name}"
-        drilldown_rows = create_activity_case_drilldown(
-            drilldown_df,
-            activity=selected_activity_name,
-            limit=max(0, int(drilldown_limit)),
-        )
+        drilldown_title = f"アクティビティドリルダウン: {selected_activity_name}"
+        if has_parquet_backing(run_data):
+            drilldown_rows = query_activity_case_drilldown(
+                run_data["prepared_parquet_path"],
+                activity=selected_activity_name,
+                limit=max(0, int(drilldown_limit)),
+                filter_params=filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+                variant_pattern=variant_pattern,
+            )
+        else:
+            drilldown_rows = create_activity_case_drilldown(
+                export_prepared_df,
+                activity=selected_activity_name,
+                limit=max(0, int(drilldown_limit)),
+            )
     if drilldown_rows:
         drilldown_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["drilldown"]))
         initialize_excel_worksheet(drilldown_sheet)
@@ -2001,12 +3036,18 @@ def build_detail_export_workbook_bytes(
             drilldown_title,
             drilldown_rows,
             drilldown_headers,
-            description="選択中 Activity / 遷移に該当するケースの明細です。",
+            description="選択中アクティビティ / 遷移に該当するケースの明細です。",
         )
 
     normalized_case_id = str(case_id or "").strip()
     if normalized_case_id:
-        case_trace = create_case_trace_details(run_data["prepared_df"], normalized_case_id)
+        if has_parquet_backing(run_data):
+            case_trace = query_case_trace_details(
+                run_data["prepared_parquet_path"],
+                normalized_case_id,
+            )
+        else:
+            case_trace = create_case_trace_details(export_prepared_df, normalized_case_id)
         if case_trace.get("found"):
             case_trace_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["case_trace"]))
             initialize_excel_worksheet(case_trace_sheet)
@@ -2046,8 +3087,14 @@ def build_detail_export_workbook_bytes(
 def get_filter_options_payload(run_data):
     filter_options = run_data.get("filter_options")
     if filter_options is None:
+        prepared_df = run_data.get("prepared_df")
+        if prepared_df is None:
+            raise HTTPException(
+                status_code=500,
+                detail="フィルター候補を再構築できませんでした。",
+            )
         filter_options = get_filter_options(
-            run_data["prepared_df"],
+            prepared_df,
             filter_column_settings=run_data.get("column_settings"),
         )
         run_data["filter_options"] = filter_options
@@ -2055,17 +3102,100 @@ def get_filter_options_payload(run_data):
     return filter_options
 
 
-def get_variant_items(run_data, filter_params=None):
-    cache_key = build_filter_cache_key(filter_params)
+def _to_int(value, default=0):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _to_float(value, default=0.0):
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def build_variant_items_from_pattern_rows(pattern_rows):
+    if not pattern_rows:
+        return []
+
+    total_cases = sum(
+        _to_int(row.get("ケース数", row.get("case_count", 0)))
+        for row in pattern_rows
+    )
+    items = []
+
+    for index, row in enumerate(pattern_rows, start=1):
+        pattern_text = str(
+            row.get("処理順パターン")
+            or row.get("pattern")
+            or ""
+        ).strip()
+        activities = [step.strip() for step in pattern_text.split("→") if step.strip()]
+        case_count = _to_int(row.get("ケース数", row.get("case_count", 0)))
+        ratio_pct = row.get("ケース比率(%)", row.get("case_ratio_pct"))
+        avg_case_duration_min = _to_float(
+            row.get("平均ケース処理時間(分)", row.get("平均ケース時間(分)", row.get("avg_case_duration_min", 0.0)))
+        )
+
+        if ratio_pct in (None, ""):
+            ratio = round(case_count / total_cases, 4) if total_cases else 0.0
+        else:
+            ratio = round(_to_float(ratio_pct) / 100, 4)
+
+        avg_case_duration_sec = round(avg_case_duration_min * 60, 2)
+        items.append(
+            {
+                "variant_id": index,
+                "activities": activities,
+                "activity_count": len(activities),
+                "pattern": pattern_text,
+                "count": case_count,
+                "ratio": ratio,
+                "avg_case_duration_sec": avg_case_duration_sec,
+                "avg_case_duration_text": format_duration_text_for_report(avg_case_duration_sec),
+                "repeat_flag": "○" if len(set(activities)) < len(activities) else "",
+            }
+        )
+
+    return items
+
+
+def is_unfiltered_request(filter_cache_key):
+    return all(filter_value is None for filter_value in filter_cache_key)
+
+
+def get_variant_items(run_data, filter_params=None, variant_pattern=None):
+    cache_key = (build_filter_cache_key(filter_params), str(variant_pattern or "").strip() or None)
     variant_cache = run_data.setdefault("variant_cache", {})
 
     if cache_key not in variant_cache:
-        filtered_df = filter_prepared_df(
-            run_data["prepared_df"],
-            filter_params,
-            filter_column_settings=run_data.get("column_settings"),
-        )
-        variant_cache[cache_key] = create_variant_summary(filtered_df, limit=None)
+        filter_cache_key = cache_key[0]
+        if variant_pattern is None and is_unfiltered_request(filter_cache_key):
+            pattern_analysis = run_data["result"]["analyses"].get("pattern")
+            pattern_rows = pattern_analysis.get("rows", []) if pattern_analysis else []
+            if pattern_rows:
+                variant_cache[cache_key] = build_variant_items_from_pattern_rows(pattern_rows)
+                return variant_cache[cache_key]
+
+        if has_parquet_backing(run_data):
+            variant_cache[cache_key] = query_variant_summary(
+                run_data["prepared_parquet_path"],
+                filter_params=filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+                variant_pattern=variant_pattern,
+                limit=None,
+            )
+        else:
+            filtered_df = filter_prepared_df(
+                run_data["prepared_df"],
+                filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+            )
+            if variant_pattern:
+                filtered_df = filter_prepared_df_by_pattern(filtered_df, variant_pattern)
+            variant_cache[cache_key] = create_variant_summary(filtered_df, limit=None)
 
     return variant_cache[cache_key]
 
@@ -2077,44 +3207,40 @@ def get_variant_item(run_data, variant_id, filter_params=None):
         if variant_item["variant_id"] == safe_variant_id:
             return variant_item
 
-    raise HTTPException(status_code=404, detail="Variant was not found.")
+    raise HTTPException(status_code=404, detail="バリアントが見つかりません。")
 
 
 def get_pattern_summary_row(run_data, pattern_index):
     pattern_analysis = run_data["result"]["analyses"].get("pattern")
 
     if not pattern_analysis:
-        raise HTTPException(status_code=400, detail="Pattern analysis is not available.")
+        raise HTTPException(status_code=400, detail="処理順パターン分析を利用できません。")
 
     pattern_rows = pattern_analysis["rows"]
     safe_pattern_index = int(pattern_index)
     if safe_pattern_index < 0 or safe_pattern_index >= len(pattern_rows):
-        raise HTTPException(status_code=404, detail="Pattern index was not found.")
+        raise HTTPException(status_code=404, detail="パターン番号が見つかりません。")
 
     pattern_index_entries = run_data.get("pattern_index_entries")
     if pattern_index_entries is None:
-        pattern_index_entries = create_pattern_index_entries(run_data["prepared_df"])
+        pattern_index_entries = build_pattern_index_entries_from_rows(pattern_rows)
         run_data["pattern_index_entries"] = pattern_index_entries
 
     if safe_pattern_index >= len(pattern_index_entries):
-        raise HTTPException(status_code=404, detail="Pattern index was not found.")
+        raise HTTPException(status_code=404, detail="パターン番号が見つかりません。")
 
     summary_row = pattern_rows[safe_pattern_index]
     pattern_entry = pattern_index_entries[safe_pattern_index]
-    pattern = str(pattern_entry.get("pattern") or "").strip()
+    pattern = str(pattern_entry.get("pattern") or "").strip() or extract_pattern_text_from_row(summary_row)
 
     if not pattern:
-        raise HTTPException(status_code=500, detail="Pattern text could not be resolved.")
+        raise HTTPException(status_code=500, detail="パターン文字列を解決できませんでした。")
 
     return pattern_analysis, summary_row, pattern_entry, pattern
 
 
 def get_filtered_prepared_df(run_data, variant_id=None, pattern_index=None, filter_params=None):
-    prepared_df = filter_prepared_df(
-        run_data["prepared_df"],
-        filter_params,
-        filter_column_settings=run_data.get("column_settings"),
-    )
+    prepared_df, _ = get_base_filtered_prepared_df(run_data, filter_params=filter_params)
 
     if pattern_index is not None:
         _, _, _, pattern = get_pattern_summary_row(run_data, pattern_index)
@@ -2127,29 +3253,49 @@ def get_filtered_prepared_df(run_data, variant_id=None, pattern_index=None, filt
     return prepared_df
 
 
-def get_analysis_data(run_data, analysis_key, filter_params=None):
+def get_analysis_data(run_data, analysis_key, filter_params=None, variant_pattern=None):
     normalized_filter_key = build_filter_cache_key(filter_params)
     analysis_cache = run_data.setdefault("analysis_cache", {})
 
-    if all(filter_value is None for filter_value in normalized_filter_key):
+    if variant_pattern is None and all(filter_value is None for filter_value in normalized_filter_key):
         analysis = run_data["result"]["analyses"].get(analysis_key)
         if analysis:
             return analysis
 
-        cache_key = ("analysis", analysis_key, normalized_filter_key)
+        cache_key = ("analysis", analysis_key, normalized_filter_key, None)
         if cache_key not in analysis_cache:
-            analysis_cache[cache_key] = create_analysis_records(run_data["prepared_df"], analysis_key)
+            if has_parquet_backing(run_data):
+                analysis_cache[cache_key] = query_analysis_records(
+                    run_data["prepared_parquet_path"],
+                    analysis_key=analysis_key,
+                    filter_params=filter_params,
+                    filter_column_settings=run_data.get("column_settings"),
+                    variant_pattern=None,
+                )
+            else:
+                analysis_cache[cache_key] = create_analysis_records(run_data["prepared_df"], analysis_key)
         return analysis_cache[cache_key]
 
-    cache_key = ("analysis", analysis_key, normalized_filter_key)
+    cache_key = ("analysis", analysis_key, normalized_filter_key, str(variant_pattern or "").strip() or None)
 
     if cache_key not in analysis_cache:
-        filtered_df = filter_prepared_df(
-            run_data["prepared_df"],
-            filter_params,
-            filter_column_settings=run_data.get("column_settings"),
-        )
-        analysis_cache[cache_key] = create_analysis_records(filtered_df, analysis_key)
+        if has_parquet_backing(run_data):
+            analysis_cache[cache_key] = query_analysis_records(
+                run_data["prepared_parquet_path"],
+                analysis_key=analysis_key,
+                filter_params=filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+                variant_pattern=variant_pattern,
+            )
+        else:
+            filtered_df = filter_prepared_df(
+                run_data["prepared_df"],
+                filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+            )
+            if variant_pattern:
+                filtered_df = filter_prepared_df_by_pattern(filtered_df, variant_pattern)
+            analysis_cache[cache_key] = create_analysis_records(filtered_df, analysis_key)
 
     return analysis_cache[cache_key]
 
@@ -2164,79 +3310,139 @@ def get_bottleneck_summary(run_data, variant_id=None, pattern_index=None, filter
     cache = run_data.setdefault("bottleneck_cache", {})
 
     if cache_key not in cache:
-        filtered_df = get_filtered_prepared_df(
-            run_data,
-            variant_id=variant_id,
-            pattern_index=pattern_index,
-            filter_params=filter_params,
-        )
-        cache[cache_key] = create_bottleneck_summary(filtered_df, limit=None)
+        if has_parquet_backing(run_data):
+            cache[cache_key] = query_bottleneck_summary(
+                run_data["prepared_parquet_path"],
+                filter_params=filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+                variant_pattern=get_run_variant_pattern(
+                    run_data,
+                    variant_id=variant_id,
+                    pattern_index=pattern_index,
+                    filter_params=filter_params,
+                ),
+                limit=None,
+            )
+        else:
+            filtered_df = get_filtered_prepared_df(
+                run_data,
+                variant_id=variant_id,
+                pattern_index=pattern_index,
+                filter_params=filter_params,
+            )
+            cache[cache_key] = create_bottleneck_summary(filtered_df, limit=None)
 
     return cache[cache_key]
 
 
-def get_dashboard_summary(run_data, filter_params=None, prepared_df=None):
-    cache_key = build_filter_cache_key(filter_params)
+def get_dashboard_summary(run_data, filter_params=None, prepared_df=None, variant_pattern=None):
+    cache_key = (build_filter_cache_key(filter_params), str(variant_pattern or "").strip() or None)
     cache = run_data.setdefault("dashboard_cache", {})
 
     if cache_key not in cache:
-        filtered_df = prepared_df
-        if filtered_df is None:
-            filtered_df = filter_prepared_df(
-                run_data["prepared_df"],
-                filter_params,
+        if has_parquet_backing(run_data):
+            if variant_pattern:
+                resolved_bottleneck_summary = query_bottleneck_summary(
+                    run_data["prepared_parquet_path"],
+                    filter_params=filter_params,
+                    filter_column_settings=run_data.get("column_settings"),
+                    variant_pattern=variant_pattern,
+                    limit=None,
+                )
+            else:
+                resolved_bottleneck_summary = get_bottleneck_summary(run_data, filter_params=filter_params)
+            cache[cache_key] = query_dashboard_summary(
+                run_data["prepared_parquet_path"],
+                filter_params=filter_params,
                 filter_column_settings=run_data.get("column_settings"),
+                variant_pattern=variant_pattern,
+                variant_items=get_variant_items(
+                    run_data,
+                    filter_params=filter_params,
+                    variant_pattern=variant_pattern,
+                )[:10],
+                bottleneck_summary=resolved_bottleneck_summary,
+                coverage_limit=10,
             )
+        else:
+            filtered_df = prepared_df
+            if filtered_df is None:
+                filtered_df, _ = get_base_filtered_prepared_df(run_data, filter_params=filter_params)
+                if variant_pattern:
+                    filtered_df = filter_prepared_df_by_pattern(filtered_df, variant_pattern)
 
-        cache[cache_key] = create_dashboard_summary(
-            filtered_df,
-            variant_items=get_variant_items(run_data, filter_params=filter_params)[:10],
-            bottleneck_summary=get_bottleneck_summary(run_data, filter_params=filter_params),
-            coverage_limit=10,
-        )
+            if variant_pattern:
+                resolved_bottleneck_summary = create_bottleneck_summary(filtered_df, limit=None)
+            else:
+                resolved_bottleneck_summary = get_bottleneck_summary(run_data, filter_params=filter_params)
+
+            cache[cache_key] = create_dashboard_summary(
+                filtered_df,
+                variant_items=get_variant_items(
+                    run_data,
+                    filter_params=filter_params,
+                    variant_pattern=variant_pattern,
+                )[:10],
+                bottleneck_summary=resolved_bottleneck_summary,
+                coverage_limit=10,
+            )
 
     return cache[cache_key]
 
 
-def get_root_cause_summary(run_data, filter_params=None, prepared_df=None):
-    cache_key = build_filter_cache_key(filter_params)
+def get_root_cause_summary(run_data, filter_params=None, prepared_df=None, variant_pattern=None):
+    cache_key = (build_filter_cache_key(filter_params), str(variant_pattern or "").strip() or None)
     cache = run_data.setdefault("root_cause_cache", {})
 
     if cache_key not in cache:
-        filtered_df = prepared_df
-        if filtered_df is None:
-            filtered_df = filter_prepared_df(
-                run_data["prepared_df"],
-                filter_params,
+        if has_parquet_backing(run_data):
+            cache[cache_key] = query_root_cause_summary(
+                run_data["prepared_parquet_path"],
+                filter_params=filter_params,
                 filter_column_settings=run_data.get("column_settings"),
+                variant_pattern=variant_pattern,
+                limit=10,
             )
+        else:
+            filtered_df = prepared_df
+            if filtered_df is None:
+                filtered_df, _ = get_base_filtered_prepared_df(run_data, filter_params=filter_params)
+                if variant_pattern:
+                    filtered_df = filter_prepared_df_by_pattern(filtered_df, variant_pattern)
 
-        cache[cache_key] = create_root_cause_summary(
-            filtered_df,
-            filter_column_settings=run_data.get("column_settings"),
-            limit=10,
-        )
+            cache[cache_key] = create_root_cause_summary(
+                filtered_df,
+                filter_column_settings=run_data.get("column_settings"),
+                limit=10,
+            )
 
     return cache[cache_key]
 
 
-def get_impact_summary(run_data, filter_params=None, prepared_df=None):
-    cache_key = build_filter_cache_key(filter_params)
+def get_impact_summary(run_data, filter_params=None, prepared_df=None, variant_pattern=None):
+    cache_key = (build_filter_cache_key(filter_params), str(variant_pattern or "").strip() or None)
     cache = run_data.setdefault("impact_cache", {})
 
     if cache_key not in cache:
-        filtered_df = prepared_df
-        if filtered_df is None:
-            filtered_df = filter_prepared_df(
-                run_data["prepared_df"],
-                filter_params,
+        if has_parquet_backing(run_data):
+            cache[cache_key] = query_impact_summary(
+                run_data["prepared_parquet_path"],
+                filter_params=filter_params,
                 filter_column_settings=run_data.get("column_settings"),
+                variant_pattern=variant_pattern,
+                limit=None,
             )
+        else:
+            filtered_df = prepared_df
+            if filtered_df is None:
+                filtered_df, _ = get_base_filtered_prepared_df(run_data, filter_params=filter_params)
+                if variant_pattern:
+                    filtered_df = filter_prepared_df_by_pattern(filtered_df, variant_pattern)
 
-        cache[cache_key] = create_impact_summary(
-            filtered_df,
-            limit=None,
-        )
+            cache[cache_key] = create_impact_summary(
+                filtered_df,
+                limit=None,
+            )
 
     return cache[cache_key]
 
@@ -2247,20 +3453,57 @@ def get_rule_based_insights_summary(
     analysis_rows=None,
     filter_params=None,
     prepared_df=None,
+    variant_pattern=None,
     dashboard_summary=None,
+    bottleneck_summary=None,
     impact_summary=None,
 ):
-    cache_key = (str(analysis_key or "").strip().lower(), build_filter_cache_key(filter_params))
+    cache_key = (
+        str(analysis_key or "").strip().lower(),
+        build_filter_cache_key(filter_params),
+        str(variant_pattern or "").strip() or None,
+    )
     cache = run_data.setdefault("insights_cache", {})
 
     if cache_key not in cache:
+        normalized_analysis_key = str(analysis_key or "").strip().lower()
         filtered_df = prepared_df
         if filtered_df is None:
-            filtered_df = filter_prepared_df(
-                run_data["prepared_df"],
-                filter_params,
-                filter_column_settings=run_data.get("column_settings"),
-            )
+            if has_parquet_backing(run_data) and normalized_analysis_key in {"frequency", "transition", "pattern"}:
+                filtered_df = pd.DataFrame(columns=["case_id", "activity", "duration_sec"])
+            else:
+                filtered_df, _ = get_base_filtered_prepared_df(run_data, filter_params=filter_params)
+                if variant_pattern:
+                    filtered_df = filter_prepared_df_by_pattern(filtered_df, variant_pattern)
+
+        resolved_bottleneck_summary = bottleneck_summary
+        resolved_impact_summary = impact_summary
+        if normalized_analysis_key in {"frequency", "transition", "pattern"}:
+            if resolved_bottleneck_summary is None:
+                resolved_bottleneck_summary = {
+                    "activity_bottlenecks": [],
+                    "transition_bottlenecks": [],
+                    "activity_heatmap": {},
+                    "transition_heatmap": {},
+                }
+            if resolved_impact_summary is None:
+                resolved_impact_summary = {
+                    "has_data": False,
+                    "rows": [],
+                }
+        else:
+            if resolved_bottleneck_summary is None:
+                resolved_bottleneck_summary = get_bottleneck_summary(
+                    run_data,
+                    filter_params=filter_params,
+                )
+            if resolved_impact_summary is None:
+                resolved_impact_summary = get_impact_summary(
+                    run_data,
+                    filter_params=filter_params,
+                    prepared_df=filtered_df,
+                    variant_pattern=variant_pattern,
+                )
 
         cache[cache_key] = create_rule_based_insights(
             filtered_df,
@@ -2270,16 +3513,10 @@ def get_rule_based_insights_summary(
                 run_data,
                 filter_params=filter_params,
                 prepared_df=filtered_df,
+                variant_pattern=variant_pattern,
             ),
-            bottleneck_summary=get_bottleneck_summary(
-                run_data,
-                filter_params=filter_params,
-            ),
-            impact_summary=impact_summary or get_impact_summary(
-                run_data,
-                filter_params=filter_params,
-                prepared_df=filtered_df,
-            ),
+            bottleneck_summary=resolved_bottleneck_summary,
+            impact_summary=resolved_impact_summary,
             max_items=5,
         )
 
@@ -2321,18 +3558,68 @@ def get_pattern_flow_snapshot(
         return cached_snapshot
 
     analyses = run_data["result"]["analyses"]
+    variant_item = None
+    variant_pattern = None
+    if variant_id is not None:
+        variant_item = get_variant_item(run_data, variant_id, filter_params=filter_params)
+        variant_pattern = variant_item["pattern"]
+
+    if has_parquet_backing(run_data):
+        scoped_meta = get_filtered_meta_for_run(
+            run_data,
+            filter_params=filter_params,
+            variant_pattern=variant_pattern,
+        )
+        scoped_event_count = int(scoped_meta.get("event_count") or 0)
+        use_lightweight_flow = scoped_event_count >= LARGE_DATASET_FLOW_FAST_PATH_THRESHOLD
+    else:
+        prepared_row_count = int(run_data.get("prepared_row_count") or 0)
+        use_lightweight_flow = (
+            prepared_row_count >= LARGE_DATASET_FLOW_FAST_PATH_THRESHOLD
+            and is_unfiltered_request(filter_cache_key)
+        )
+
     if variant_id is None:
         pattern_analysis = get_analysis_data(run_data, "pattern", filter_params=filter_params)
-        frequency_analysis = get_analysis_data(run_data, "frequency", filter_params=filter_params)
-        filtered_df = filter_prepared_df(
-            run_data["prepared_df"],
-            filter_params,
-            filter_column_settings=run_data.get("column_settings"),
+        frequency_analysis = (
+            analyses.get("frequency")
+            if is_unfiltered_request(filter_cache_key)
+            else get_analysis_data(run_data, "frequency", filter_params=filter_params)
         )
+        filtered_df = None
+        selected_transition_rows = []
+
+        if has_parquet_backing(run_data):
+            pattern_selection = select_pattern_rows_for_flow(
+                pattern_analysis["rows"],
+                pattern_percent=pattern_percent,
+                pattern_count=pattern_count,
+                pattern_cap=PROCESS_FLOW_PATTERN_CAP,
+            )
+            selected_patterns = []
+            for row in pattern_selection["selected_pattern_rows"]:
+                selected_pattern = extract_pattern_text_from_row(row)
+                if selected_pattern:
+                    selected_patterns.append(selected_pattern)
+            if not use_lightweight_flow and selected_patterns:
+                selected_transition_rows = query_transition_records_for_patterns(
+                    run_data["prepared_parquet_path"],
+                    selected_patterns,
+                    filter_params=filter_params,
+                    filter_column_settings=run_data.get("column_settings"),
+                )
+        elif not use_lightweight_flow:
+            filtered_df = filter_prepared_df(
+                run_data["prepared_df"],
+                filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+            )
+
         snapshot = create_pattern_flow_snapshot(
             pattern_rows=pattern_analysis["rows"],
             prepared_df=filtered_df,
-            frequency_rows=frequency_analysis.get("rows", []),
+            transition_rows=selected_transition_rows,
+            frequency_rows=(frequency_analysis or {}).get("rows", []),
             pattern_percent=pattern_percent,
             pattern_count=pattern_count,
             activity_percent=activity_percent,
@@ -2340,19 +3627,61 @@ def get_pattern_flow_snapshot(
             pattern_cap=PROCESS_FLOW_PATTERN_CAP,
         )
     else:
-        filtered_df = filter_prepared_df(
-            run_data["prepared_df"],
-            filter_params,
-            filter_column_settings=run_data.get("column_settings"),
-        )
-        variant_item = get_variant_item(run_data, variant_id, filter_params=filter_params)
-        snapshot = create_variant_flow_snapshot(
-            prepared_df=filtered_df,
-            variant_pattern=variant_item["pattern"],
-            activity_percent=activity_percent,
-            connection_percent=connection_percent,
-        )
+        if use_lightweight_flow:
+            snapshot = create_pattern_flow_snapshot(
+                pattern_rows=[
+                    {
+                        FLOW_PATTERN_CASE_COUNT_COLUMN: int(variant_item["count"]),
+                        FLOW_PATTERN_COLUMN: variant_pattern,
+                    }
+                ],
+                prepared_df=None,
+                frequency_rows=[],
+                pattern_percent=100,
+                pattern_count=1,
+                activity_percent=activity_percent,
+                connection_percent=connection_percent,
+                pattern_cap=1,
+            )
+        elif has_parquet_backing(run_data):
+            selected_transition_rows = query_transition_records_for_patterns(
+                run_data["prepared_parquet_path"],
+                [variant_pattern],
+                filter_params=filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+            )
+            snapshot = create_pattern_flow_snapshot(
+                pattern_rows=[
+                    {
+                        FLOW_PATTERN_CASE_COUNT_COLUMN: int(variant_item["count"]),
+                        FLOW_PATTERN_COLUMN: variant_pattern,
+                    }
+                ],
+                prepared_df=None,
+                transition_rows=selected_transition_rows,
+                frequency_rows=[],
+                pattern_percent=100,
+                pattern_count=1,
+                activity_percent=activity_percent,
+                connection_percent=connection_percent,
+                pattern_cap=1,
+            )
+        else:
+            filtered_df = filter_prepared_df(
+                run_data["prepared_df"],
+                filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+            )
+            snapshot = create_variant_flow_snapshot(
+                prepared_df=filtered_df,
+                variant_pattern=variant_item["pattern"],
+                activity_percent=activity_percent,
+                connection_percent=connection_percent,
+            )
         snapshot["selected_variant"] = build_variant_response_item(variant_item, run_data=run_data)
+
+    if use_lightweight_flow:
+        snapshot["is_large_dataset_optimized"] = True
 
     cache[cache_key] = snapshot
     cache.move_to_end(cache_key)
@@ -2390,9 +3719,9 @@ def build_log_profile_payload(
 ):
     headers = [str(column_name) for column_name in raw_df.columns.tolist()]
     selection_payload = build_column_selection_payload(headers)
-    resolved_case_id_column = case_id_column or selection_payload["default_selection"]["case_id_column"]
-    resolved_activity_column = activity_column or selection_payload["default_selection"]["activity_column"]
-    resolved_timestamp_column = timestamp_column or selection_payload["default_selection"]["timestamp_column"]
+    resolved_case_id_column = suggest_column_name(headers, "case_id_column", case_id_column)
+    resolved_activity_column = suggest_column_name(headers, "activity_column", activity_column)
+    resolved_timestamp_column = suggest_column_name(headers, "timestamp_column", timestamp_column)
     normalized_filter_column_settings = normalize_filter_column_settings(**(filter_column_settings or {}))
 
     return {
@@ -2422,6 +3751,171 @@ def build_log_profile_payload(
             else None
         ),
     }
+
+
+def resolve_log_diagnostic_sample_row_limit(raw_value):
+    try:
+        sample_row_limit = int(str(raw_value or "").strip() or DEFAULT_LOG_DIAGNOSTIC_SAMPLE_ROW_LIMIT)
+    except (TypeError, ValueError):
+        sample_row_limit = DEFAULT_LOG_DIAGNOSTIC_SAMPLE_ROW_LIMIT
+
+    if sample_row_limit <= 0:
+        sample_row_limit = DEFAULT_LOG_DIAGNOSTIC_SAMPLE_ROW_LIMIT
+
+    return min(MAX_LOG_DIAGNOSTIC_SAMPLE_ROW_LIMIT, sample_row_limit)
+
+
+def build_log_diagnostic_period_text(diagnostics):
+    time_range = (diagnostics or {}).get("time_range") or {}
+    min_time = str(time_range.get("min") or "").strip()
+    max_time = str(time_range.get("max") or "").strip()
+    if not min_time or not max_time:
+        return "ケースID / アクティビティ / タイムスタンプ列を選択すると表示します。"
+    return f"{min_time} 〜 {max_time}"
+
+
+def build_log_diagnostic_missing_count_text(diagnostics):
+    missing_counts = (diagnostics or {}).get("missing_counts") or {}
+    return (
+        f"ケースID {missing_counts.get('case_id', '-') if missing_counts.get('case_id') is not None else '-'}"
+        f" / アクティビティ {missing_counts.get('activity', '-') if missing_counts.get('activity') is not None else '-'}"
+        f" / タイムスタンプ {missing_counts.get('timestamp', '-') if missing_counts.get('timestamp') is not None else '-'}"
+    )
+
+
+def build_log_diagnostic_duplicate_rate_text(diagnostics):
+    duplicate_rate = float((diagnostics or {}).get("duplicate_rate") or 0.0)
+    return f"{duplicate_rate * 100:.1f}%"
+
+
+def build_log_diagnostic_filter_rows(profile_payload, preview_limit=30):
+    diagnostics = (profile_payload or {}).get("diagnostics") or {}
+    diagnostics_filter_rows = {
+        str(row.get("slot") or ""): row
+        for row in (diagnostics.get("filters") or [])
+        if str(row.get("slot") or "").strip()
+    }
+    column_settings = (profile_payload or {}).get("column_settings") or {}
+    filter_definitions = column_settings.get("filters") or []
+    rows = []
+
+    for filter_definition in filter_definitions:
+        slot = str(filter_definition.get("slot") or "").strip()
+        diagnostics_row = diagnostics_filter_rows.get(slot, {})
+        options = diagnostics_row.get("options") or []
+        option_preview_values = [str(option) for option in options[:preview_limit]]
+        option_preview = ", ".join(option_preview_values) if option_preview_values else "-"
+        if len(options) > preview_limit:
+            option_preview = f"{option_preview} ... 他 {len(options) - preview_limit} 件"
+
+        rows.append(
+            {
+                "スロット": slot or "-",
+                "表示名": str(filter_definition.get("label") or "").strip() or "-",
+                "対象列": str(filter_definition.get("column_name") or "").strip() or "未設定",
+                "候補数": int(len(options)),
+                "候補一覧": option_preview,
+            }
+        )
+
+    return rows
+
+
+def build_log_diagnostic_sample_rows(raw_df, sample_row_limit):
+    headers = [str(column_name) for column_name in raw_df.columns.tolist()]
+    sampled_df = raw_df.head(max(0, int(sample_row_limit))).copy()
+    sample_rows = []
+
+    for row_number, (original_index, row) in enumerate(sampled_df.iterrows(), start=1):
+        row_payload = {
+            "レコード順": int(original_index) + 1,
+        }
+        for header in headers:
+            row_payload[header] = row.get(header, "")
+        sample_rows.append(row_payload)
+
+    return sample_rows, ["レコード順", *headers]
+
+
+def build_log_diagnostic_workbook_bytes(profile_payload, raw_df, sample_row_limit):
+    diagnostics = (profile_payload or {}).get("diagnostics") or {}
+    column_settings = (profile_payload or {}).get("column_settings") or {}
+    sample_rows, sample_headers = build_log_diagnostic_sample_rows(raw_df, sample_row_limit)
+    sample_row_count = len(sample_rows)
+    total_record_count = int((diagnostics or {}).get("record_count") or len(raw_df))
+    omitted_row_count = max(0, total_record_count - sample_row_count)
+
+    workbook = Workbook()
+    summary_sheet = workbook.active
+    summary_sheet.title = sanitize_workbook_sheet_name(LOG_DIAGNOSTIC_SHEET_NAMES["summary"])
+    initialize_excel_worksheet(summary_sheet)
+
+    summary_rows = [
+        ("元ファイル名", profile_payload.get("source_file_name") or ""),
+        ("ケースID列", column_settings.get("case_id_column") or "未設定"),
+        ("アクティビティ列", column_settings.get("activity_column") or "未設定"),
+        ("タイムスタンプ列", column_settings.get("timestamp_column") or "未設定"),
+        ("ログレコード数", diagnostics.get("record_count", "-")),
+        ("総ケース数", diagnostics.get("case_count", "-")),
+        ("アクティビティ種類数", diagnostics.get("activity_type_count", "-")),
+        ("ログ期間", build_log_diagnostic_period_text(diagnostics)),
+        ("欠損件数", build_log_diagnostic_missing_count_text(diagnostics)),
+        ("重複行数", diagnostics.get("duplicate_row_count", 0)),
+        ("重複あり/なし", diagnostics.get("duplicate_status", "なし")),
+        ("重複除外後レコード数", diagnostics.get("deduplicated_record_count", "-")),
+        ("重複率", build_log_diagnostic_duplicate_rate_text(diagnostics)),
+        ("ヘッダー一覧", ", ".join(diagnostics.get("headers") or [])),
+        ("ログサンプル出力上限", int(sample_row_limit)),
+        ("ログサンプル出力件数", sample_row_count),
+    ]
+    next_row = append_key_value_rows(
+        summary_sheet,
+        "ログ診断サマリー",
+        summary_rows,
+        description="トップ画面のログ診断に表示する件数・期間・欠損・重複をまとめています。",
+    )
+
+    column_summary_rows = [
+        {
+            "列名": str(column.get("name") or ""),
+            "サンプル値": ", ".join(column.get("sample_values") or []) or "-",
+            "ユニーク件数": int(column.get("unique_count") or 0),
+            "欠損件数": int(column.get("missing_count") or 0),
+        }
+        for column in (diagnostics.get("columns") or [])
+    ]
+    next_row = append_table_to_worksheet(
+        summary_sheet,
+        "列サマリー",
+        column_summary_rows,
+        ["列名", "サンプル値", "ユニーク件数", "欠損件数"],
+        start_row=next_row,
+        description="トップ画面に表示する列ごとのサンプル値・ユニーク件数・欠損件数です。",
+        min_column_widths={"列名": 24, "サンプル値": 48},
+    )
+
+    sample_sheet = workbook.create_sheet(sanitize_workbook_sheet_name(LOG_DIAGNOSTIC_SHEET_NAMES["sample"]))
+    initialize_excel_worksheet(sample_sheet)
+    sample_description = (
+        f"ログサンプルとして先頭 {sample_row_count} 件を掲載しています。"
+        if omitted_row_count <= 0
+        else f"ログサンプルとして先頭 {sample_row_count} 件を掲載しています。残り {omitted_row_count} 件は省略しています。"
+    )
+    append_table_to_worksheet(
+        sample_sheet,
+        "ログサンプル",
+        sample_rows,
+        sample_headers,
+        description=sample_description,
+        min_column_widths={"レコード順": 14},
+    )
+
+    for worksheet in workbook.worksheets:
+        autosize_worksheet_columns(worksheet)
+
+    output_buffer = BytesIO()
+    workbook.save(output_buffer)
+    return output_buffer.getvalue()
 
 
 def get_analysis_options():
@@ -2477,7 +3971,7 @@ def analysis_detail(request: Request, analysis_key):
     analysis_definitions = get_available_analysis_definitions()
 
     if analysis_key not in analysis_definitions:
-        raise HTTPException(status_code=404, detail="Analysis key was not found.")
+        raise HTTPException(status_code=404, detail="分析種別が見つかりません。")
 
     return _template_response(
         request,
@@ -2495,7 +3989,14 @@ def pattern_detail_api(run_id: str, pattern_index: int):
     run_data = get_run_data(run_id)
     pattern_analysis, summary_row, _, pattern = get_pattern_summary_row(run_data, pattern_index)
 
-    detail = create_pattern_bottleneck_details(run_data["prepared_df"], pattern)
+    if has_parquet_backing(run_data):
+        detail = query_pattern_bottleneck_details(
+            run_data["prepared_parquet_path"],
+            pattern,
+            filter_column_settings=run_data.get("column_settings"),
+        )
+    else:
+        detail = create_pattern_bottleneck_details(run_data["prepared_df"], pattern)
     return JSONResponse(
         content={
             "run_id": run_id,
@@ -2503,6 +4004,16 @@ def pattern_detail_api(run_id: str, pattern_index: int):
             "source_file_name": run_data["source_file_name"],
             "analysis_name": pattern_analysis["analysis_name"],
             "summary_row": summary_row,
+            "repeat_flag": summary_row.get("繰り返し", ""),
+            "repeat_count": summary_row.get("繰り返し回数", 0),
+            "repeat_rate_pct": summary_row.get("繰り返し率(%)", 0),
+            "repeat_rate_band": summary_row.get("繰り返し率区分", ""),
+            "review_flag": summary_row.get("確認区分", ""),
+            "avg_case_duration_diff_min": summary_row.get("平均処理時間差分(分)", 0),
+            "improvement_priority_score": summary_row.get("改善優先度スコア", 0),
+            "overall_impact_pct": summary_row.get("全体影響度(%)", 0),
+            "fastest_pattern_flag": summary_row.get("最短処理", ""),
+            "simple_comment": summary_row.get("簡易コメント", ""),
             **detail,
         }
     )
@@ -2515,16 +4026,26 @@ def analysis_detail_api(
     analysis_key: str,
     row_limit: int | None = None,
     row_offset: int = 0,
+    include_dashboard: bool = True,
+    include_impact: bool = True,
+    include_root_cause: bool = True,
+    include_insights: bool = True,
 ):
     run_data = get_run_data(run_id)
     filter_params = get_effective_filter_params(run_data, get_request_filter_params(request))
     analysis = get_analysis_data(run_data, analysis_key, filter_params=filter_params)
-    filtered_df = filter_prepared_df(
-        run_data["prepared_df"],
-        filter_params,
-        filter_column_settings=run_data.get("column_settings"),
-    )
-    filtered_meta = build_filtered_meta(filtered_df)
+    if has_parquet_backing(run_data):
+        filtered_df = None
+        filtered_meta = get_filtered_meta_for_run(
+            run_data,
+            filter_params=filter_params,
+        )
+    else:
+        filtered_df, filtered_meta = get_base_filtered_prepared_df(
+            run_data,
+            filter_params=filter_params,
+        )
+    deferred_sections = []
 
     response_analyses = {
         analysis_key: build_analysis_payload(
@@ -2533,21 +4054,49 @@ def analysis_detail_api(
             row_offset=row_offset,
         )
     }
-    dashboard_summary = get_dashboard_summary(
-        run_data,
-        filter_params=filter_params,
-        prepared_df=filtered_df,
-    )
-    impact_summary = get_impact_summary(
-        run_data,
-        filter_params=filter_params,
-        prepared_df=filtered_df,
-    )
-    root_cause_summary = get_root_cause_summary(
-        run_data,
-        filter_params=filter_params,
-        prepared_df=filtered_df,
-    )
+    dashboard_summary = None
+    if include_dashboard:
+        dashboard_summary = get_dashboard_summary(
+            run_data,
+            filter_params=filter_params,
+            prepared_df=filtered_df,
+        )
+    else:
+        deferred_sections.append("dashboard")
+
+    impact_summary = None
+    if include_impact:
+        impact_summary = get_impact_summary(
+            run_data,
+            filter_params=filter_params,
+            prepared_df=filtered_df,
+        )
+    else:
+        deferred_sections.append("impact")
+
+    root_cause_summary = None
+    if include_root_cause:
+        root_cause_summary = get_root_cause_summary(
+            run_data,
+            filter_params=filter_params,
+            prepared_df=filtered_df,
+        )
+    else:
+        deferred_sections.append("root_cause")
+
+    insights_summary = None
+    if include_insights:
+        insights_summary = get_rule_based_insights_summary(
+            run_data,
+            analysis_key=analysis_key,
+            analysis_rows=analysis.get("rows"),
+            filter_params=filter_params,
+            prepared_df=filtered_df,
+            dashboard_summary=dashboard_summary,
+            impact_summary=impact_summary,
+        )
+    else:
+        deferred_sections.append("insights")
 
     return JSONResponse(
         content={
@@ -2558,16 +4107,9 @@ def analysis_detail_api(
             "event_count": filtered_meta["event_count"],
             "dashboard": dashboard_summary,
             "impact": impact_summary,
-            "insights": get_rule_based_insights_summary(
-                run_data,
-                analysis_key=analysis_key,
-                analysis_rows=analysis.get("rows"),
-                filter_params=filter_params,
-                prepared_df=filtered_df,
-                dashboard_summary=dashboard_summary,
-                impact_summary=impact_summary,
-            ),
+            "insights": insights_summary,
             "root_cause": root_cause_summary,
+            "deferred_sections": deferred_sections,
             "applied_filters": filter_params,
             "column_settings": build_column_settings_payload(run_data.get("column_settings")),
             "analyses": response_analyses,
@@ -2582,7 +4124,7 @@ def ai_insights_state_api(request: Request, run_id: str, analysis_key: str):
     normalized_analysis_key = str(analysis_key or "").strip().lower()
 
     if normalized_analysis_key not in analysis_definitions:
-        raise HTTPException(status_code=404, detail="Analysis key was not found.")
+        raise HTTPException(status_code=404, detail="分析種別が見つかりません。")
 
     filter_params = get_effective_filter_params(run_data, get_request_filter_params(request))
     cached_summary = get_cached_ai_summary(
@@ -2613,7 +4155,7 @@ def ai_insights_generate_api(
     normalized_analysis_key = str(analysis_key or "").strip().lower()
 
     if normalized_analysis_key not in analysis_definitions:
-        raise HTTPException(status_code=404, detail="Analysis key was not found.")
+        raise HTTPException(status_code=404, detail="分析種別が見つかりません。")
 
     filter_params = get_effective_filter_params(run_data, get_request_filter_params(request))
     payload = build_ai_insights_summary(
@@ -2633,7 +4175,7 @@ def analysis_excel_file_api(run_id: str, analysis_key: str):
     analysis = analyses.get(analysis_key)
 
     if not analysis:
-        raise HTTPException(status_code=404, detail="Analysis data was not found.")
+        raise HTTPException(status_code=404, detail="分析データが見つかりません。")
 
     excel_df = pd.DataFrame(analysis["rows"])
     excel_bytes = build_excel_bytes(excel_df, analysis["sheet_name"])
@@ -2753,7 +4295,7 @@ def pattern_flow_api(
     pattern_analysis = get_analysis_data(run_data, "pattern", filter_params=filter_params)
 
     if not pattern_analysis and variant_id is None:
-        raise HTTPException(status_code=400, detail="Pattern analysis is not available.")
+        raise HTTPException(status_code=400, detail="処理順パターン分析を利用できません。")
 
     snapshot = get_pattern_flow_snapshot(
         run_data=run_data,
@@ -2764,12 +4306,9 @@ def pattern_flow_api(
         variant_id=variant_id,
         filter_params=filter_params,
     )
-    filtered_meta = build_filtered_meta(
-        filter_prepared_df(
-            run_data["prepared_df"],
-            filter_params,
-            filter_column_settings=run_data.get("column_settings"),
-        )
+    filtered_meta = get_filtered_meta_for_run(
+        run_data,
+        filter_params=filter_params,
     )
 
     return JSONResponse(
@@ -2788,10 +4327,9 @@ def variant_list_api(request: Request, run_id: str, limit: int = 10):
     run_data = get_run_data(run_id)
     filter_params = get_effective_filter_params(run_data, get_request_filter_params(request))
     safe_limit = max(0, int(limit))
-    filtered_df = filter_prepared_df(
-        run_data["prepared_df"],
-        filter_params,
-        filter_column_settings=run_data.get("column_settings"),
+    filtered_meta = get_filtered_meta_for_run(
+        run_data,
+        filter_params=filter_params,
     )
     all_variant_items = get_variant_items(run_data, filter_params=filter_params)
     variant_items = all_variant_items if safe_limit == 0 else all_variant_items[:safe_limit]
@@ -2804,11 +4342,11 @@ def variant_list_api(request: Request, run_id: str, limit: int = 10):
                 for variant_item in variant_items
             ],
             "coverage": build_variant_coverage_payload(
-                total_case_count=int(filtered_df["case_id"].nunique()) if not filtered_df.empty else 0,
+                total_case_count=filtered_meta["case_count"],
                 variant_items=variant_items,
             ),
-            "filtered_case_count": int(filtered_df["case_id"].nunique()) if not filtered_df.empty else 0,
-            "filtered_event_count": int(len(filtered_df)),
+            "filtered_case_count": filtered_meta["case_count"],
+            "filtered_event_count": filtered_meta["event_count"],
             "applied_filters": filter_params,
         }
     )
@@ -2825,17 +4363,22 @@ def bottleneck_list_api(
     run_data = get_run_data(run_id)
     filter_params = get_effective_filter_params(run_data, get_request_filter_params(request))
     safe_limit = max(0, int(limit))
+    variant_pattern = get_run_variant_pattern(
+        run_data,
+        variant_id=variant_id,
+        pattern_index=pattern_index,
+        filter_params=filter_params,
+    )
     bottleneck_summary = get_bottleneck_summary(
         run_data,
         variant_id=variant_id,
         pattern_index=pattern_index,
         filter_params=filter_params,
     )
-    filtered_df = get_filtered_prepared_df(
+    filtered_meta = get_filtered_meta_for_run(
         run_data,
-        variant_id=variant_id,
-        pattern_index=pattern_index,
         filter_params=filter_params,
+        variant_pattern=variant_pattern,
     )
 
     return JSONResponse(
@@ -2844,8 +4387,8 @@ def bottleneck_list_api(
             "limit": safe_limit,
             "variant_id": variant_id,
             "pattern_index": pattern_index,
-            "filtered_case_count": int(filtered_df["case_id"].nunique()) if not filtered_df.empty else 0,
-            "filtered_event_count": int(len(filtered_df)),
+            "filtered_case_count": filtered_meta["case_count"],
+            "filtered_event_count": filtered_meta["event_count"],
             "applied_filters": filter_params,
             "activity_bottlenecks": bottleneck_summary["activity_bottlenecks"][:safe_limit],
             "transition_bottlenecks": bottleneck_summary["transition_bottlenecks"][:safe_limit],
@@ -2867,19 +4410,35 @@ def transition_case_drilldown_api(
 ):
     run_data = get_run_data(run_id)
     filter_params = get_effective_filter_params(run_data, get_request_filter_params(request))
-    filtered_df = get_filtered_prepared_df(
-        run_data,
-        variant_id=variant_id,
-        pattern_index=pattern_index,
-        filter_params=filter_params,
-    )
     safe_limit = max(0, int(limit))
-    case_rows = create_transition_case_drilldown(
-        filtered_df,
-        from_activity=from_activity,
-        to_activity=to_activity,
-        limit=safe_limit,
-    )
+    if has_parquet_backing(run_data):
+        case_rows = query_transition_case_drilldown(
+            run_data["prepared_parquet_path"],
+            from_activity=from_activity,
+            to_activity=to_activity,
+            limit=safe_limit,
+            filter_params=filter_params,
+            filter_column_settings=run_data.get("column_settings"),
+            variant_pattern=get_run_variant_pattern(
+                run_data,
+                variant_id=variant_id,
+                pattern_index=pattern_index,
+                filter_params=filter_params,
+            ),
+        )
+    else:
+        filtered_df = get_filtered_prepared_df(
+            run_data,
+            variant_id=variant_id,
+            pattern_index=pattern_index,
+            filter_params=filter_params,
+        )
+        case_rows = create_transition_case_drilldown(
+            filtered_df,
+            from_activity=from_activity,
+            to_activity=to_activity,
+            limit=safe_limit,
+        )
 
     return JSONResponse(
         content={
@@ -2909,18 +4468,33 @@ def activity_case_drilldown_api(
 ):
     run_data = get_run_data(run_id)
     filter_params = get_effective_filter_params(run_data, get_request_filter_params(request))
-    filtered_df = get_filtered_prepared_df(
-        run_data,
-        variant_id=variant_id,
-        pattern_index=pattern_index,
-        filter_params=filter_params,
-    )
     safe_limit = max(0, int(limit))
-    case_rows = create_activity_case_drilldown(
-        filtered_df,
-        activity=activity,
-        limit=safe_limit,
-    )
+    if has_parquet_backing(run_data):
+        case_rows = query_activity_case_drilldown(
+            run_data["prepared_parquet_path"],
+            activity=activity,
+            limit=safe_limit,
+            filter_params=filter_params,
+            filter_column_settings=run_data.get("column_settings"),
+            variant_pattern=get_run_variant_pattern(
+                run_data,
+                variant_id=variant_id,
+                pattern_index=pattern_index,
+                filter_params=filter_params,
+            ),
+        )
+    else:
+        filtered_df = get_filtered_prepared_df(
+            run_data,
+            variant_id=variant_id,
+            pattern_index=pattern_index,
+            filter_params=filter_params,
+        )
+        case_rows = create_activity_case_drilldown(
+            filtered_df,
+            activity=activity,
+            limit=safe_limit,
+        )
 
     return JSONResponse(
         content={
@@ -2950,11 +4524,17 @@ def case_trace_api(run_id: str, case_id: str):
                 "found": False,
                 "summary": None,
                 "events": [],
-                "error": "Case ID is required.",
+                "error": "ケースIDが必要です。",
             },
         )
 
-    case_trace = create_case_trace_details(run_data["prepared_df"], normalized_case_id)
+    if has_parquet_backing(run_data):
+        case_trace = query_case_trace_details(
+            run_data["prepared_parquet_path"],
+            normalized_case_id,
+        )
+    else:
+        case_trace = create_case_trace_details(run_data["prepared_df"], normalized_case_id)
     return JSONResponse(
         content={
             "run_id": run_id,
@@ -2980,7 +4560,7 @@ async def csv_headers(request: Request):
         return JSONResponse(
             status_code=400,
             content={
-                "error": "CSV headers could not be read. Please check the file encoding and header row.",
+                "error": "CSVヘッダーを読み取れませんでした。ファイルの文字コードとヘッダー行を確認してください。",
                 "detail": str(exc),
             },
         )
@@ -3015,7 +4595,7 @@ async def log_diagnostics(request: Request):
         return JSONResponse(
             status_code=400,
             content={
-                "error": "Log diagnostics could not be read. Please check the file encoding and header row.",
+                "error": "ログ診断を読み取れませんでした。ファイルの文字コードとヘッダー行を確認してください。",
                 "detail": str(exc),
             },
         )
@@ -3030,6 +4610,58 @@ async def log_diagnostics(request: Request):
             filter_column_settings=filter_column_settings,
             include_diagnostics=True,
         )
+    )
+
+
+@app.post("/api/log-diagnostics-excel")
+async def log_diagnostics_excel(request: Request):
+    form = await request.form()
+    raw_case_id_column = form.get("case_id_column")
+    raw_activity_column = form.get("activity_column")
+    raw_timestamp_column = form.get("timestamp_column")
+    filter_column_settings = get_form_filter_column_settings(form)
+    sample_row_limit = resolve_log_diagnostic_sample_row_limit(form.get("sample_row_limit"))
+    file_source, source_file_name = resolve_profile_file_source(form)
+
+    try:
+        raw_df = read_raw_log_dataframe(file_source)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "ログ診断を読み取れませんでした。ファイルの文字コードとヘッダー行を確認してください。",
+                "detail": str(exc),
+            },
+        )
+
+    profile_payload = build_log_profile_payload(
+        raw_df=raw_df,
+        source_file_name=source_file_name,
+        case_id_column=str(raw_case_id_column or "").strip(),
+        activity_column=str(raw_activity_column or "").strip(),
+        timestamp_column=str(raw_timestamp_column or "").strip(),
+        filter_column_settings=filter_column_settings,
+        include_diagnostics=True,
+    )
+    excel_bytes = build_log_diagnostic_workbook_bytes(
+        profile_payload=profile_payload,
+        raw_df=raw_df,
+        sample_row_limit=sample_row_limit,
+    )
+    output_file_name = build_analysis_excel_file_name(
+        source_file_name,
+        "log_diagnostics",
+        "ログ診断",
+    )
+
+    return Response(
+        content=excel_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(output_file_name)}",
+        },
     )
 
 
@@ -3068,6 +4700,23 @@ async def analyze(request: Request):
         source_file_name = SAMPLE_FILE.name
 
     try:
+        raw_df = read_raw_log_dataframe(file_source)
+        headers = [str(column_name) for column_name in raw_df.columns.tolist()]
+        case_id_column = resolve_required_column_name(
+            headers,
+            "case_id_column",
+            case_id_column,
+        )
+        activity_column = resolve_required_column_name(
+            headers,
+            "activity_column",
+            activity_column,
+        )
+        timestamp_column = resolve_required_column_name(
+            headers,
+            "timestamp_column",
+            timestamp_column,
+        )
         validate_selected_columns(
             case_id_column=case_id_column,
             activity_column=activity_column,
@@ -3104,13 +4753,23 @@ async def analyze(request: Request):
             },
             base_filter_params=base_filter_params,
         )
+        prepared_parquet_path = get_run_prepared_parquet_path(run_id)
+        try:
+            persist_prepared_parquet(prepared_df, prepared_parquet_path)
+        except Exception:
+            RUN_STORE.pop(run_id, None)
+            cleanup_run_storage(run_id)
+            raise
+        RUN_STORE[run_id]["prepared_parquet_path"] = str(prepared_parquet_path)
+        if int(RUN_STORE[run_id].get("prepared_row_count") or 0) >= PARQUET_ONLY_PREPARED_DF_THRESHOLD:
+            RUN_STORE[run_id]["prepared_df"] = None
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
     except Exception as exc:
         return JSONResponse(
             status_code=500,
             content={
-                "error": "Analysis failed unexpectedly.",
+                "error": "分析に失敗しました。",
                 "detail": str(exc),
             },
         )
@@ -3128,7 +4787,11 @@ async def analyze(request: Request):
 
 def build_bottleneck_prompt(data: dict) -> str:
     freq = data.get("frequency_top10", [])
-    slow = sorted(freq, key=lambda x: x.get("平均時間(分)", 0), reverse=True)[:3]
+    slow = sorted(
+        freq,
+        key=lambda x: x.get("平均処理時間(分)", x.get("平均時間(分)", 0)),
+        reverse=True,
+    )[:3]
     busy = sorted(freq, key=lambda x: x.get("イベント件数", 0), reverse=True)[:3]
     patterns = data.get("pattern_top10", [])[:3]
 
