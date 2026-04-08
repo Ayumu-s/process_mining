@@ -1766,7 +1766,7 @@ function buildGroupKpiCards(groupSummary, groupColumns) {
         return `
             <div class="group-kpi-card">
                 <div class="group-kpi-title">📊 ${escapeHtml(firstCol)} 別 平均処理時間(分)</div>
-                ${durRows}
+                <div class="group-kpi-card-body">${durRows}</div>
             </div>
         `;
     })() : "";
@@ -1775,11 +1775,11 @@ function buildGroupKpiCards(groupSummary, groupColumns) {
         <div class="group-kpi-panel">
             <div class="group-kpi-card">
                 <div class="group-kpi-title">📊 ${escapeHtml(firstCol)} 別 ケース数</div>
-                ${caseRows}
+                <div class="group-kpi-card-body">${caseRows}</div>
             </div>
             <div class="group-kpi-card">
                 <div class="group-kpi-title">📊 ${escapeHtml(firstCol)} 別 イベント数</div>
-                ${eventRows}
+                <div class="group-kpi-card-body">${eventRows}</div>
             </div>
             ${durationCard}
         </div>

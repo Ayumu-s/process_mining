@@ -450,7 +450,7 @@ code,
 }
 
 .page-shell {
-    width: min(1100px, 100%);
+    width: min(1440px, 100%);
     padding: clamp(24px, 3vw, 32px) clamp(20px, 4vw, 34px) 64px;
 }
 
@@ -4112,6 +4112,7 @@ tbody tr:hover td {
 
 .dashboard-summary-panel {
     display: grid;
+    grid-template-columns: 1fr;
     gap: 14px;
     margin-top: 16px;
     padding: 0;
@@ -4987,10 +4988,23 @@ tbody tr:hover td {
 
 /* ── グループKPIカード ── */
 .group-kpi-panel {
+    grid-column: 1 / -1;
+    width: 100%;
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    grid-template-columns: repeat(3, 1fr);
     gap: 14px;
     margin-top: 14px;
+}
+
+@media (max-width: 768px) {
+    .group-kpi-panel {
+        grid-template-columns: 1fr;
+    }
+}
+
+.group-kpi-card-body {
+    max-height: 400px;
+    overflow-y: auto;
 }
 
 .group-kpi-card {
@@ -5012,7 +5026,7 @@ tbody tr:hover td {
 
 .group-kpi-row {
     display: grid;
-    grid-template-columns: 100px 1fr 64px;
+    grid-template-columns: minmax(60px, 110px) 1fr 64px;
     align-items: center;
     gap: 10px;
     padding: 5px 0;
@@ -5028,9 +5042,9 @@ tbody tr:hover td {
 }
 
 .group-kpi-bar-track {
-    height: 8px;
+    height: 10px;
     border-radius: 4px;
-    background: var(--bg, #f1f5f9);
+    background: #dde3ec;
     overflow: hidden;
 }
 
