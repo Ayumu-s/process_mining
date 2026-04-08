@@ -1711,6 +1711,78 @@ function renderSummary(data, supplement = currentDashboardSupplement) {
                 </div>
             </article>
         </div>
+        ${data.group_mode && data.group_summary ? buildGroupKpiCards(data.group_summary, data.group_columns || []) : ""}
+    `;
+}
+
+function buildGroupKpiCards(groupSummary, groupColumns) {
+    if (!groupColumns.length || !groupSummary) return "";
+    const firstCol = groupColumns[0];
+    const colData = groupSummary[firstCol];
+    if (!colData) return "";
+
+    const entries = Object.entries(colData).sort((a, b) => b[1].case_count - a[1].case_count);
+    if (!entries.length) return "";
+
+    const maxCaseCount = Math.max(...entries.map(([, v]) => v.case_count || 0)) || 1;
+    const maxEventCount = Math.max(...entries.map(([, v]) => v.event_count || 0)) || 1;
+
+    const caseRows = entries.map(([label, vals]) => {
+        const pct = Math.round((vals.case_count / maxCaseCount) * 100);
+        return `
+            <div class="group-kpi-row">
+                <span class="group-kpi-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+                <div class="group-kpi-bar-track"><div class="group-kpi-bar-fill" style="width:${pct}%"></div></div>
+                <span class="group-kpi-value">${escapeHtml(formatNumber(vals.case_count))}</span>
+            </div>
+        `;
+    }).join("");
+
+    const eventRows = entries.map(([label, vals]) => {
+        const pct = Math.round((vals.event_count / maxEventCount) * 100);
+        return `
+            <div class="group-kpi-row">
+                <span class="group-kpi-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+                <div class="group-kpi-bar-track"><div class="group-kpi-bar-fill group-kpi-bar-fill--event" style="width:${pct}%"></div></div>
+                <span class="group-kpi-value">${escapeHtml(formatNumber(vals.event_count))}</span>
+            </div>
+        `;
+    }).join("");
+
+    const hasDuration = entries.some(([, v]) => v.avg_duration_min != null);
+    const durationCard = hasDuration ? (() => {
+        const maxDur = Math.max(...entries.map(([, v]) => v.avg_duration_min || 0)) || 1;
+        const durRows = entries.map(([label, vals]) => {
+            const dur = vals.avg_duration_min ?? 0;
+            const pct = Math.round((dur / maxDur) * 100);
+            return `
+                <div class="group-kpi-row">
+                    <span class="group-kpi-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+                    <div class="group-kpi-bar-track"><div class="group-kpi-bar-fill group-kpi-bar-fill--duration" style="width:${pct}%"></div></div>
+                    <span class="group-kpi-value">${escapeHtml(String(dur.toFixed ? dur.toFixed(1) : dur))}分</span>
+                </div>
+            `;
+        }).join("");
+        return `
+            <div class="group-kpi-card">
+                <div class="group-kpi-title">📊 ${escapeHtml(firstCol)} 別 平均処理時間(分)</div>
+                ${durRows}
+            </div>
+        `;
+    })() : "";
+
+    return `
+        <div class="group-kpi-panel">
+            <div class="group-kpi-card">
+                <div class="group-kpi-title">📊 ${escapeHtml(firstCol)} 別 ケース数</div>
+                ${caseRows}
+            </div>
+            <div class="group-kpi-card">
+                <div class="group-kpi-title">📊 ${escapeHtml(firstCol)} 別 イベント数</div>
+                ${eventRows}
+            </div>
+            ${durationCard}
+        </div>
     `;
 }
 
@@ -1728,6 +1800,12 @@ function setActiveAnalysisTab(activeKey) {
             String(panelElement.dataset.analysisPanel || "") === String(activeKey || ""),
         );
     });
+}
+
+function findFilterSlotByColumn(columnName) {
+    return filterColumnRefs.findIndex(
+        (ref) => String(ref.columnSelect?.value || "").trim() === String(columnName || "").trim(),
+    );
 }
 
 function buildGroupTabBar(rows, groupColumns, activeValue, onSelect) {
@@ -1845,59 +1923,52 @@ function renderAnalysisPanels(analyses, runId, groupColumns = []) {
         });
     });
 
-    // グループタブのイベントリスナー設定
+    // グループタブのイベントリスナー設定（サーバー再分析）
     if (isGroupMode) {
         resultPanels.querySelectorAll(".group-tab-bar").forEach((tabBar) => {
-            const panel = tabBar.closest("[data-analysis-panel]");
-            if (!panel) return;
-            const analysisKey = panel.dataset.analysisKey;
-            const analysis = analyses[analysisKey];
-            if (!analysis) return;
-            const allRows = analysis.rows || [];
             const groupCol = tabBar.dataset.groupCol;
 
             tabBar.querySelectorAll(".group-tab").forEach((tabBtn) => {
                 tabBtn.addEventListener("click", () => {
                     const selectedValue = tabBtn.dataset.groupValue;
+                    const slotIndex = findFilterSlotByColumn(groupCol);
 
-                    // タブのアクティブ状態更新
-                    tabBar.querySelectorAll(".group-tab").forEach((b) => b.classList.remove("active"));
-                    tabBtn.classList.add("active");
-
-                    // テーブル再描画
-                    const contentArea = panel.querySelector(".group-content-area");
-                    if (!contentArea) return;
-
-                    let filteredRows = allRows;
-                    let drillPath = [];
-
-                    if (selectedValue && groupCol) {
-                        filteredRows = allRows.filter((r) => String(r[groupCol] ?? "") === selectedValue);
-                        drillPath = [{ col: groupCol, value: selectedValue }];
-                        // グループ②以降がある場合は次のグループ列でネストされたタブを表示
-                        const remainingGroupCols = groupColumns.slice(1);
-                        const subTabBarHtml = remainingGroupCols.length
-                            ? buildGroupTabBar(filteredRows, remainingGroupCols, "", null)
-                            : "";
-                        const previewRows = buildDashboardPreviewRows(analysisKey, filteredRows);
-                        const tableHtml = buildGroupedTable(previewRows, groupColumns, { analysisKey, runId });
-                        const breadcrumbHtml = buildBreadcrumbNav(drillPath);
-                        contentArea.innerHTML = `${buildGroupTabBar(allRows, groupColumns, selectedValue, null)}${breadcrumbHtml}${subTabBarHtml}${tableHtml}`;
+                    if (selectedValue) {
+                        // グループ値を選択 → そのスロットをフィルタリングモードに切り替えて再分析
+                        if (slotIndex >= 0) {
+                            // 下位スロットのフィルター値をクリア（次の階層はグループモードのまま）
+                            for (let i = slotIndex + 1; i < filterColumnRefs.length; i++) {
+                                if (filterColumnRefs[i].valueSelect) {
+                                    filterColumnRefs[i].valueSelect.value = "";
+                                }
+                            }
+                            filterColumnRefs[slotIndex].valueSelect.value = selectedValue;
+                        }
                     } else {
-                        const previewRows = buildDashboardPreviewRows(analysisKey, filteredRows);
-                        const tableHtml = buildGroupedTable(previewRows, groupColumns, { analysisKey, runId });
-                        contentArea.innerHTML = `${buildGroupTabBar(allRows, groupColumns, "", null)}${tableHtml}`;
+                        // 「全体」タブ → 全スロットのフィルター値をクリアして再分析
+                        filterColumnRefs.forEach((ref) => {
+                            if (ref.valueSelect) ref.valueSelect.value = "";
+                        });
                     }
 
-                    // 再描画後のイベント再設定（パンくずのみ）
-                    contentArea.querySelectorAll(".breadcrumb-item--link").forEach((crumb) => {
-                        crumb.addEventListener("click", () => {
-                            const previewRows = buildDashboardPreviewRows(analysisKey, allRows);
-                            const tableHtml = buildGroupedTable(previewRows, groupColumns, { analysisKey, runId });
-                            contentArea.innerHTML = `${buildGroupTabBar(allRows, groupColumns, "", null)}${tableHtml}`;
-                        });
-                    });
+                    form.requestSubmit();
                 });
+            });
+        });
+
+        // パンくずの「戻る」クリック → 上位階層に戻って再分析
+        resultPanels.querySelectorAll(".breadcrumb-item--link").forEach((crumb) => {
+            crumb.addEventListener("click", () => {
+                const drillIndex = Number.parseInt(crumb.dataset.drillIndex ?? "-1", 10);
+                // drillIndex=-1 → 全体（全スロットクリア）
+                // drillIndex=n → n+1階層より下をクリア
+                const clearFrom = drillIndex + 1;
+                for (let i = clearFrom; i < filterColumnRefs.length; i++) {
+                    if (filterColumnRefs[i].valueSelect) {
+                        filterColumnRefs[i].valueSelect.value = "";
+                    }
+                }
+                form.requestSubmit();
             });
         });
     }

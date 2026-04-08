@@ -132,6 +132,7 @@ def analyze_prepared_event_log(
 
         excel_file = None
         if export_excel:
+            _group_summary = build_group_summary(prepared_df, group_columns) if group_columns else None
             excel_file = export_analysis_to_excel(
                 df=result_df,
                 output_root_dir=output_root_dir,
@@ -140,6 +141,7 @@ def analyze_prepared_event_log(
                 sheet_name=analysis_config["sheet_name"],
                 display_columns=analysis_config["display_columns"],
                 group_columns=group_columns,
+                group_summary=_group_summary,
             )
 
         analysis_results[analysis_key] = {
@@ -400,6 +402,55 @@ def detect_group_columns(filter_params, filter_column_settings):
         if col and not val:  # 列あり・値なし → グループ軸
             group_columns.append(col)
     return group_columns
+
+
+def build_group_summary(prepared_df, group_columns):
+    """
+    グループ列ごとの集計サマリーを生成する。
+    フロントエンドのKPIカード・タブ切り替えで使用。
+
+    返却値:
+    {
+        "column_name": {
+            "value_1": { "case_count": int, "event_count": int, "avg_duration_min": float },
+            ...
+        }
+    }
+    """
+    summary = {}
+    for col in (group_columns or []):
+        if col not in prepared_df.columns:
+            continue
+        grouped = (
+            prepared_df.groupby(col)
+            .agg(
+                case_count=("case_id", "nunique"),
+                event_count=("activity", "count"),
+            )
+            .reset_index()
+        )
+        if "duration_min" in prepared_df.columns:
+            dur = (
+                prepared_df.groupby(col)["duration_min"]
+                .mean()
+                .reset_index()
+                .rename(columns={"duration_min": "avg_duration_min"})
+            )
+            grouped = grouped.merge(dur, on=col, how="left")
+            grouped["avg_duration_min"] = grouped["avg_duration_min"].round(2)
+
+        summary[col] = {}
+        for _, row in grouped.iterrows():
+            entry = {
+                "case_count": int(row["case_count"]),
+                "event_count": int(row["event_count"]),
+            }
+            if "avg_duration_min" in grouped.columns:
+                avg = row["avg_duration_min"]
+                entry["avg_duration_min"] = float(avg) if avg == avg else None
+            summary[col][str(row[col])] = entry
+
+    return summary
 
 
 def filter_prepared_df(prepared_df, filter_params=None, filter_column_settings=None):

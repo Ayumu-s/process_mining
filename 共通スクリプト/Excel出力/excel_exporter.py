@@ -73,15 +73,90 @@ def format_analysis_result(df, display_columns=None, group_columns=None):
     return formatted_df.rename(columns=rename_map)
 
 
+GROUP_SECTION_FILL = PatternFill(fill_type="solid", fgColor="D6E4F0")
+GROUP_SECTION_FONT = Font(bold=True, color="1F2937", size=11)
+
+
+def insert_group_section_rows(worksheet, df, group_columns):
+    """
+    グループ値が変わる箇所にセクション区切り行（背景色付き）を挿入する。
+    group_columns[0] の値が切り替わる行の上に区切り行を入れる。
+    """
+    if not group_columns:
+        return
+
+    first_group_col = group_columns[0]
+    if first_group_col not in df.columns:
+        return
+
+    # グループ値が変わる行インデックスを収集（データフレームの行番号、0始まり）
+    values = df[first_group_col].astype(str).tolist()
+    # header行(row=1)の分を+2してExcel行番号に変換
+    change_indices = []  # (df_index, group_value) — グループが変わる最初の行
+    prev = None
+    for i, val in enumerate(values):
+        if prev is not None and val != prev:
+            change_indices.append((i, val))  # i は 0始まり
+        prev = val
+
+    # 下から挿入（行番号がずれないように逆順処理）
+    for df_idx, group_value in reversed(change_indices):
+        # Excel行番号 = df_idx + 2 (header=1行目なので+2)
+        excel_row = df_idx + 2
+        worksheet.insert_rows(excel_row)
+        section_cell = worksheet.cell(row=excel_row, column=1)
+        section_cell.value = f"▸ {group_value}"
+        section_cell.font = GROUP_SECTION_FONT
+        section_cell.fill = GROUP_SECTION_FILL
+        if worksheet.max_column > 1:
+            worksheet.merge_cells(
+                start_row=excel_row,
+                start_column=1,
+                end_row=excel_row,
+                end_column=worksheet.max_column,
+            )
+
+
+def _build_summary_sheet_df(group_summary, group_columns):
+    """サマリーシート用DataFrameを構築する。"""
+    rows = []
+    for level, col in enumerate(group_columns, start=1):
+        col_data = group_summary.get(col, {})
+        for value, stats in col_data.items():
+            row = {
+                "グルーピング軸": f"{col}（グループ{'①②③'[level - 1] if level <= 3 else str(level)}）",
+                "値": value,
+                "ケース数": stats.get("case_count", ""),
+                "イベント数": stats.get("event_count", ""),
+                "平均処理時間(分)": stats.get("avg_duration_min") if stats.get("avg_duration_min") is not None else "—",
+            }
+            rows.append(row)
+    return pd.DataFrame(rows) if rows else pd.DataFrame(
+        columns=["グルーピング軸", "値", "ケース数", "イベント数", "平均処理時間(分)"]
+    )
+
+
 def build_excel_bytes(
     df,
     sheet_name,
+    group_columns=None,
+    group_summary=None,
 ):
     buffer = BytesIO()
 
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        # サマリーシート（グルーピングモード時のみ）
+        if group_columns and group_summary:
+            summary_df = _build_summary_sheet_df(group_summary, group_columns)
+            summary_df.to_excel(writer, sheet_name="サマリー", index=False)
+            _style_export_worksheet(writer.sheets["サマリー"])
+
+        # メインデータシート
         df.to_excel(writer, sheet_name=sheet_name, index=False)
-        _style_export_worksheet(writer.sheets[sheet_name])
+        ws = writer.sheets[sheet_name]
+        if group_columns:
+            insert_group_section_rows(ws, df, group_columns)
+        _style_export_worksheet(ws)
 
     return buffer.getvalue()
 
@@ -90,12 +165,16 @@ def export_dataframe_to_excel(
     df,
     output_file,
     sheet_name,
+    group_columns=None,
+    group_summary=None,
 ):
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        output_path.write_bytes(build_excel_bytes(df, sheet_name))
+        output_path.write_bytes(
+            build_excel_bytes(df, sheet_name, group_columns=group_columns, group_summary=group_summary)
+        )
     except PermissionError as exc:
         raise PermissionError(
             f"{output_path} に書き込めません。Excel で開いている場合は閉じてから再実行してください。"
@@ -112,10 +191,17 @@ def export_analysis_to_excel(
     sheet_name,
     display_columns=None,
     group_columns=None,
+    group_summary=None,
 ):
     output_file = Path(output_root_dir) / analysis_name / output_file_name
     excel_df = format_analysis_result(df, display_columns, group_columns=group_columns)
-    return export_dataframe_to_excel(excel_df, output_file, sheet_name)
+    return export_dataframe_to_excel(
+        excel_df,
+        output_file,
+        sheet_name,
+        group_columns=group_columns,
+        group_summary=group_summary,
+    )
 
 
 def convert_analysis_result_to_records(

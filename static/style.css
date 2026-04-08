@@ -4985,6 +4985,78 @@ tbody tr:hover td {
     }
 }
 
+/* ── グループKPIカード ── */
+.group-kpi-panel {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 14px;
+    margin-top: 14px;
+}
+
+.group-kpi-card {
+    padding: 18px;
+    border: 1px solid var(--line, #e2e8f0);
+    border-radius: var(--radius-lg, 0.75rem);
+    background: var(--panel, #fff);
+    box-shadow: var(--shadow-sm, 0 1px 3px rgba(0,0,0,.06));
+}
+
+.group-kpi-title {
+    color: var(--muted-strong, #475569);
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+}
+
+.group-kpi-row {
+    display: grid;
+    grid-template-columns: 100px 1fr 64px;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 0;
+}
+
+.group-kpi-label {
+    color: var(--text, #1e293b);
+    font-size: 0.84rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.group-kpi-bar-track {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--bg, #f1f5f9);
+    overflow: hidden;
+}
+
+.group-kpi-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    background: var(--accent, #6366f1);
+    transition: width 0.35s ease;
+}
+
+.group-kpi-bar-fill--event {
+    background: var(--color-emerald, #10b981);
+}
+
+.group-kpi-bar-fill--duration {
+    background: var(--color-amber, #f59e0b);
+}
+
+.group-kpi-value {
+    color: var(--accent-deep, #4f46e5);
+    font-size: 0.84rem;
+    font-weight: 700;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
 /* ── グルーピングモード ── */
 .data-table--grouped .group-cell {
     background-color: var(--color-surface-alt, #f8fafc);

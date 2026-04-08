@@ -4,6 +4,7 @@ import unittest
 import pandas as pd
 
 from 共通スクリプト.analysis_service import (
+    build_group_summary,
     create_activity_case_drilldown,
     create_bottleneck_summary,
     create_case_trace_details,
@@ -16,6 +17,7 @@ from 共通スクリプト.analysis_service import (
     create_transition_case_drilldown,
     create_variant_flow_snapshot,
     create_variant_summary,
+    detect_group_columns,
     filter_prepared_df,
     get_filter_options,
     normalize_filter_column_settings,
@@ -539,6 +541,125 @@ class ProcessMiningTestCase(unittest.TestCase):
         self.assertEqual("group_b", normalized["filter_value_2"]["column_name"])
         self.assertEqual("分類2", normalized["filter_value_2"]["label"])
         self.assertIsNone(normalized["filter_value_3"]["column_name"])
+
+
+class GroupingTestCase(unittest.TestCase):
+    """グルーピングモード機能のテスト"""
+
+    @classmethod
+    def setUpClass(cls):
+        # グルーピングテスト用の合成データを直接作成する
+        cls.prepared_df = pd.DataFrame({
+            "case_id": ["C1", "C1", "C1", "C2", "C2", "C3", "C3", "C4", "C4"],
+            "activity": ["受付", "確認", "完了", "受付", "確認", "受付", "完了", "受付", "確認"],
+            "sequence_no": [1, 2, 3, 1, 2, 1, 2, 1, 2],
+            "start_time": pd.to_datetime([
+                "2024-01-01 09:00", "2024-01-01 09:10", "2024-01-01 09:30",
+                "2024-01-02 09:00", "2024-01-02 09:15",
+                "2024-01-03 09:00", "2024-01-03 09:20",
+                "2024-01-04 09:00", "2024-01-04 09:05",
+            ]),
+            "next_time": pd.to_datetime([
+                "2024-01-01 09:10", "2024-01-01 09:30", "2024-01-01 09:30",
+                "2024-01-02 09:15", "2024-01-02 09:15",
+                "2024-01-03 09:20", "2024-01-03 09:20",
+                "2024-01-04 09:05", "2024-01-04 09:05",
+            ]),
+            "timestamp": pd.to_datetime([
+                "2024-01-01 09:00", "2024-01-01 09:10", "2024-01-01 09:30",
+                "2024-01-02 09:00", "2024-01-02 09:15",
+                "2024-01-03 09:00", "2024-01-03 09:20",
+                "2024-01-04 09:00", "2024-01-04 09:05",
+            ]),
+            "duration_min": [10.0, 20.0, 0.0, 15.0, 0.0, 20.0, 0.0, 5.0, 0.0],
+            "duration_sec": [600, 1200, 0, 900, 0, 1200, 0, 300, 0],
+            "group_a": ["Sales", "Sales", "Sales", "Sales", "Sales", "Mfg", "Mfg", "Mfg", "Mfg"],
+            "group_b": ["Tokyo", "Tokyo", "Tokyo", "Osaka", "Osaka", "Tokyo", "Tokyo", "Osaka", "Osaka"],
+        })
+
+    # ── detect_group_columns ────────────────────────────────────────────────
+
+    def test_detect_group_columns_returns_col_without_value(self):
+        result = detect_group_columns(
+            {"filter_value_1": None, "filter_value_2": None},
+            {"filter_column_1": "group_a", "filter_column_2": "group_b"},
+        )
+        self.assertEqual(["group_a", "group_b"], result)
+
+    def test_detect_group_columns_excludes_col_with_value(self):
+        result = detect_group_columns(
+            {"filter_value_1": "Sales", "filter_value_2": None},
+            {"filter_column_1": "group_a", "filter_column_2": "group_b"},
+        )
+        self.assertEqual(["group_b"], result)
+
+    def test_detect_group_columns_returns_empty_when_no_col_set(self):
+        result = detect_group_columns({}, {})
+        self.assertEqual([], result)
+
+    # ── create_frequency_analysis (group_columns) ──────────────────────────
+
+    def test_frequency_analysis_group_columns_adds_group_col(self):
+        result = create_frequency_analysis(self.prepared_df, group_columns=["group_a"])
+        self.assertIn("group_a", result.columns)
+        self.assertIn("activity", result.columns)
+        # グループ列の値が2種類あること
+        self.assertEqual({"Sales", "Mfg"}, set(result["group_a"].tolist()))
+
+    def test_frequency_analysis_no_group_unchanged(self):
+        result = create_frequency_analysis(self.prepared_df)
+        self.assertNotIn("group_a", result.columns)
+
+    # ── create_transition_analysis (group_columns) ─────────────────────────
+
+    def test_transition_analysis_group_columns_adds_group_col(self):
+        result = create_transition_analysis(self.prepared_df, group_columns=["group_a"])
+        self.assertIn("group_a", result.columns)
+        self.assertIn("from_activity", result.columns)
+        self.assertIn("to_activity", result.columns)
+
+    def test_transition_analysis_no_group_unchanged(self):
+        result = create_transition_analysis(self.prepared_df)
+        self.assertNotIn("group_a", result.columns)
+
+    # ── create_pattern_analysis (group_columns) ────────────────────────────
+
+    def test_pattern_analysis_group_columns_adds_group_col(self):
+        result = create_pattern_analysis(self.prepared_df, group_columns=["group_a"])
+        self.assertIn("group_a", result.columns)
+        self.assertIn("pattern", result.columns)
+
+    def test_pattern_analysis_no_group_unchanged(self):
+        result = create_pattern_analysis(self.prepared_df)
+        self.assertNotIn("group_a", result.columns)
+
+    # ── build_group_summary ────────────────────────────────────────────────
+
+    def test_build_group_summary_single_column(self):
+        summary = build_group_summary(self.prepared_df, ["group_a"])
+        self.assertIn("group_a", summary)
+        col_data = summary["group_a"]
+        self.assertIn("Sales", col_data)
+        self.assertIn("Mfg", col_data)
+        for entry in col_data.values():
+            self.assertIn("case_count", entry)
+            self.assertIn("event_count", entry)
+            self.assertGreater(entry["case_count"], 0)
+            self.assertGreater(entry["event_count"], 0)
+
+    def test_build_group_summary_multiple_columns(self):
+        summary = build_group_summary(self.prepared_df, ["group_a", "group_b"])
+        self.assertIn("group_a", summary)
+        self.assertIn("group_b", summary)
+        self.assertIn("Tokyo", summary["group_b"])
+
+    def test_build_group_summary_empty_group_columns(self):
+        summary = build_group_summary(self.prepared_df, [])
+        self.assertEqual({}, summary)
+
+    def test_build_group_summary_missing_column_skipped(self):
+        summary = build_group_summary(self.prepared_df, ["nonexistent_col"])
+        self.assertEqual({}, summary)
 
 
 if __name__ == "__main__":

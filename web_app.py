@@ -31,6 +31,7 @@ from 共通スクリプト.analysis_service import (
     FLOW_PATTERN_COLUMN,
     create_activity_case_drilldown,
     analyze_prepared_event_log,
+    build_group_summary,
     detect_group_columns,
     create_analysis_records,
     create_bottleneck_summary,
@@ -3701,6 +3702,7 @@ def build_preview_response(run_id, source_file_name, selected_analysis_keys, res
         "event_count": result["event_count"],
         "group_columns": result.get("group_columns", []),
         "group_mode": result.get("group_mode", False),
+        "group_summary": result.get("group_summary", {}),
         "applied_filters": run_data.get("base_filter_params"),
         "column_settings": build_column_settings_payload(run_data.get("column_settings")),
         "filter_options": get_filter_options_payload(run_data),
@@ -4745,6 +4747,10 @@ async def analyze(request: Request):
             export_excel=False,
             group_columns=group_columns if group_columns else None,
         )
+        if group_columns:
+            result["group_summary"] = build_group_summary(filtered_prepared_df, group_columns)
+        else:
+            result["group_summary"] = {}
         run_id = save_run_data(
             source_file_name=source_file_name,
             selected_analysis_keys=selected_analysis_keys,
