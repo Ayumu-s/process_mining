@@ -526,6 +526,87 @@ function buildTable(rows, options = {}) {
     `;
 }
 
+function buildGroupedTable(rows, groupColumns = [], options = {}) {
+    if (!rows.length) {
+        return '<p class="empty-state">表示できるデータがありません。</p>';
+    }
+
+    const headers = Object.keys(rows[0]).filter((h) => !h.startsWith("__"));
+    const validGroupCols = groupColumns.filter((col) => headers.includes(col));
+
+    if (!validGroupCols.length) {
+        return buildTable(rows, options);
+    }
+
+    const { analysisKey = "", runId = "" } = options;
+    const nonGroupHeaders = headers.filter((h) => !validGroupCols.includes(h));
+    const allHeaders = [...validGroupCols, ...nonGroupHeaders];
+    const headHtml = allHeaders.map((header) => `<th>${escapeHtml(header)}</th>`).join("");
+
+    // rowspan計算: 各行・各グループ列について「同じ上位グループ値が続く連続数」を求める
+    function calcRowspan(rowIndex, colIndex) {
+        const row = rows[rowIndex];
+        let span = 1;
+        while (rowIndex + span < rows.length) {
+            const same = validGroupCols
+                .slice(0, colIndex + 1)
+                .every((col) => String(rows[rowIndex + span][col] ?? "") === String(row[col] ?? ""));
+            if (!same) break;
+            span++;
+        }
+        return span;
+    }
+
+    function isMergedCell(rowIndex, colIndex) {
+        if (rowIndex === 0) return false;
+        return validGroupCols
+            .slice(0, colIndex + 1)
+            .every((col) => String(rows[rowIndex - 1][col] ?? "") === String(rows[rowIndex][col] ?? ""));
+    }
+
+    const bodyHtml = rows.map((row, rowIndex) => {
+        const groupCellsHtml = validGroupCols.map((groupCol, colIndex) => {
+            if (isMergedCell(rowIndex, colIndex)) return "";
+            const span = calcRowspan(rowIndex, colIndex);
+            const cellStr = escapeHtml(String(row[groupCol] ?? ""));
+            const rowspanAttr = span > 1 ? ` rowspan="${span}"` : "";
+            return `<td class="group-cell"${rowspanAttr}>${cellStr}</td>`;
+        }).join("");
+
+        const dataCellsHtml = nonGroupHeaders.map((header) => {
+            const cellValue = row[header];
+            const cellStr = escapeHtml(String(cellValue ?? ""));
+            const numericClass = isNumericCellValue(cellValue) ? " num" : "";
+            const isWideHeader = header.includes("パターン") || header.includes("アクティビティ");
+            const isPatternLink = (
+                analysisKey === "pattern"
+                && header.includes("パターン")
+                && runId
+                && Number.isInteger(row.__rowIndex)
+            );
+
+            if (isPatternLink) {
+                return `<td class="table-cell--wide${numericClass}"><div class="cell-scroll-wrapper"><a href="${buildPatternDetailHref(runId, row.__rowIndex)}" class="table-link">${cellStr}</a></div></td>`;
+            }
+            if (isWideHeader) {
+                return `<td class="table-cell--wide${numericClass}"><div class="cell-scroll-wrapper">${cellStr}</div></td>`;
+            }
+            return `<td class="${numericClass.trim()}">${cellStr}</td>`;
+        }).join("");
+
+        return `<tr>${groupCellsHtml}${dataCellsHtml}</tr>`;
+    }).join("");
+
+    return `
+        <div class="table-wrap">
+            <table class="data-table data-table--grouped">
+                <thead><tr>${headHtml}</tr></thead>
+                <tbody>${bodyHtml}</tbody>
+            </table>
+        </div>
+    `;
+}
+
 function splitPatternSteps(patternText) {
     return String(patternText || "")
         .split(/\s*(?:→|->|⇒)\s*/u)
@@ -957,7 +1038,8 @@ function renderFilterValueSelectors(profilePayload) {
             filterRef.valueLabel.textContent = "値";
         }
 
-        replaceSelectOptions(filterRef.valueSelect, options, selectedValue, "全て");
+        const valuePlaceholder = definition.column_name ? "全て（グループ集計）" : "全て";
+        replaceSelectOptions(filterRef.valueSelect, options, selectedValue, valuePlaceholder);
         filterRef.valueSelect.disabled = !definition.column_name;
     });
 
@@ -1413,6 +1495,7 @@ function buildAppliedFilterSummary(appliedFilters = {}, columnSettings = {}) {
 function buildFilterChipItems(appliedFilters = {}, columnSettings = {}) {
     const filterDefinitions = Array.isArray(columnSettings?.filters) ? columnSettings.filters : [];
     const labelMap = new Map(filterDefinitions.map((definition) => [definition.slot, definition.label]));
+    const columnNameMap = new Map(filterDefinitions.map((definition) => [definition.slot, definition.column_name]));
     const chips = [];
 
     if (appliedFilters?.date_from || appliedFilters?.date_to) {
@@ -1429,10 +1512,16 @@ function buildFilterChipItems(appliedFilters = {}, columnSettings = {}) {
     }
 
     FILTER_SLOT_KEYS.forEach((slot, index) => {
+        const colName = columnNameMap.get(slot);
         if (appliedFilters?.[slot]) {
             chips.push({
                 icon: ["🏢", "👤", "🏷"][index] || "•",
                 text: `${labelMap.get(slot) || DEFAULT_FILTER_LABELS[slot]}: ${appliedFilters[slot]}`,
+            });
+        } else if (colName) {
+            chips.push({
+                icon: "📊",
+                text: `${labelMap.get(slot) || DEFAULT_FILTER_LABELS[slot]} グループ集計`,
             });
         }
     });
@@ -1641,7 +1730,36 @@ function setActiveAnalysisTab(activeKey) {
     });
 }
 
-function renderAnalysisPanels(analyses, runId) {
+function buildGroupTabBar(rows, groupColumns, activeValue, onSelect) {
+    if (!groupColumns.length || !rows.length) return "";
+    const firstGroupCol = groupColumns[0];
+    const uniqueValues = [...new Set(rows.map((r) => String(r[firstGroupCol] ?? "")).filter(Boolean))].sort();
+    if (!uniqueValues.length) return "";
+
+    const tabsHtml = [
+        `<button type="button" class="tab group-tab ${!activeValue ? "active" : ""}" data-group-value="">全体</button>`,
+        ...uniqueValues.map((val) =>
+            `<button type="button" class="tab group-tab ${activeValue === val ? "active" : ""}" data-group-value="${escapeHtml(val)}">${escapeHtml(val)}</button>`
+        ),
+    ].join("");
+
+    return `<div class="tab-bar group-tab-bar" data-group-col="${escapeHtml(firstGroupCol)}">${tabsHtml}</div>`;
+}
+
+function buildBreadcrumbNav(drillPath) {
+    if (!drillPath.length) return "";
+    const crumbs = [
+        `<span class="breadcrumb-item breadcrumb-item--link" data-drill-index="-1">全体</span>`,
+        ...drillPath.map((entry, index) =>
+            index < drillPath.length - 1
+                ? `<span class="breadcrumb-sep">›</span><span class="breadcrumb-item breadcrumb-item--link" data-drill-index="${index}">${escapeHtml(entry.value)}</span>`
+                : `<span class="breadcrumb-sep">›</span><span class="breadcrumb-item">${escapeHtml(entry.value)}</span>`
+        ),
+    ].join("");
+    return `<nav class="breadcrumb-nav">${crumbs}</nav>`;
+}
+
+function renderAnalysisPanels(analyses, runId, groupColumns = []) {
     const analysisEntries = Object.entries(analyses || {});
     if (!analysisEntries.length) {
         resultPanels.className = "result-stack hidden";
@@ -1650,6 +1768,8 @@ function renderAnalysisPanels(analyses, runId) {
     }
 
     const firstAnalysisKey = analysisEntries[0][0];
+    const isGroupMode = groupColumns.length > 0;
+
     resultPanels.className = "analysis-section dashboard-analysis-shell";
     resultPanels.innerHTML = `
         <div class="tab-bar dashboard-tab-bar">
@@ -1665,22 +1785,50 @@ function renderAnalysisPanels(analyses, runId) {
         </div>
         <div class="tab-content dashboard-tab-content">
             ${analysisEntries.map(([analysisKey, analysis], index) => {
-                const previewRows = buildDashboardPreviewRows(analysisKey, analysis.rows || []);
+                const allRows = analysis.rows || [];
+
+                const renderPanelContent = (filteredRows, drillPath = []) => {
+                    const previewRows = buildDashboardPreviewRows(analysisKey, filteredRows);
+                    const activeGroupValue = drillPath.length ? drillPath[drillPath.length - 1].value : "";
+                    const groupTabBarHtml = isGroupMode
+                        ? buildGroupTabBar(allRows, groupColumns, activeGroupValue, null)
+                        : "";
+                    const breadcrumbHtml = drillPath.length ? buildBreadcrumbNav(drillPath) : "";
+                    const tableHtml = isGroupMode
+                        ? buildGroupedTable(previewRows, groupColumns, { analysisKey, runId })
+                        : buildTable(previewRows, { analysisKey, runId });
+
+                    return `
+                        ${breadcrumbHtml}
+                        ${groupTabBarHtml}
+                        ${tableHtml}
+                    `;
+                };
+
+                const initialPreview = buildDashboardPreviewRows(analysisKey, allRows);
+                const initialGroupTabBar = isGroupMode ? buildGroupTabBar(allRows, groupColumns, "", null) : "";
+                const initialTable = isGroupMode
+                    ? buildGroupedTable(initialPreview, groupColumns, { analysisKey, runId })
+                    : buildTable(initialPreview, { analysisKey, runId });
 
                 return `
                     <section
                         class="tab-panel dashboard-tab-panel ${index === 0 ? "active" : ""}"
                         data-analysis-panel="${escapeHtml(analysisKey)}"
+                        data-analysis-key="${escapeHtml(analysisKey)}"
                     >
                         <div class="dashboard-preview-shell">
                             <div class="dashboard-preview-head">
                                 <div>
                                     <h2>${escapeHtml(analysis.analysis_name || analysisKey)}</h2>
-                                    <p class="dashboard-preview-meta">${escapeHtml(buildPreviewMessage(analysis, previewRows))}</p>
+                                    <p class="dashboard-preview-meta">${escapeHtml(buildPreviewMessage(analysis, initialPreview))}</p>
                                 </div>
                                 <a href="${buildAnalysisDetailHref(analysisKey, runId || "")}" class="detail-link">詳細ページ</a>
                             </div>
-                            ${buildTable(previewRows, { analysisKey, runId })}
+                            <div class="group-content-area">
+                                ${initialGroupTabBar}
+                                ${initialTable}
+                            </div>
                             <div class="dashboard-preview-foot">
                                 <a href="${buildAnalysisDetailHref(analysisKey, runId || "")}" class="detail-link">詳細ページで続きを見る</a>
                             </div>
@@ -1696,6 +1844,63 @@ function renderAnalysisPanels(analyses, runId) {
             setActiveAnalysisTab(buttonElement.dataset.analysisTab || firstAnalysisKey);
         });
     });
+
+    // グループタブのイベントリスナー設定
+    if (isGroupMode) {
+        resultPanels.querySelectorAll(".group-tab-bar").forEach((tabBar) => {
+            const panel = tabBar.closest("[data-analysis-panel]");
+            if (!panel) return;
+            const analysisKey = panel.dataset.analysisKey;
+            const analysis = analyses[analysisKey];
+            if (!analysis) return;
+            const allRows = analysis.rows || [];
+            const groupCol = tabBar.dataset.groupCol;
+
+            tabBar.querySelectorAll(".group-tab").forEach((tabBtn) => {
+                tabBtn.addEventListener("click", () => {
+                    const selectedValue = tabBtn.dataset.groupValue;
+
+                    // タブのアクティブ状態更新
+                    tabBar.querySelectorAll(".group-tab").forEach((b) => b.classList.remove("active"));
+                    tabBtn.classList.add("active");
+
+                    // テーブル再描画
+                    const contentArea = panel.querySelector(".group-content-area");
+                    if (!contentArea) return;
+
+                    let filteredRows = allRows;
+                    let drillPath = [];
+
+                    if (selectedValue && groupCol) {
+                        filteredRows = allRows.filter((r) => String(r[groupCol] ?? "") === selectedValue);
+                        drillPath = [{ col: groupCol, value: selectedValue }];
+                        // グループ②以降がある場合は次のグループ列でネストされたタブを表示
+                        const remainingGroupCols = groupColumns.slice(1);
+                        const subTabBarHtml = remainingGroupCols.length
+                            ? buildGroupTabBar(filteredRows, remainingGroupCols, "", null)
+                            : "";
+                        const previewRows = buildDashboardPreviewRows(analysisKey, filteredRows);
+                        const tableHtml = buildGroupedTable(previewRows, groupColumns, { analysisKey, runId });
+                        const breadcrumbHtml = buildBreadcrumbNav(drillPath);
+                        contentArea.innerHTML = `${buildGroupTabBar(allRows, groupColumns, selectedValue, null)}${breadcrumbHtml}${subTabBarHtml}${tableHtml}`;
+                    } else {
+                        const previewRows = buildDashboardPreviewRows(analysisKey, filteredRows);
+                        const tableHtml = buildGroupedTable(previewRows, groupColumns, { analysisKey, runId });
+                        contentArea.innerHTML = `${buildGroupTabBar(allRows, groupColumns, "", null)}${tableHtml}`;
+                    }
+
+                    // 再描画後のイベント再設定（パンくずのみ）
+                    contentArea.querySelectorAll(".breadcrumb-item--link").forEach((crumb) => {
+                        crumb.addEventListener("click", () => {
+                            const previewRows = buildDashboardPreviewRows(analysisKey, allRows);
+                            const tableHtml = buildGroupedTable(previewRows, groupColumns, { analysisKey, runId });
+                            contentArea.innerHTML = `${buildGroupTabBar(allRows, groupColumns, "", null)}${tableHtml}`;
+                        });
+                    });
+                });
+            });
+        });
+    }
 }
 
 function renderDashboard(data) {
@@ -1709,7 +1914,7 @@ function renderDashboard(data) {
         matchedSupplement,
         normalizedData.run_id && !matchedSupplement ? "loading" : matchedSupplement ? "ready" : "hidden",
     );
-    renderAnalysisPanels(normalizedData.analyses, normalizedData.run_id || "");
+    renderAnalysisPanels(normalizedData.analyses, normalizedData.run_id || "", normalizedData.group_columns || []);
     updateSetupSummary(normalizedData, matchedSupplement);
 
     if (normalizedData.run_id) {

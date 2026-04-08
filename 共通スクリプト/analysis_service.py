@@ -117,6 +117,7 @@ def analyze_prepared_event_log(
     selected_analysis_keys=None,
     output_root_dir=None,
     export_excel=False,
+    group_columns=None,
 ):
     analysis_keys = resolve_analysis_keys(selected_analysis_keys)
     analysis_results = {}
@@ -126,7 +127,7 @@ def analyze_prepared_event_log(
             raise ValueError(f"未対応の分析種別です: {analysis_key}")
 
         definition = ANALYSIS_DEFINITIONS[analysis_key]
-        result_df = definition["create_function"](prepared_df)
+        result_df = definition["create_function"](prepared_df, group_columns=group_columns)
         analysis_config = definition["config"]
 
         excel_file = None
@@ -138,6 +139,7 @@ def analyze_prepared_event_log(
                 output_file_name=analysis_config["output_file_name"],
                 sheet_name=analysis_config["sheet_name"],
                 display_columns=analysis_config["display_columns"],
+                group_columns=group_columns,
             )
 
         analysis_results[analysis_key] = {
@@ -147,6 +149,7 @@ def analyze_prepared_event_log(
             "rows": convert_analysis_result_to_records(
                 result_df,
                 analysis_config["display_columns"],
+                group_columns=group_columns,
             ),
             "excel_file": str(excel_file.resolve()) if excel_file else None,
         }
@@ -154,6 +157,8 @@ def analyze_prepared_event_log(
     return {
         "case_count": int(prepared_df["case_id"].nunique()),
         "event_count": int(len(prepared_df)),
+        "group_columns": group_columns or [],
+        "group_mode": bool(group_columns),
         "analyses": analysis_results,
     }
 
@@ -164,7 +169,7 @@ def create_analysis_records(prepared_df, analysis_key):
 
     definition = ANALYSIS_DEFINITIONS[analysis_key]
     analysis_config = definition["config"]
-    result_df = definition["create_function"](prepared_df)
+    result_df = definition["create_function"](prepared_df, group_columns=None)
 
     return {
         "analysis_name": analysis_config["analysis_name"],
@@ -379,6 +384,22 @@ def _parse_filter_datetime(value, is_end=False):
         return parsed_value.normalize() + pd.Timedelta(days=1)
 
     return parsed_value
+
+
+def detect_group_columns(filter_params, filter_column_settings):
+    """
+    列が選択されているが値が未選択のスロットを「グルーピング軸」と判定する。
+    返却値: [列名, ...] （①→②→③の順序を保持）
+    """
+    normalized_filters = normalize_filter_params(**(filter_params or {}))
+    normalized_settings = normalize_filter_column_settings(**(filter_column_settings or {}))
+    group_columns = []
+    for slot in FILTER_SLOT_KEYS:
+        col = normalized_settings.get(slot, {}).get("column_name")
+        val = normalized_filters.get(slot)
+        if col and not val:  # 列あり・値なし → グループ軸
+            group_columns.append(col)
+    return group_columns
 
 
 def filter_prepared_df(prepared_df, filter_params=None, filter_column_settings=None):

@@ -121,11 +121,12 @@ def _build_simple_comment(repeat_count, repeat_rate_pct, avg_duration_diff_min, 
     return "安定パターン。"
 
 
-def enrich_pattern_analysis_result(result_df):
+def enrich_pattern_analysis_result(result_df, group_columns=None):
     if result_df is None or result_df.empty:
         return result_df
 
     enriched_df = result_df.copy()
+    valid_group_cols = [col for col in (group_columns or []) if col in enriched_df.columns]
     total_cases = float(enriched_df["case_count"].sum() or 0.0)
     weighted_avg_case_duration_min = round(
         (
@@ -179,21 +180,41 @@ def enrich_pattern_analysis_result(result_df):
     else:
         enriched_df["overall_impact_pct"] = 0.0
 
-    ordered_columns = [
-        column_name
-        for column_name in PATTERN_ORDERED_COLUMNS
-        if column_name in enriched_df.columns
-    ]
+    ordered_columns = (
+        valid_group_cols
+        + [
+            column_name
+            for column_name in PATTERN_ORDERED_COLUMNS
+            if column_name in enriched_df.columns and column_name not in valid_group_cols
+        ]
+    )
     return enriched_df[ordered_columns]
 
 
-def create_pattern_analysis(df):
-    case_path = (
-        df.sort_values(["case_id", "sequence_no"])
-        .groupby("case_id")["activity"]
-        .apply(lambda series: FLOW_PATH_SEPARATOR.join(series.tolist()))
-        .reset_index(name="pattern")
-    )
+def create_pattern_analysis(df, group_columns=None):
+    valid_group_cols = [col for col in (group_columns or []) if col in df.columns]
+
+    sorted_df = df.sort_values(["case_id", "sequence_no"])
+
+    if valid_group_cols:
+        # グルーピングモード：グループ列の値はケース内先頭行（sequence_no最小）を採用
+        group_agg = {col: (col, "first") for col in valid_group_cols}
+        case_path = (
+            sorted_df
+            .groupby("case_id")
+            .agg(
+                pattern=("activity", lambda s: FLOW_PATH_SEPARATOR.join(s.tolist())),
+                **group_agg,
+            )
+            .reset_index()
+        )
+    else:
+        case_path = (
+            sorted_df
+            .groupby("case_id")["activity"]
+            .apply(lambda series: FLOW_PATH_SEPARATOR.join(series.tolist()))
+            .reset_index(name="pattern")
+        )
 
     case_duration = (
         df.groupby("case_id")
@@ -210,8 +231,13 @@ def create_pattern_analysis(df):
         how="left",
     )
 
+    if valid_group_cols:
+        groupby_keys = valid_group_cols + ["pattern"]
+    else:
+        groupby_keys = ["pattern"]
+
     result = (
-        merged.groupby("pattern")
+        merged.groupby(groupby_keys)
         .agg(
             case_count=("case_id", "count"),
             avg_case_duration_min=("case_total_duration_min", "mean"),
@@ -245,5 +271,7 @@ def create_pattern_analysis(df):
         .where(result["std_case_duration_min"].notna(), other="-")
     )
 
-    result = result.sort_values(["case_count", "pattern"], ascending=[False, True]).reset_index(drop=True)
-    return enrich_pattern_analysis_result(result)
+    sort_keys = valid_group_cols + ["case_count", "pattern"]
+    sort_ascending = [True] * len(valid_group_cols) + [False, True]
+    result = result.sort_values(sort_keys, ascending=sort_ascending).reset_index(drop=True)
+    return enrich_pattern_analysis_result(result, group_columns=valid_group_cols)

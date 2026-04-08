@@ -4984,3 +4984,73 @@ tbody tr:hover td {
         white-space: normal;
     }
 }
+
+/* ── グルーピングモード ── */
+.data-table--grouped .group-cell {
+    background-color: var(--color-surface-alt, #f8fafc);
+    font-weight: 600;
+    vertical-align: middle;
+    border-right: 2px solid var(--color-border, #e2e8f0);
+    white-space: nowrap;
+}
+
+.group-tab-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+    padding: 0.5rem 0;
+    margin-bottom: 0.5rem;
+}
+
+.group-tab {
+    padding: 0.25rem 0.75rem;
+    border-radius: 9999px;
+    border: 1px solid var(--color-border, #e2e8f0);
+    background: transparent;
+    font-size: 0.8125rem;
+    cursor: pointer;
+    color: var(--color-text-muted, #64748b);
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.group-tab:hover {
+    background: var(--color-surface-alt, #f8fafc);
+    border-color: var(--color-primary, #6366f1);
+    color: var(--color-primary, #6366f1);
+}
+
+.group-tab.active {
+    background: var(--color-primary, #6366f1);
+    border-color: var(--color-primary, #6366f1);
+    color: #fff;
+}
+
+/* パンくずナビ */
+.breadcrumb-nav {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.8125rem;
+    color: var(--color-text-muted, #64748b);
+    margin-bottom: 0.375rem;
+    flex-wrap: wrap;
+}
+
+.breadcrumb-item {
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+}
+
+.breadcrumb-item--link {
+    cursor: pointer;
+    color: var(--color-primary, #6366f1);
+    text-decoration: underline;
+}
+
+.breadcrumb-item--link:hover {
+    color: var(--color-primary-dark, #4f46e5);
+}
+
+.breadcrumb-sep {
+    color: var(--color-text-muted, #94a3b8);
+}

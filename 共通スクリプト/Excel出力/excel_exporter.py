@@ -58,17 +58,19 @@ def _style_export_worksheet(worksheet):
     _autosize_worksheet_columns(worksheet)
 
 
-def format_analysis_result(df, display_columns=None):
+def format_analysis_result(df, display_columns=None, group_columns=None):
     if display_columns is None:
         return df.copy()
 
-    ordered_columns = [
+    valid_group_cols = [col for col in (group_columns or []) if col in df.columns]
+    ordered_columns = valid_group_cols + [
         column_name
         for column_name in display_columns.keys()
-        if column_name in df.columns
+        if column_name in df.columns and column_name not in valid_group_cols
     ]
     formatted_df = df.loc[:, ordered_columns].copy() if ordered_columns else df.copy()
-    return formatted_df.rename(columns=display_columns)
+    rename_map = {k: v for k, v in display_columns.items() if k not in valid_group_cols}
+    return formatted_df.rename(columns=rename_map)
 
 
 def build_excel_bytes(
@@ -109,15 +111,17 @@ def export_analysis_to_excel(
     output_file_name,
     sheet_name,
     display_columns=None,
+    group_columns=None,
 ):
     output_file = Path(output_root_dir) / analysis_name / output_file_name
-    excel_df = format_analysis_result(df, display_columns)
+    excel_df = format_analysis_result(df, display_columns, group_columns=group_columns)
     return export_dataframe_to_excel(excel_df, output_file, sheet_name)
 
 
 def convert_analysis_result_to_records(
     df,
     display_columns=None,
+    group_columns=None,
 ):
-    api_df = format_analysis_result(df, display_columns)
+    api_df = format_analysis_result(df, display_columns, group_columns=group_columns)
     return api_df.to_dict(orient="records")
