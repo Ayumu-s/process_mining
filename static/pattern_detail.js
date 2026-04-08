@@ -187,17 +187,17 @@ function buildStepMetricRowsHtml(stepMetrics) {
                         ${isMaxAverage ? '<span class="transition-step-badge">最大</span>' : ""}
                     </div>
                 </td>
-                <td>${escapeHtml(formatNumber(row.case_count))}</td>
-                <td>${escapeHtml(formatNumber(row.avg_duration_min))}</td>
-                <td>${escapeHtml(formatNumber(row.median_duration_min))}</td>
-                <td>${escapeHtml(formatNumber(row.wait_share_pct))}%</td>
+                <td class="num">${escapeHtml(formatNumber(row.case_count))}</td>
+                <td class="num">${escapeHtml(formatNumber(row.avg_duration_min))}</td>
+                <td class="num">${escapeHtml(formatNumber(row.median_duration_min))}</td>
+                <td class="num">${escapeHtml(formatNumber(row.wait_share_pct))}%</td>
             </tr>
         `;
     }).join("");
 
     return `
         <div class="table-wrap">
-            <table>
+            <table class="data-table">
                 <thead>
                     <tr>
                         <th>工程</th>
