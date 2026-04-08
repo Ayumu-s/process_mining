@@ -3418,6 +3418,10 @@ tbody tr:hover td {
         grid-template-columns: 1fr;
     }
 
+    .dashboard-grid {
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    }
+
     .process-map-viewport {
         height: clamp(340px, 52vh, 430px);
         min-height: 340px;
@@ -3863,7 +3867,7 @@ tbody tr:hover td {
     align-items: center;
     justify-content: space-between;
     width: 100%;
-    padding: 16px 18px 10px;
+    padding: 16px 18px 14px;
     border: 0;
     background: transparent;
     color: inherit;
@@ -3873,7 +3877,7 @@ tbody tr:hover td {
 
 .setup-accordion-copy {
     display: grid;
-    gap: 4px;
+    gap: 8px;
 }
 
 .setup-accordion-note {
@@ -3922,7 +3926,7 @@ tbody tr:hover td {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
-    padding: 0 18px 14px;
+    padding: 6px 18px 14px;
     align-items: center;
 }
 
@@ -4474,8 +4478,12 @@ tbody tr:hover td {
 }
 
 .app-shell--detail .summary-panel {
-    gap: 16px;
-    padding: 20px;
+    gap: 14px;
+    padding: 16px;
+}
+
+.app-shell--detail .dashboard-grid {
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
 
 .app-shell--detail .summary-card {
@@ -4505,6 +4513,7 @@ tbody tr:hover td {
 .diagnostics-details-summary {
     list-style: none;
     cursor: pointer;
+    padding: 16px 18px;
 }
 
 .diagnostics-details-summary::-webkit-details-marker {
@@ -4512,7 +4521,12 @@ tbody tr:hover td {
 }
 
 .diagnostics-details > .setup-card-body {
-    padding: 0 22px 22px;
+    padding: 0 18px 22px;
+}
+
+.diagnostics-details .section-head-actions {
+    gap: 10px;
+    flex-wrap: wrap;
 }
 
 .detail-chart-toolbar {

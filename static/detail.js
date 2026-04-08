@@ -2484,14 +2484,17 @@ function renderFrequencyChart(analysis) {
         `;
     }).join("");
 
-    const topFiveRows = allRows.slice(0, 5);
+    const topFiveRows = [...allRows]
+        .sort((a, b) => (Number(b["イベント件数"]) || 0) - (Number(a["イベント件数"]) || 0))
+        .slice(0, 5);
     const topFiveTotal = topFiveRows.reduce((sum, row) => sum + (Number(row["イベント件数"]) || 0), 0);
     const otherCount = Math.max(0, (allRows.reduce((sum, row) => sum + (Number(row["イベント件数"]) || 0), 0) - topFiveTotal));
+    const donutPalette = ["#1d4ed8", "#2563eb", "#3b82f6", "#60a5fa", "#93c5fd"];
     const donutSegments = [
         ...topFiveRows.map((row, index) => ({
             label: String(row["アクティビティ"] || `Top${index + 1}`),
             ratio: (Number(row["イベント件数"]) || 0) / Math.max(1, topFiveTotal + otherCount),
-            color: ["#3b82f6", "#60a5fa", "#93c5fd", "#bfdbfe", "#1d4ed8"][index] || "#93c5fd",
+            color: donutPalette[index] || "#bfdbfe",
             tooltip: `${row["アクティビティ"]}: ${Number(row["イベント件数"] || 0).toLocaleString("ja-JP")} 件`,
         })),
         ...(otherCount > 0 ? [{
@@ -2620,15 +2623,18 @@ function renderTransitionChart(analysis) {
         `;
     }).join("");
 
-    const topFiveRows = allRows.slice(0, 5);
+    const topFiveRows = [...allRows]
+        .sort((a, b) => ((Number(b["遷移件数"]) || Number(b["ケース数"]) || 0) - (Number(a["遷移件数"]) || Number(a["ケース数"]) || 0)))
+        .slice(0, 5);
     const topFiveTotal = topFiveRows.reduce((sum, row) => sum + (Number(row["遷移件数"]) || Number(row["ケース数"]) || 0), 0);
     const allTotal = allRows.reduce((sum, row) => sum + (Number(row["遷移件数"]) || Number(row["ケース数"]) || 0), 0);
     const otherCount = Math.max(0, allTotal - topFiveTotal);
+    const transitionDonutPalette = ["#2563eb", "#3b82f6", "#10b981", "#f59e0b", "#94a3b8"];
     const donutSegments = [
         ...topFiveRows.map((row, index) => ({
             label: `${row["前処理アクティビティ名"]} → ${row["後処理アクティビティ名"]}`,
             ratio: (Number(row["遷移件数"]) || Number(row["ケース数"]) || 0) / Math.max(1, allTotal),
-            color: ["#3b82f6", "#60a5fa", "#10b981", "#f59e0b", "#ef4444"][index] || "#93c5fd",
+            color: transitionDonutPalette[index] || "#e2e8f0",
             tooltip: `${row["前処理アクティビティ名"]} → ${row["後処理アクティビティ名"]}: ${Number(row["遷移件数"] || row["ケース数"] || 0).toLocaleString("ja-JP")} 件`,
         })),
         ...(otherCount > 0 ? [{
