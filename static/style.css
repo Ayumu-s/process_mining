@@ -1029,6 +1029,18 @@ button[type="submit"],
     color: #ffffff;
 }
 
+.hbtn--excel {
+    border-color: #059669;
+    background: #ecfdf5;
+    color: #065f46;
+    font-weight: 700;
+}
+
+.hbtn--excel:hover {
+    background: #d1fae5;
+    border-color: #047857;
+}
+
 .hbtn.primary:hover,
 button[type="submit"]:hover:not(:disabled),
 .run-btn:hover:not(:disabled) {

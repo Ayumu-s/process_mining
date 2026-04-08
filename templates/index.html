@@ -20,7 +20,6 @@
             <a href="/">ダッシュボード</a>
         </div>
         <div class="dashboard-app-header-actions">
-            <button type="button" id="top-export-diagnostics-button" class="hbtn dashboard-toolbar-button">Excelエクスポート</button>
             <button type="button" id="top-open-csv-button" class="hbtn primary dashboard-toolbar-button">新しいCSVを読込</button>
         </div>
     </header>
@@ -182,7 +181,7 @@
                                     </summary>
                                     <div class="diagnostics-actions">
                                         <label class="diagnostics-export-settings" for="diagnostics-sample-limit-input">
-                                            <span>Excelサンプル件数</span>
+                                            <span>出力上限件数</span>
                                             <input
                                                 type="number"
                                                 id="diagnostics-sample-limit-input"
@@ -192,7 +191,7 @@
                                                 value="3000"
                                             >
                                         </label>
-                                        <button type="button" id="download-diagnostics-excel-button" class="hbtn">ログ診断をExcel出力</button>
+                                        <button type="button" id="download-diagnostics-excel-button" class="hbtn hbtn--excel">ログ診断をExcel出力</button>
                                         <button type="button" id="run-diagnostics-button" class="hbtn primary">ログ診断を実行</button>
                                     </div>
                                     <div class="setup-card-body">

@@ -33,7 +33,6 @@ const setupSourceTag = document.getElementById("setup-source-tag");
 const setupMappingTag = document.getElementById("setup-mapping-tag");
 const setupVolumeTag = document.getElementById("setup-volume-tag");
 const setupSummaryOpenButton = document.getElementById("setup-summary-open-button");
-const topExportDiagnosticsButton = document.getElementById("top-export-diagnostics-button");
 const topOpenCsvButton = document.getElementById("top-open-csv-button");
 const filterChipBar = document.getElementById("filter-chip-bar");
 
@@ -451,9 +450,6 @@ function syncSubmitState() {
     }
     if (diagnosticsExcelButton) {
         diagnosticsExcelButton.disabled = isBusy;
-    }
-    if (topExportDiagnosticsButton) {
-        topExportDiagnosticsButton.disabled = isBusy;
     }
     if (topOpenCsvButton) {
         topOpenCsvButton.disabled = isBusy;
@@ -2043,10 +2039,6 @@ setupToggleButton?.addEventListener("click", () => {
 setupSummaryOpenButton?.addEventListener("click", () => {
     setSetupSectionOpen(true);
     caseIdColumnSelect?.focus();
-});
-
-topExportDiagnosticsButton?.addEventListener("click", () => {
-    void downloadLogDiagnosticsExcel();
 });
 
 topOpenCsvButton?.addEventListener("click", () => {
