@@ -774,12 +774,14 @@ function buildDashboardCardsHtml(dashboard) {
                 <h2 class="dashboard-title">基本ダッシュボード</h2>
                 <p class="dashboard-copy">分析対象条件適用後の分析要約です。バリアント選択中も全体値を表示します。</p>
             </div>
-            <div class="dashboard-grid">
+            <div class="grid-auto">
                 ${dashboardCards.map((card) => `
-                    <article class="dashboard-card">
-                        <span class="summary-label">${escapeHtml(card.label)}</span>
-                        <strong class="dashboard-value">${escapeHtml(card.value)}</strong>
-                        ${card.note ? `<p class="dashboard-note">${escapeHtml(card.note)}</p>` : ""}
+                    <article class="kpi-card">
+                        <div>
+                            <div class="kpi-label">${escapeHtml(card.label)}</div>
+                            <div class="kpi-value">${escapeHtml(card.value)}</div>
+                            ${card.note ? `<div class="kpi-sub">${escapeHtml(card.note)}</div>` : ""}
+                        </div>
                     </article>
                 `).join("")}
             </div>
@@ -1158,14 +1160,33 @@ function buildVariantCoverageHtml(coverage) {
         return '<p class="panel-note">カバー率を計算できませんでした。</p>';
     }
 
-    return `
-        <span class="variant-coverage-label">${escapeHtml(coverage.display_label || `上位${coverage.displayed_variant_count}件カバー率`)}</span>
-        <strong class="variant-coverage-value">${escapeHtml(formatVariantRatio(coverage.ratio))}%</strong>
-        <span class="variant-coverage-sub">
-            ${escapeHtml(Number(coverage.covered_case_count || 0).toLocaleString("ja-JP"))}
-            / ${escapeHtml(Number(coverage.total_case_count || 0).toLocaleString("ja-JP"))} 件
-        </span>
-    `;
+    const coveredCount = Number(coverage.covered_case_count || 0);
+    const totalCount = Number(coverage.total_case_count || 0);
+    const otherCount = Math.max(0, totalCount - coveredCount);
+    const coverageRatio = totalCount > 0 ? coveredCount / totalCount : 0;
+    const coveragePct = Math.round(coverageRatio * 100);
+
+    const donutSegments = [
+        {
+            label: coverage.display_label || `上位${coverage.displayed_variant_count}件`,
+            ratio: coverageRatio,
+            color: "#3b82f6",
+            tooltip: `対象: ${coveredCount.toLocaleString("ja-JP")} 件 (${coveragePct}%)`,
+        },
+        ...(otherCount > 0 ? [{
+            label: "その他",
+            ratio: otherCount / Math.max(1, totalCount),
+            color: "#e2e8f0",
+            tooltip: `その他: ${otherCount.toLocaleString("ja-JP")} 件`,
+        }] : []),
+    ];
+
+    return buildDonutChartMarkup(
+        donutSegments,
+        totalCount,
+        coverage.display_label || `上位${coverage.displayed_variant_count}件カバー率`,
+        `${coveragePct}%`,
+    );
 }
 
 function getDefaultVariantViewState() {
@@ -2552,10 +2573,22 @@ function renderFrequencyChart(analysis) {
     });
 }
 
+let transitionDirectionFilter = "all";
+
 function renderTransitionChart(analysis) {
     const allRows = Array.isArray(analysis.rows) ? analysis.rows : [];
-    const visibleLimit = transitionChartLimit === "all" ? allRows.length : Math.min(allRows.length, Number(transitionChartLimit) || 15);
-    const chartRows = allRows.slice(0, visibleLimit);
+
+    const reverseLookupFull = new Set(
+        allRows.map((row) => `${row["前処理アクティビティ名"]}|||${row["後処理アクティビティ名"]}`)
+    );
+    const filteredRows = transitionDirectionFilter === "forward"
+        ? allRows.filter((row) => !reverseLookupFull.has(`${row["後処理アクティビティ名"]}|||${row["前処理アクティビティ名"]}`))
+        : transitionDirectionFilter === "reverse"
+            ? allRows.filter((row) => reverseLookupFull.has(`${row["後処理アクティビティ名"]}|||${row["前処理アクティビティ名"]}`))
+            : allRows;
+
+    const visibleLimit = transitionChartLimit === "all" ? filteredRows.length : Math.min(filteredRows.length, Number(transitionChartLimit) || 15);
+    const chartRows = filteredRows.slice(0, visibleLimit);
 
     if (!chartRows.length) {
         chartPanel.className = "result-panel";
@@ -2565,9 +2598,7 @@ function renderTransitionChart(analysis) {
         return;
     }
 
-    const reverseLookup = new Set(
-        allRows.map((row) => `${row["前処理アクティビティ名"]}|||${row["後処理アクティビティ名"]}`)
-    );
+    const reverseLookup = reverseLookupFull;
     const maxTransitionCount = Math.max(...chartRows.map((row) => Number(row["遷移件数"]) || Number(row["ケース数"]) || 0), 1);
     const chartWidth = 1080;
     const labelWidth = 300;
@@ -2643,8 +2674,16 @@ function renderTransitionChart(analysis) {
                 <span>詳細な処理時間はホバーで確認できます。</span>
             </div>
             <div class="detail-chart-toolbar-actions">
+                <div class="chart-limit-buttons">
+                    ${["all", "forward", "reverse"].map((dir) => `
+                        <button type="button" class="btn btn-sm${transitionDirectionFilter === dir ? " active" : ""}" data-transition-dir="${dir}">
+                            ${{ all: "全遷移", forward: "順方向", reverse: "逆方向" }[dir]}
+                        </button>
+                    `).join("")}
+                </div>
                 ${buildChartLimitButtons(transitionChartLimit, [
                     { value: 10, label: "Top10" },
+                    { value: 15, label: "Top15" },
                     { value: 20, label: "Top20" },
                     { value: "all", label: "全件" },
                 ])}
@@ -2671,6 +2710,13 @@ function renderTransitionChart(analysis) {
             transitionChartLimit = buttonElement.dataset.chartLimit === "all"
                 ? "all"
                 : Number(buttonElement.dataset.chartLimit || 15);
+            renderTransitionChart(analysis);
+        });
+    });
+
+    chartContainer.querySelectorAll("[data-transition-dir]").forEach((buttonElement) => {
+        buttonElement.addEventListener("click", () => {
+            transitionDirectionFilter = buttonElement.dataset.transitionDir || "all";
             renderTransitionChart(analysis);
         });
     });

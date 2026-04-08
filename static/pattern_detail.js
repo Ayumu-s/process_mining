@@ -133,19 +133,26 @@ function buildSummaryCard(label, value, modifierClass = "") {
     `;
 }
 
-function renderPatternSteps(patternSteps) {
+function renderPatternSteps(patternSteps, bottleneckTransition = null) {
     if (!patternSteps.length) {
         return "";
     }
 
+    const bnFrom = bottleneckTransition?.activity || "";
+    const bnTo = bottleneckTransition?.next_activity || "";
+
     return `
         <div class="pattern-steps">
-            ${patternSteps.map((step, index) => `
-                <div class="pattern-step-chip">
-                    <span class="pattern-step-index">${index + 1}</span>
-                    <span>${escapeHtml(step)}</span>
-                </div>
-            `).join("")}
+            ${patternSteps.map((step, index) => {
+                const isBottleneckTo = bnTo && step === bnTo && index > 0 && patternSteps[index - 1] === bnFrom;
+                const chipClass = isBottleneckTo ? "pattern-step-chip pattern-step-chip--bottleneck" : "pattern-step-chip";
+                return `
+                    <div class="${chipClass}">
+                        <span class="pattern-step-index">${index + 1}</span>
+                        <span>${escapeHtml(step)}</span>
+                    </div>
+                `;
+            }).join("")}
         </div>
     `;
 }
@@ -248,6 +255,18 @@ function updatePatternNavLinks(runId, patternCount) {
     }
 }
 
+function buildKpiCard(label, value, sub = "") {
+    return `
+        <article class="kpi-card">
+            <div>
+                <div class="kpi-label">${escapeHtml(label)}</div>
+                <div class="kpi-value" style="font-size:20px">${escapeHtml(value)}</div>
+                ${sub ? `<div class="kpi-sub">${escapeHtml(sub)}</div>` : ""}
+            </div>
+        </article>
+    `;
+}
+
 function renderSummary(detail) {
     const patternSteps = getPatternSteps(detail);
     const bottleneckLabel = detail.bottleneck_transition?.transition_label || "該当なし";
@@ -263,21 +282,28 @@ function renderSummary(detail) {
 
     summaryPanel.className = "summary-panel summary-panel--pattern-detail";
     summaryPanel.innerHTML = `
-        ${buildSummaryCard("パターン", `#${patternIndex + 1}`)}
-        ${buildSummaryCard("ケース数 / 構成比", `${formatNumber(detail.case_count)}件 / ${formatNumber(detail.case_ratio_pct)}%`)}
-        ${buildSummaryCard("平均 / 中央処理時間", `${formatNumber(detail.avg_case_duration_min)}分 / ${formatNumber(detail.median_case_duration_min)}分`)}
-        ${buildSummaryCard("繰り返し", repeatFlag)}
-        ${buildSummaryCard("繰り返し率区分 / 差分", `${String(detail.repeat_rate_band || "-")} / ${formatNumber(detail.avg_case_duration_diff_min || 0)}分`)}
-        ${buildSummaryCard("改善優先度 / 全体影響度", `${formatNumber(detail.improvement_priority_score || 0)} / ${formatNumber(detail.overall_impact_pct || 0)}%`)}
-        ${buildSummaryCard("最短処理", fastestPatternFlag)}
-        ${buildSummaryCard("最大ボトルネック", bottleneckLabel, "summary-card--warning")}
-        ${buildSummaryCard("代表ルート", compactPatternLabel(patternSteps), "summary-card--wide")}
-        ${noteItems.length ? `
-            <article class="summary-card summary-card--wide summary-note-card">
-                <span class="summary-label">コメント</span>
-                <strong>${escapeHtml(noteItems.join(" / "))}</strong>
-            </article>
-        ` : ""}
+        <div class="grid-auto">
+            ${buildKpiCard("パターン番号", `#${patternIndex + 1}`)}
+            ${buildKpiCard("ケース数", `${formatNumber(detail.case_count)}件`, `全体の ${formatNumber(detail.case_ratio_pct)}%`)}
+            ${buildKpiCard("平均処理時間", `${formatNumber(detail.avg_case_duration_min)}分`, `中央値 ${formatNumber(detail.median_case_duration_min)}分`)}
+            ${buildKpiCard("最大ボトルネック", bottleneckLabel, detail.bottleneck_transition ? `Avg ${formatNumber(detail.bottleneck_transition.avg_duration_min)}分` : "")}
+            ${buildKpiCard("代表ルート", compactPatternLabel(patternSteps))}
+        </div>
+        <details class="summary-details-extra" style="margin-top:12px">
+            <summary style="cursor:pointer;color:var(--muted);font-size:0.85rem">詳細情報を表示</summary>
+            <div class="summary-panel summary-panel--pattern-detail" style="margin-top:10px">
+                ${buildSummaryCard("繰り返し", repeatFlag)}
+                ${buildSummaryCard("繰り返し率区分 / 差分", `${String(detail.repeat_rate_band || "-")} / ${formatNumber(detail.avg_case_duration_diff_min || 0)}分`)}
+                ${buildSummaryCard("改善優先度 / 全体影響度", `${formatNumber(detail.improvement_priority_score || 0)} / ${formatNumber(detail.overall_impact_pct || 0)}%`)}
+                ${buildSummaryCard("最短処理", fastestPatternFlag)}
+                ${noteItems.length ? `
+                    <article class="summary-card summary-card--wide summary-note-card">
+                        <span class="summary-label">コメント</span>
+                        <strong>${escapeHtml(noteItems.join(" / "))}</strong>
+                    </article>
+                ` : ""}
+            </div>
+        </details>
     `;
 }
 
@@ -313,31 +339,38 @@ function renderBottleneckPanel(detail) {
             </div>
         `;
 
+    const sortedAvgList = [...stepMetrics]
+        .map((r) => Number(r.avg_duration_min || 0))
+        .sort((a, b) => b - a);
+    const top3Threshold = sortedAvgList[2] ?? 0;
+
     const barsHtml = stepMetrics.map((row) => {
         const transitionKey = getTransitionKeyFromMetric(row);
         const isBottleneck = bottleneck && row.sequence_no === bottleneck.sequence_no;
+        const avgVal = Number(row.avg_duration_min || 0);
+        const isWarning = !isBottleneck && avgVal >= top3Threshold && avgVal > 0;
         const isSelected = transitionKey === selectedTransitionKey;
         const widthPercent = maxAverage > 0
-            ? Math.max(8, (Number(row.avg_duration_min || 0) / maxAverage) * 100)
+            ? Math.max(8, (avgVal / maxAverage) * 100)
             : 0;
-        const tooltip = [
-            row.transition_label,
-            `ケース数: ${formatNumber(row.case_count)}`,
-            `平均: ${formatNumber(row.avg_duration_min)} 分`,
-            `中央値: ${formatNumber(row.median_duration_min)} 分`,
-            `最大: ${formatNumber(row.max_duration_min)} 分`,
-            `待機シェア: ${formatNumber(row.wait_share_pct)}%`,
-        ].join("\n");
+        const tooltipHtml = `<strong>${escapeHtml(row.transition_label)}</strong><br>ケース数: ${escapeHtml(formatNumber(row.case_count))}<br>平均: ${escapeHtml(formatNumber(row.avg_duration_min))} 分<br>中央値: ${escapeHtml(formatNumber(row.median_duration_min))} 分<br>最大: ${escapeHtml(formatNumber(row.max_duration_min))} 分<br>待機シェア: ${escapeHtml(formatNumber(row.wait_share_pct))}%`;
+
+        const cardClass = [
+            "bottleneck-bar-card",
+            isBottleneck ? "bottleneck-bar-card--highlight" : "",
+            isWarning ? "bottleneck-bar-card--warning" : "",
+            isSelected ? "bottleneck-bar-card--selected" : "",
+        ].filter(Boolean).join(" ");
 
         return `
             <button
                 type="button"
-                class="bottleneck-bar-card${isBottleneck ? " bottleneck-bar-card--highlight" : ""}${isSelected ? " bottleneck-bar-card--selected" : ""}"
+                class="${cardClass}"
                 data-transition-key="${escapeHtml(transitionKey)}"
                 data-from-activity="${escapeHtml(row.activity)}"
                 data-to-activity="${escapeHtml(row.next_activity)}"
+                data-tooltip="${escapeHtml(tooltipHtml)}"
                 aria-pressed="${isSelected ? "true" : "false"}"
-                title="${escapeHtml(tooltip)}"
             >
                 <div class="bottleneck-bar-head">
                     <p class="bottleneck-bar-label">${escapeHtml(row.transition_label)}</p>
@@ -360,12 +393,21 @@ function renderBottleneckPanel(detail) {
             </div>
         </div>
         <p class="panel-note">${escapeHtml(compactPatternLabel(patternSteps))}</p>
-        ${renderPatternSteps(patternSteps)}
+        ${renderPatternSteps(patternSteps, bottleneck)}
         ${calloutHtml}
         <div class="bottleneck-bars">
             ${barsHtml || '<p class="empty-state">表示できる遷移はありません。</p>'}
         </div>
     `;
+
+    bottleneckPanel.querySelectorAll("[data-tooltip]").forEach((el) => {
+        el.addEventListener("mouseenter", (event) => {
+            window.ProcessMiningShared.showTooltip(event, el.dataset.tooltip || "");
+        });
+        el.addEventListener("mouseleave", () => {
+            window.ProcessMiningShared.hideTooltip();
+        });
+    });
 }
 
 function buildMiniKpi(label, value) {

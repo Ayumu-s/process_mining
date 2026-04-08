@@ -464,7 +464,7 @@ code,
 
 .page-title {
     color: var(--text);
-    font-family: var(--font-display);
+    font-family: var(--font-body);
     font-size: 1.7rem;
     font-weight: 800;
     line-height: 1.2;
@@ -620,7 +620,7 @@ code,
 
 .section-title {
     color: var(--text);
-    font-family: var(--font-display);
+    font-family: var(--font-body);
     font-size: 0.94rem;
     font-weight: 700;
 }
@@ -701,7 +701,7 @@ code,
 .detail-hero h1 {
     margin: 0;
     color: var(--text);
-    font-family: var(--font-display);
+    font-family: var(--font-body);
     font-size: clamp(2rem, 3vw, 2.8rem);
     font-weight: 800;
     line-height: 1.08;
@@ -735,26 +735,33 @@ code,
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 4px 2px;
+    gap: 8px 6px;
     margin-top: 16px;
     padding: 14px 16px;
     border: 1px solid var(--line);
     border-radius: 10px;
     background: #f8fafc;
     line-height: 1;
+    overflow-x: auto;
 }
 
 .pattern-step-chip {
     display: inline-flex;
     align-items: center;
-    padding: 5px 12px;
+    padding: 8px 16px;
     border: 1px solid #c7d2fe;
-    border-radius: 6px;
+    border-radius: var(--radius-lg);
     background: #eef2ff;
     color: #3730a3;
-    font-size: 0.82rem;
+    font-size: 12px;
     font-weight: 600;
     white-space: nowrap;
+}
+
+.pattern-step-chip--bottleneck {
+    border: 2px solid var(--color-danger);
+    background: #fef2f2;
+    color: var(--color-danger);
 }
 
 .pattern-step-arrow {
@@ -2926,7 +2933,7 @@ button[type="submit"]:disabled,
 .result-header h2 {
     margin: 0;
     color: var(--text);
-    font-family: var(--font-display);
+    font-family: var(--font-body);
     font-size: 1rem;
     font-weight: 700;
 }
@@ -3187,9 +3194,10 @@ tbody tr:hover td {
 .bottleneck-callout {
     margin-top: 14px;
     padding: 16px;
-    border: 1px solid #bfdbfe;
+    border: 1px solid var(--color-danger);
+    border-left: 4px solid var(--color-danger);
     border-radius: 12px;
-    background: #eff6ff;
+    background: #fef2f2;
 }
 
 .bottleneck-callout strong {
@@ -3217,8 +3225,13 @@ tbody tr:hover td {
 }
 
 .bottleneck-bar-card--highlight {
-    border-color: #93c5fd;
-    background: #f8fafc;
+    border-color: var(--color-danger);
+    background: #fef2f2;
+}
+
+.bottleneck-bar-card--warning {
+    border-color: var(--color-warning);
+    background: #fffbeb;
 }
 
 .bottleneck-bar-card--selected {
@@ -3285,7 +3298,11 @@ tbody tr:hover td {
 }
 
 .bottleneck-bar-card--highlight .bottleneck-bar-fill {
-    background: var(--accent-deep);
+    background: var(--color-danger);
+}
+
+.bottleneck-bar-card--warning .bottleneck-bar-fill {
+    background: var(--color-warning);
 }
 
 .bottleneck-bar-meta {
@@ -4431,7 +4448,7 @@ tbody tr:hover td {
 }
 
 .app-shell--detail #pattern-page-title {
-    font-family: var(--font-display);
+    font-family: var(--font-body);
     font-size: clamp(1.85rem, 2.8vw, 2.4rem);
     font-weight: 800;
     letter-spacing: -0.03em;

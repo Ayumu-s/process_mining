@@ -1055,7 +1055,7 @@ function renderDiagnostics(profilePayload) {
         <p class="panel-note">重複行は全列完全一致で判定しています。</p>
         <p class="panel-note">ヘッダー一覧: ${escapeHtml((diagnostics.headers || []).join(", "))}</p>
         <div class="table-wrap diagnostics-table-wrap">
-            <table>
+            <table class="data-table">
                 <thead>
                     <tr>
                         <th>列名</th>
