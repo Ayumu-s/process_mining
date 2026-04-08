@@ -31,8 +31,10 @@ const setupToggleButton = document.getElementById("setup-toggle-button");
 const setupSourceTag = document.getElementById("setup-source-tag");
 const setupMappingTag = document.getElementById("setup-mapping-tag");
 const setupVolumeTag = document.getElementById("setup-volume-tag");
+const setupSummaryOpenButton = document.getElementById("setup-summary-open-button");
 const topExportDiagnosticsButton = document.getElementById("top-export-diagnostics-button");
 const topOpenCsvButton = document.getElementById("top-open-csv-button");
+const filterChipBar = document.getElementById("filter-chip-bar");
 
 const caseIdColumnSelect = document.getElementById("case-id-column-select");
 const activityColumnSelect = document.getElementById("activity-column-select");
@@ -115,6 +117,18 @@ function formatPercent(value, digits = 1) {
         return "-";
     }
     return `${numericValue.toFixed(digits)}%`;
+}
+
+function isNumericCellValue(value) {
+    if (typeof value === "number") {
+        return Number.isFinite(value);
+    }
+
+    if (typeof value !== "string") {
+        return false;
+    }
+
+    return /^-?\d+(?:\.\d+)?%?$/.test(value.replaceAll(",", "").trim());
 }
 
 function loadDashboardSupplement() {
@@ -255,7 +269,7 @@ function updateSetupSummary(resultData = loadLatestResult(), supplement = curren
 function buildPreviewMessage(analysis, previewRows) {
     const totalRowCount = Number(analysis?.row_count ?? analysis?.rows?.length ?? 0);
     return totalRowCount > previewRows.length
-        ? `先頭 ${previewRows.length} 件を表示 / 全 ${formatNumber(totalRowCount)} 件`
+        ? `Top ${previewRows.length} を表示 / 全 ${formatNumber(totalRowCount)} 件`
         : `全 ${formatNumber(totalRowCount)} 件を表示`;
 }
 
@@ -335,10 +349,10 @@ function renderInsightPanel(supplement, state = "ready") {
     }
 
     const insightTexts = Array.isArray(supplement?.insights?.items)
-        ? supplement.insights.items.map((item) => String(item?.text || "").trim()).filter(Boolean)
+        ? supplement.insights.items.map((item) => String(item?.text || "").trim()).filter(Boolean).slice(0, 5)
         : [];
-    let chipLabel = "AI 要約";
-    let bodyText = insightTexts.join(" ");
+    let chipLabel = "AI 判定";
+    let bodyText = "";
 
     if (state === "loading") {
         chipLabel = "読込中";
@@ -346,7 +360,7 @@ function renderInsightPanel(supplement, state = "ready") {
     } else if (state === "error") {
         chipLabel = "取得失敗";
         bodyText = "ダッシュボード用の要約取得に失敗しました。分析結果の表プレビューはそのまま確認できます。";
-    } else if (!bodyText) {
+    } else if (!insightTexts.length) {
         chipLabel = "準備中";
         bodyText = "分析を実行すると、この画面向けのインサイトを表示します。";
     }
@@ -358,7 +372,23 @@ function renderInsightPanel(supplement, state = "ready") {
             <div class="dashboard-insight-title">AI インサイト</div>
             <span class="dashboard-insight-chip">${escapeHtml(chipLabel)}</span>
         </div>
-        <p class="dashboard-insight-text">${escapeHtml(bodyText)}</p>
+        ${
+            state === "ready" && insightTexts.length
+                ? `
+                    <ul class="dashboard-insight-list">
+                        ${insightTexts.map((text, index) => {
+                            const icons = ["📊", "📈", "⚠️", "🔍", "✅"];
+                            return `
+                                <li class="dashboard-insight-item">
+                                    <span class="dashboard-insight-item-icon">${icons[index] || "•"}</span>
+                                    <span>${escapeHtml(text)}</span>
+                                </li>
+                            `;
+                        }).join("")}
+                    </ul>
+                `
+                : `<p class="dashboard-insight-text">${escapeHtml(bodyText)}</p>`
+        }
     `;
 }
 
@@ -449,6 +479,7 @@ function buildTable(rows, options = {}) {
     const bodyHtml = rows.map((row) => {
         const cells = headers.map((header) => {
             const cellValue = escapeHtml(row[header]);
+            const numericClass = isNumericCellValue(row[header]) ? " num" : "";
             const isWideHeader = (
                 header.includes("\u30d1\u30bf\u30fc\u30f3")
                 || header.includes("\u30a2\u30af\u30c6\u30a3\u30d3\u30c6\u30a3")
@@ -462,7 +493,7 @@ function buildTable(rows, options = {}) {
 
             if (isPatternLink) {
                 return `
-                    <td class="table-cell--wide">
+                    <td class="table-cell--wide${numericClass}">
                         <div class="cell-scroll-wrapper">
                             <a href="${buildPatternDetailHref(runId, row.__rowIndex)}" class="table-link">${cellValue}</a>
                         </div>
@@ -472,13 +503,13 @@ function buildTable(rows, options = {}) {
 
             if (isWideHeader) {
                 return `
-                    <td class="table-cell--wide">
+                    <td class="table-cell--wide${numericClass}">
                         <div class="cell-scroll-wrapper">${cellValue}</div>
                     </td>
                 `;
             }
 
-            return `<td>${cellValue}</td>`;
+            return `<td class="${numericClass.trim()}">${cellValue}</td>`;
         }).join("");
 
         return `<tr>${cells}</tr>`;
@@ -486,7 +517,7 @@ function buildTable(rows, options = {}) {
 
     return `
         <div class="table-wrap">
-            <table>
+            <table class="data-table">
                 <thead><tr>${headHtml}</tr></thead>
                 <tbody>${bodyHtml}</tbody>
             </table>
@@ -1375,13 +1406,71 @@ function buildAppliedFilterSummary(appliedFilters = {}, columnSettings = {}) {
     return appliedItems.length ? appliedItems.join(" / ") : "フィルタ未適用";
 }
 
+function buildFilterChipItems(appliedFilters = {}, columnSettings = {}) {
+    const filterDefinitions = Array.isArray(columnSettings?.filters) ? columnSettings.filters : [];
+    const labelMap = new Map(filterDefinitions.map((definition) => [definition.slot, definition.label]));
+    const chips = [];
+
+    if (appliedFilters?.date_from || appliedFilters?.date_to) {
+        chips.push({
+            icon: "📅",
+            text: appliedFilters?.date_from && appliedFilters?.date_to
+                ? `${appliedFilters.date_from} - ${appliedFilters.date_to}`
+                : appliedFilters?.date_from
+                    ? `開始日 ${appliedFilters.date_from}`
+                    : `終了日 ${appliedFilters.date_to}`,
+        });
+    } else {
+        chips.push({ icon: "📅", text: "全期間" });
+    }
+
+    FILTER_SLOT_KEYS.forEach((slot, index) => {
+        if (appliedFilters?.[slot]) {
+            chips.push({
+                icon: ["🏢", "👤", "🏷"][index] || "•",
+                text: `${labelMap.get(slot) || DEFAULT_FILTER_LABELS[slot]}: ${appliedFilters[slot]}`,
+            });
+        }
+    });
+
+    return chips;
+}
+
+function renderFilterChipBar(appliedFilters = {}, columnSettings = {}) {
+    if (!filterChipBar) {
+        return;
+    }
+
+    const chips = buildFilterChipItems(appliedFilters, columnSettings);
+    filterChipBar.innerHTML = `
+        <div class="dashboard-filter-chipbar-items">
+            ${chips.map((chip) => `
+                <span class="chip">
+                    <span>${escapeHtml(chip.icon)}</span>
+                    <span>${escapeHtml(chip.text)}</span>
+                    <span class="chip-close" aria-hidden="true">×</span>
+                </span>
+            `).join("")}
+            <button type="button" class="chip chip-secondary dashboard-filter-add">＋ フィルター追加</button>
+        </div>
+        <div class="dashboard-filter-chipbar-actions">
+            <span class="dashboard-filter-chipbar-note">${escapeHtml(buildAppliedFilterSummary(appliedFilters, columnSettings))}</span>
+        </div>
+    `;
+
+    filterChipBar.querySelector(".dashboard-filter-add")?.addEventListener("click", () => {
+        setSetupSectionOpen(true);
+        filterColumnRefs[1]?.columnSelect?.focus();
+    });
+}
+
 async function fetchDashboardSupplementPayload(runId, analysisKey) {
     const params = new URLSearchParams({
         row_limit: "0",
         include_dashboard: "true",
         include_impact: "false",
         include_root_cause: "false",
-        include_insights: "false",
+        include_insights: "true",
     });
     const response = await fetch(
         `/api/runs/${encodeURIComponent(runId)}/analyses/${encodeURIComponent(analysisKey)}?${params.toString()}`,
@@ -1400,6 +1489,7 @@ async function hydrateDashboardSupplement(runId, analyses = {}) {
     if (!runId || !analysisKey) {
         clearDashboardSupplement();
         updateSetupSummary(loadLatestResult(), null);
+        renderInsightPanel(null, "hidden");
         return;
     }
 
@@ -1410,6 +1500,7 @@ async function hydrateDashboardSupplement(runId, analyses = {}) {
         const latestResult = loadLatestResult();
         if (latestResult?.run_id === runId) {
             renderSummary(latestResult, currentDashboardSupplement);
+            renderInsightPanel(currentDashboardSupplement, "ready");
             updateSetupSummary(latestResult, currentDashboardSupplement);
         }
         return;
@@ -1429,12 +1520,14 @@ async function hydrateDashboardSupplement(runId, analyses = {}) {
             analysis_key: analysisKey,
             dashboard: payload.dashboard || {},
             impact: payload.impact || {},
+            insights: payload.insights || {},
         };
         saveDashboardSupplement(supplement);
 
         const latestResult = loadLatestResult();
         if (latestResult?.run_id === runId) {
             renderSummary(latestResult, supplement);
+            renderInsightPanel(supplement, "ready");
             updateSetupSummary(latestResult, supplement);
         }
     } catch {
@@ -1446,6 +1539,7 @@ async function hydrateDashboardSupplement(runId, analyses = {}) {
         const latestResult = loadLatestResult();
         if (latestResult?.run_id === runId) {
             renderSummary(latestResult, null);
+            renderInsightPanel(null, "error");
             updateSetupSummary(latestResult, null);
         }
     }
@@ -1455,56 +1549,75 @@ function renderSummary(data, supplement = currentDashboardSupplement) {
     if (!data) {
         summaryPanel.className = "summary-panel hidden";
         summaryPanel.innerHTML = "";
+        renderFilterChipBar();
         return;
     }
 
     const matchedSupplement = supplement?.run_id === data.run_id ? supplement : null;
     const dashboard = matchedSupplement?.dashboard || {};
-    const appliedFilterSummary = buildAppliedFilterSummary(data.applied_filters, data.column_settings);
-    const caseAndEventText = `${formatNumber(data.case_count)} / ${formatNumber(data.event_count)}`;
-    const caseAndEventSubtext = dashboard?.activity_type_count
-        ? `${formatNumber(dashboard.activity_type_count)} アクティビティ種別`
-        : `${formatNumber(Object.keys(data.analyses || {}).length)} 分析を表示`;
+    const diagnostics = currentProfilePayload?.diagnostics || {};
+    const activityTypeCount = dashboard?.activity_type_count || diagnostics?.activity_type_count || 0;
     const avgDurationText = dashboard?.avg_case_duration_text || "算出中";
     const avgDurationSubtext = dashboard?.median_case_duration_text
-        ? `中央値 ${dashboard.median_case_duration_text} / 最大 ${dashboard.max_case_duration_text}`
-        : "詳細要約を取得すると中央値と最大値を表示します。";
+        ? `中央値 ${dashboard.median_case_duration_text}`
+        : "中央値を集計中";
     const top10CoverageText = Number.isFinite(Number(dashboard?.top10_variant_coverage_pct))
         ? formatPercent(dashboard.top10_variant_coverage_pct, 1)
         : "算出中";
-    const top10CoverageSubtext = dashboard?.max_case_duration_text
-        ? `最長ケース処理時間 ${dashboard.max_case_duration_text}`
-        : "上位10パターンのカバー率を集計中です。";
-    const bottleneckHeadline = dashboard?.top_bottleneck_transition_label || "最大ボトルネックを集計中";
+    const top10CoverageSubtext = dashboard?.top_bottleneck_avg_wait_text
+        ? `改善対象 ${dashboard.top_bottleneck_avg_wait_text}`
+        : "上位10パターンを集計中";
+    const bottleneckHeadline = dashboard?.top_bottleneck_transition_label || "集計中";
     const bottleneckSubtext = dashboard?.top_bottleneck_avg_wait_text
-        ? `平均待ち時間 ${dashboard.top_bottleneck_avg_wait_text} / ${Number(dashboard.top_bottleneck_avg_wait_hours || 0).toFixed(2)} 時間`
-        : "要約の取得後に平均待ち時間を表示します。";
+        ? `平均 ${dashboard.top_bottleneck_avg_wait_text}`
+        : "平均待ち時間を算出中";
 
-    summaryPanel.className = "summary-panel dashboard-summary-panel";
+    renderFilterChipBar(data.applied_filters, data.column_settings);
+
+    summaryPanel.className = "summary-panel dashboard-summary-panel dashboard-summary-panel--kpi";
     summaryPanel.innerHTML = `
         <div class="dashboard-kpi-grid">
-            <article class="summary-card">
-                <span class="summary-label">ケース数 / イベント数</span>
-                <strong>${escapeHtml(caseAndEventText)}</strong>
-                <p class="dashboard-summary-sub">${escapeHtml(caseAndEventSubtext)}</p>
+            <article class="kpi-card dashboard-kpi-card">
+                <div class="kpi-icon dashboard-kpi-icon dashboard-kpi-icon--blue">📋</div>
+                <div>
+                    <div class="kpi-label">ケース数</div>
+                    <div class="kpi-value">${escapeHtml(formatNumber(data.case_count))}</div>
+                    <div class="kpi-sub">${escapeHtml(formatNumber(data.event_count))} イベント</div>
+                </div>
             </article>
-            <article class="summary-card">
-                <span class="summary-label">平均ケース処理時間</span>
-                <strong>${escapeHtml(avgDurationText)}</strong>
-                <p class="dashboard-summary-sub">${escapeHtml(avgDurationSubtext)}</p>
+            <article class="kpi-card dashboard-kpi-card">
+                <div class="kpi-icon dashboard-kpi-icon dashboard-kpi-icon--indigo">🔢</div>
+                <div>
+                    <div class="kpi-label">アクティビティ種類</div>
+                    <div class="kpi-value">${escapeHtml(formatNumber(activityTypeCount))}</div>
+                    <div class="kpi-sub">${escapeHtml(formatNumber(Object.keys(data.analyses || {}).length))} 分析を表示</div>
+                </div>
             </article>
-            <article class="summary-card">
-                <span class="summary-label">上位10パターン カバー率</span>
-                <strong>${escapeHtml(top10CoverageText)}</strong>
-                <p class="dashboard-summary-sub">${escapeHtml(top10CoverageSubtext)}</p>
+            <article class="kpi-card dashboard-kpi-card">
+                <div class="kpi-icon dashboard-kpi-icon dashboard-kpi-icon--emerald">⏱</div>
+                <div>
+                    <div class="kpi-label">平均スループット</div>
+                    <div class="kpi-value">${escapeHtml(avgDurationText)}</div>
+                    <div class="kpi-sub">${escapeHtml(avgDurationSubtext)}</div>
+                </div>
             </article>
-            <article class="summary-card summary-card--warning">
-                <span class="summary-label">最大ボトルネック</span>
-                <strong>${escapeHtml(bottleneckHeadline)}</strong>
-                <p class="dashboard-summary-sub">${escapeHtml(bottleneckSubtext)}</p>
+            <article class="kpi-card dashboard-kpi-card">
+                <div class="kpi-icon dashboard-kpi-icon dashboard-kpi-icon--amber">🎯</div>
+                <div>
+                    <div class="kpi-label">上位10パターンカバー率</div>
+                    <div class="kpi-value">${escapeHtml(top10CoverageText)}</div>
+                    <div class="kpi-sub">${escapeHtml(top10CoverageSubtext)}</div>
+                </div>
+            </article>
+            <article class="kpi-card dashboard-kpi-card dashboard-kpi-card--warning">
+                <div class="kpi-icon dashboard-kpi-icon dashboard-kpi-icon--rose">⚠️</div>
+                <div>
+                    <div class="kpi-label">最大ボトルネック</div>
+                    <div class="kpi-value dashboard-kpi-value--compact">${escapeHtml(bottleneckHeadline)}</div>
+                    <div class="kpi-sub">${escapeHtml(bottleneckSubtext)}</div>
+                </div>
             </article>
         </div>
-        <p class="dashboard-summary-note">適用条件: ${escapeHtml(appliedFilterSummary)}</p>
     `;
 }
 
@@ -1588,6 +1701,10 @@ function renderDashboard(data) {
         : null;
 
     renderSummary(normalizedData, matchedSupplement);
+    renderInsightPanel(
+        matchedSupplement,
+        normalizedData.run_id && !matchedSupplement ? "loading" : matchedSupplement ? "ready" : "hidden",
+    );
     renderAnalysisPanels(normalizedData.analyses, normalizedData.run_id || "");
     updateSetupSummary(normalizedData, matchedSupplement);
 
@@ -1609,6 +1726,7 @@ form.addEventListener("submit", async (event) => {
     syncSubmitState();
     setStatus("分析を実行しています...", "info");
     summaryPanel.className = "summary-panel hidden";
+    renderInsightPanel(null, "hidden");
     resultPanels.className = "result-stack";
     resultPanels.innerHTML = "";
 
@@ -1642,6 +1760,11 @@ setupToggleButton?.addEventListener("click", () => {
     setSetupSectionOpen(!setupSection?.classList.contains("is-open"));
 });
 
+setupSummaryOpenButton?.addEventListener("click", () => {
+    setSetupSectionOpen(true);
+    caseIdColumnSelect?.focus();
+});
+
 topExportDiagnosticsButton?.addEventListener("click", () => {
     void downloadLogDiagnosticsExcel();
 });
@@ -1662,21 +1785,24 @@ csvFileInput?.addEventListener("change", () => {
         element?.addEventListener("change", () => {
             hideStatus();
             updateSetupSummary(loadLatestResult(), currentDashboardSupplement);
+            renderFilterChipBar(loadLatestResult()?.applied_filters, loadLatestResult()?.column_settings);
             saveTopPageState();
             void refreshLogProfile();
         });
     });
 
 filterColumnRefs.forEach((filterRef) => {
-    filterRef.valueSelect?.addEventListener("change", () => {
-        hideStatus();
-        saveTopPageState();
+        filterRef.valueSelect?.addEventListener("change", () => {
+            hideStatus();
+            renderFilterChipBar(loadLatestResult()?.applied_filters, loadLatestResult()?.column_settings);
+            saveTopPageState();
+        });
     });
-});
 
 [analysisDateFromInput, analysisDateToInput].forEach((element) => {
     element?.addEventListener("change", () => {
         hideStatus();
+        renderFilterChipBar(loadLatestResult()?.applied_filters, loadLatestResult()?.column_settings);
         saveTopPageState();
     });
 });
@@ -1714,10 +1840,12 @@ resetFilterButton?.addEventListener("click", () => {
         filterSelectionNote.textContent = "分析対象条件ごとに対象列を設定すると、絞り込み値を選択できます。";
     }
     hideStatus();
+    renderFilterChipBar();
     saveTopPageState();
 });
 
 const latestResult = loadLatestResult();
+renderFilterChipBar(latestResult?.applied_filters, latestResult?.column_settings);
 if (latestResult) {
     renderDashboard(latestResult);
 }

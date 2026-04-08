@@ -35,7 +35,7 @@
                 </a>
                 <a class="dashboard-side-link" href="#setup-section">
                     <span class="dashboard-side-icon">◫</span>
-                    <span>詳細ビュー</span>
+                    <span>分析設定</span>
                 </a>
             </div>
 
@@ -59,35 +59,35 @@
                 <div class="dashboard-sidebar-label">ツール</div>
                 <a class="dashboard-side-link" href="#log-diagnostics-panel">
                     <span class="dashboard-side-icon">◎</span>
-                    <span>ログ管理</span>
+                    <span>ログ診断</span>
                 </a>
                 <a class="dashboard-side-link" href="#result-panels">
                     <span class="dashboard-side-icon">◌</span>
-                    <span>プレビュー</span>
+                    <span>分析プレビュー</span>
                 </a>
             </div>
         </aside>
 
         <main class="dashboard-main">
-            <div class="dashboard-main-shell">
+            <div class="dashboard-main-shell dashboard-main-shell--top">
                 <section class="dashboard-utility-bar">
                     <div class="dashboard-breadcrumb">ホーム / ダッシュボード / TOP画面</div>
-                    <div class="dashboard-utility-note">CSV設定と分析結果を一画面で比較できます。</div>
+                    <div class="dashboard-utility-note">CSV設定と分析結果を一画面で比較しながら、次の詳細確認先を判断できます。</div>
                 </section>
 
-                <section class="dashboard-title-row">
-                    <div class="dashboard-title-icon">📊</div>
+                <section class="dashboard-title-row dashboard-title-row--hero">
+                    <div class="dashboard-title-icon">▥</div>
                     <div class="dashboard-title-copy">
                         <h1>ダッシュボード</h1>
                         <p>
-                            CSV を読み込み、列マッピングと分析条件を設定して、頻度分析・前後処理分析・処理順パターン分析を一画面で比較できます。
-                            ファイル未選択時は <a href="#setup-section">{{ sample_file_name }}</a> をそのまま利用できます。
+                            CSV を読み込み、列マッピングと分析条件を設定して、頻度分析・前後処理分析・処理順パターン分析を比較します。
+                            現在は <a href="#setup-section">{{ sample_file_name }}</a> を基準に利用できます。
                         </p>
                     </div>
                 </section>
 
                 <form id="analyze-form" class="dashboard-form">
-                    <section id="setup-section" class="dashboard-card setup-accordion">
+                    <section id="setup-section" class="dashboard-card setup-accordion setup-accordion--summary">
                         <button
                             type="button"
                             id="setup-toggle-button"
@@ -97,9 +97,10 @@
                         >
                             <div class="setup-accordion-copy">
                                 <div class="setup-accordion-title-row">
-                                    <span class="setup-accordion-kicker">⚙</span>
-                                    <h2>分析設定</h2>
+                                    <span class="setup-accordion-kicker">SUMMARY</span>
+                                    <h2>分析設定サマリー</h2>
                                 </div>
+                                <p class="setup-accordion-note">ファイル・列マッピング・ログ診断の状況を1行で確認できます。</p>
                             </div>
                             <span class="setup-toggle-indicator" aria-hidden="true">▾</span>
                         </button>
@@ -108,6 +109,7 @@
                             <span id="setup-source-tag" class="setup-tag">ファイル: {{ sample_file_name }}</span>
                             <span id="setup-mapping-tag" class="setup-tag">列: case_id / activity / timestamp</span>
                             <span id="setup-volume-tag" class="setup-tag">件数: ログ診断未実行</span>
+                            <button type="button" id="setup-summary-open-button" class="setup-tag setup-tag--action">設定を変更</button>
                         </div>
 
                         <div id="setup-accordion-body" class="setup-accordion-body">
@@ -124,7 +126,7 @@
                                         <label class="upload-zone" for="csv-file-input">
                                             <input class="upload-input" type="file" name="csv_file" accept=".csv" id="csv-file-input">
                                             <div class="upload-title">ここに CSV をドロップ、またはクリックして選択</div>
-                                            <div class="upload-sub">UTF-8 推奨 / ヘッダー行あり / サンプルファイルも利用可能</div>
+                                            <div class="upload-sub">UTF-8 / ヘッダー行あり / サンプルファイルも利用可能</div>
                                         </label>
                                         <div class="upload-result">
                                             <div class="upload-result-icon">OK</div>
@@ -133,7 +135,7 @@
                                                 class="upload-result-copy hint"
                                                 data-source-file-name="{{ sample_file_name }}"
                                             >
-                                                現在は <code>{{ sample_file_name }}</code> の設定例を表示しています。
+                                                現在は <code>{{ sample_file_name }}</code> の設定を表示しています。
                                             </div>
                                         </div>
                                     </div>
@@ -177,7 +179,7 @@
                                             <div class="section-icon si-green">LOG</div>
                                             <div>
                                                 <h3>ログ診断</h3>
-                                                <p>件数、期間、欠損、重複の状況を分析前に確認できます。</p>
+                                                <p>件数、期間、欠損、重複の状況を分析前に確認します。</p>
                                             </div>
                                             <div class="section-head-actions diagnostics-head-actions">
                                                 <label class="diagnostics-export-settings" for="diagnostics-sample-limit-input">
@@ -197,9 +199,9 @@
                                         </div>
                                     </summary>
                                     <div class="setup-card-body">
-                                        <p class="section-note">分析前の確認用です。設定変更後もそのまま再診断できるため、欠損や重複を確認してから分析に進めます。</p>
+                                        <p class="section-note">ログ診断は読み込み済み設定をそのまま使用します。条件変更後の再確認にも使えます。</p>
                                         <div id="log-diagnostics-panel" class="diagnostics-panel">
-                                            <p class="empty-state">ログ診断を実行すると、件数・期間・欠損件数・列サマリーを表示します。</p>
+                                            <p class="empty-state">ログ診断を実行すると、件数、期間、欠損件数、重複状況、列サマリーを表示します。</p>
                                         </div>
                                     </div>
                                 </details>
@@ -209,14 +211,15 @@
 
                     <section class="dashboard-card dashboard-filter-panel">
                         <div class="section-head dashboard-filter-head">
-                            <div class="section-icon si-amber">🔎</div>
+                            <div class="section-icon si-amber">FLT</div>
                             <div class="section-head-copy">
-                                <div class="section-title">フィルター</div>
-                                <div class="section-desc">期間と属性条件で対象ケースを絞り込みます。</div>
+                                <div class="section-title">フィルターバー</div>
+                                <div class="section-desc">日付と属性条件を上部で確認しながら、そのまま分析を再実行できます。</div>
                             </div>
                         </div>
 
                         <div class="section-body">
+                            <div id="filter-chip-bar" class="dashboard-filter-chipbar"></div>
                             <div class="dashboard-filter-row dashboard-filter-row--primary">
                                 <label class="field">
                                     <span>開始日</span>
@@ -227,7 +230,7 @@
                                     <input type="date" name="date_to" id="analysis-date-to">
                                 </label>
                                 <label class="field">
-                                    <span id="filter-group-title-1">グループカテゴリ</span>
+                                    <span id="filter-group-title-1">追加フィルター 1</span>
                                     <select name="filter_column_1" id="filter-column-1-select">
                                         <option value="">未設定</option>
                                     </select>
@@ -290,6 +293,7 @@
 
                 <section id="status-panel" class="status-panel hidden"></section>
                 <section id="summary-panel" class="summary-panel hidden"></section>
+                <section id="insight-panel" class="dashboard-insight hidden"></section>
                 <section id="result-panels" class="result-stack"></section>
             </div>
         </main>
