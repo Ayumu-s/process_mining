@@ -141,7 +141,7 @@ def _duration_cell_value(value):
     return value if value is not None else "—"
 
 
-def _build_summary_sheet_df(group_summary, group_columns):
+def build_summary_sheet_df(group_summary, group_columns):
     """サマリーシート用DataFrameを構築する。"""
     meta = group_summary.get(GROUP_SUMMARY_META_KEY, {})
     rows = []
@@ -192,6 +192,10 @@ def _build_summary_sheet_df(group_summary, group_columns):
     return pd.concat([total_row_df, group_rows_df], ignore_index=True)
 
 
+def _build_summary_sheet_df(group_summary, group_columns):
+    return build_summary_sheet_df(group_summary, group_columns)
+
+
 def build_excel_bytes(
     df,
     sheet_name,
@@ -203,7 +207,7 @@ def build_excel_bytes(
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         # サマリーシート（グルーピングモード時のみ）
         if group_columns and group_summary:
-            summary_df = _build_summary_sheet_df(group_summary, group_columns)
+            summary_df = build_summary_sheet_df(group_summary, group_columns)
             summary_df.to_excel(writer, sheet_name="サマリー", index=False)
             _style_export_worksheet(writer.sheets["サマリー"])
 

@@ -24,7 +24,7 @@ from openpyxl.chart.label import DataLabelList
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from 共通スクリプト.Excel出力.excel_exporter import build_excel_bytes
+from 共通スクリプト.Excel出力.excel_exporter import build_excel_bytes, build_summary_sheet_df
 from 共通スクリプト.analysis_service import (
     DEFAULT_ANALYSIS_KEYS,
     FLOW_PATTERN_CASE_COUNT_COLUMN,
@@ -518,6 +518,14 @@ def get_run_data(run_id):
 def has_parquet_backing(run_data):
     prepared_parquet_path = run_data.get("prepared_parquet_path")
     return bool(prepared_parquet_path and Path(prepared_parquet_path).exists())
+
+
+def get_run_group_columns(run_data):
+    return list(
+        (run_data.get("result") or {}).get("group_columns")
+        or run_data.get("group_columns")
+        or []
+    )
 
 
 def get_run_variant_pattern(run_data, variant_id=None, pattern_index=None, filter_params=None):
@@ -2398,6 +2406,8 @@ def build_detail_summary_kpi_rows(
     dashboard_summary,
     impact_summary,
     bottleneck_summary,
+    prepared_df=None,
+    variant_items=None,
 ):
     normalized_analysis_key = str(analysis_key or "").strip().lower()
     top_row = analysis_rows[0] if analysis_rows else {}
@@ -2415,11 +2425,29 @@ def build_detail_summary_kpi_rows(
     ]
 
     if normalized_analysis_key == "frequency":
-        return common_rows + [
+        frequency_rows = common_rows + [
+            ("最大ケース処理時間", dashboard_summary.get("max_case_duration_text", "0s")),
             ("最多アクティビティ", top_row.get("アクティビティ", "該当なし") if top_row else "該当なし"),
             ("最多アクティビティ件数", normalize_excel_cell_value(top_row.get("イベント件数", 0)) if top_row else 0),
             ("上位10バリアントカバー率", f"{float(dashboard_summary.get('top10_variant_coverage_pct', 0.0)):.2f}%"),
         ]
+        if variant_items is not None:
+            frequency_rows.append(("バリアント総数", len(variant_items)))
+
+        unique_activity_count = dashboard_summary.get("unique_activity_count")
+        if unique_activity_count in (None, ""):
+            unique_activity_count = dashboard_summary.get("activity_type_count")
+        if unique_activity_count in (None, "") and prepared_df is not None and "activity" in prepared_df.columns:
+            unique_activity_count = int(prepared_df["activity"].nunique())
+        if unique_activity_count not in (None, ""):
+            frequency_rows.append(("ユニークアクティビティ数", int(unique_activity_count)))
+
+        total_cases = int(dashboard_summary.get("total_cases", 0) or 0)
+        total_records = int(dashboard_summary.get("total_records", 0) or 0)
+        if total_cases > 0:
+            frequency_rows.append(("平均ケースあたりイベント数", round(total_records / total_cases, 2)))
+
+        return frequency_rows
 
     if normalized_analysis_key == "transition":
         top_transition_label = (
@@ -2504,6 +2532,7 @@ def build_detail_export_workbook_bytes(
     analysis_definitions = get_available_analysis_definitions()
     analysis_name = analysis_definitions.get(analysis_key, {}).get("config", {}).get("analysis_name", analysis_key)
     export_sheet_keys = set(get_analysis_export_sheet_keys(analysis_key))
+    use_parquet_export = has_parquet_backing(run_data) and run_data.get("prepared_df") is None
     workbook = Workbook()
     summary_sheet = workbook.active
     summary_sheet.title = sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["summary"])
@@ -2514,7 +2543,7 @@ def build_detail_export_workbook_bytes(
         variant_id=variant_id,
         filter_params=filter_params,
     )
-    if has_parquet_backing(run_data):
+    if use_parquet_export:
         export_prepared_df = None
         filtered_meta = get_filtered_meta_for_run(
             run_data,
@@ -2628,8 +2657,18 @@ def build_detail_export_workbook_bytes(
 
     from_activity, to_activity = parse_transition_selection(selected_transition_key)
     selected_transition_label = f"{from_activity} → {to_activity}" if from_activity and to_activity else str(selected_transition_key or "").strip()
+    if use_parquet_export:
+        period_text = query_period_text(
+            run_data["prepared_parquet_path"],
+            filter_params=filter_params,
+            filter_column_settings=run_data.get("column_settings"),
+            variant_pattern=variant_pattern,
+        )
+    else:
+        period_text = build_prepared_df_period_text(export_prepared_df)
+    group_columns = get_run_group_columns(run_data)
+    grouping_text = "、".join(group_columns) if group_columns else "なし"
     summary_rows = [
-        (REPORT_HEADER_LABELS["run_id"], run_id),
         (REPORT_HEADER_LABELS["analysis_key"], analysis_key),
         (REPORT_HEADER_LABELS["analysis_name"], analysis_name),
         (REPORT_HEADER_LABELS["source_file_name"], run_data["source_file_name"]),
@@ -2638,12 +2677,19 @@ def build_detail_export_workbook_bytes(
         (REPORT_HEADER_LABELS["case_count"], filtered_meta["case_count"]),
         (REPORT_HEADER_LABELS["event_count"], filtered_meta["event_count"]),
         (REPORT_HEADER_LABELS["applied_filters"], build_filter_summary_text(filter_params, run_data.get("column_settings"))),
-        (REPORT_HEADER_LABELS["selected_activity"], selected_activity or "未選択"),
-        (REPORT_HEADER_LABELS["selected_transition"], selected_transition_label or "未選択"),
-        (REPORT_HEADER_LABELS["selected_case_id"], case_id or "未選択"),
+        ("分析期間", period_text),
+        ("グルーピング条件", grouping_text),
     ]
     if variant_id is not None:
-        summary_rows.insert(8, (REPORT_HEADER_LABELS["selected_variant"], f"#{variant_id}"))
+        summary_rows.append((REPORT_HEADER_LABELS["selected_variant"], f"#{variant_id}"))
+    if analysis_key != "frequency":
+        summary_rows.extend(
+            [
+                (REPORT_HEADER_LABELS["selected_activity"], selected_activity or "未選択"),
+                (REPORT_HEADER_LABELS["selected_transition"], selected_transition_label or "未選択"),
+                (REPORT_HEADER_LABELS["selected_case_id"], case_id or "未選択"),
+            ]
+        )
     next_row = append_key_value_rows(
         summary_sheet,
         REPORT_SHEET_NAMES["summary"],
@@ -2656,6 +2702,8 @@ def build_detail_export_workbook_bytes(
         dashboard_summary,
         impact_summary,
         bottleneck_summary,
+        prepared_df=export_prepared_df,
+        variant_items=export_variant_items,
     )
     next_row = append_key_value_rows(
         summary_sheet,
@@ -2664,13 +2712,25 @@ def build_detail_export_workbook_bytes(
         start_row=next_row,
         description=f"{analysis_name} で優先して見たい代表値をまとめています。",
     )
-    append_bullet_rows(
+    next_row = append_bullet_rows(
         summary_sheet,
-        "AIハイライト",
+        "分析ハイライト",
         ai_summary.get("highlights", []),
         start_row=next_row,
         column_count=4,
     )
+    if group_columns and export_prepared_df is not None:
+        group_summary = build_group_summary(export_prepared_df, group_columns)
+        if group_summary:
+            group_summary_df = build_summary_sheet_df(group_summary, group_columns)
+            next_row = append_table_to_worksheet(
+                summary_sheet,
+                "グループ別比較",
+                group_summary_df.to_dict(orient="records"),
+                list(group_summary_df.columns),
+                start_row=next_row + 2,
+                description="グルーピング条件ごとのケース数・処理時間の比較です。",
+            )
 
     ai_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["ai_insights"]))
     initialize_excel_worksheet(ai_sheet)
@@ -2909,7 +2969,7 @@ def build_detail_export_workbook_bytes(
         for pattern_rank, pattern_row in enumerate(selected_analysis.get("rows", [])[:pattern_detail_count], start=1):
             pattern_text = str(pattern_row.get(pattern_column_label) or "").strip()
             pattern_detail = None
-            if has_parquet_backing(run_data) and pattern_text:
+            if use_parquet_export and pattern_text:
                 pattern_detail = query_pattern_bottleneck_details(
                     run_data["prepared_parquet_path"],
                     pattern_text,
@@ -2992,7 +3052,7 @@ def build_detail_export_workbook_bytes(
     drilldown_title = REPORT_SHEET_NAMES["drilldown"]
     if from_activity and to_activity:
         drilldown_title = f"遷移ドリルダウン: {from_activity} → {to_activity}"
-        if has_parquet_backing(run_data):
+        if use_parquet_export:
             drilldown_rows = query_transition_case_drilldown(
                 run_data["prepared_parquet_path"],
                 from_activity=from_activity,
@@ -3011,7 +3071,7 @@ def build_detail_export_workbook_bytes(
             )
     elif selected_activity_name:
         drilldown_title = f"アクティビティドリルダウン: {selected_activity_name}"
-        if has_parquet_backing(run_data):
+        if use_parquet_export:
             drilldown_rows = query_activity_case_drilldown(
                 run_data["prepared_parquet_path"],
                 activity=selected_activity_name,
@@ -3043,7 +3103,7 @@ def build_detail_export_workbook_bytes(
 
     normalized_case_id = str(case_id or "").strip()
     if normalized_case_id:
-        if has_parquet_backing(run_data):
+        if use_parquet_export:
             case_trace = query_case_trace_details(
                 run_data["prepared_parquet_path"],
                 normalized_case_id,

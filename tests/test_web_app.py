@@ -34,6 +34,26 @@ class WebAppTestCase(unittest.TestCase):
             if worksheet.sheet_state == "visible"
         ]
 
+    def find_row_by_value(self, worksheet, value, column=1):
+        for row_index in range(1, worksheet.max_row + 1):
+            if worksheet.cell(row=row_index, column=column).value == value:
+                return row_index
+        raise AssertionError(f"value not found in worksheet column {column}: {value}")
+
+    def summary_section_pairs(self, worksheet, stop_label="主要KPI"):
+        pairs = {}
+        for row_index in range(1, worksheet.max_row + 1):
+            label = worksheet.cell(row=row_index, column=1).value
+            if label == stop_label:
+                break
+            if label in (None, "", "項目"):
+                continue
+            value = worksheet.cell(row=row_index, column=2).value
+            if value in (None, ""):
+                continue
+            pairs[label] = value
+        return pairs
+
     def analyze_uploaded_csv(self, csv_text, analysis_keys=None, extra_data=None):
         response = self.client.post(
             "/api/analyze",
@@ -341,13 +361,41 @@ class WebAppTestCase(unittest.TestCase):
         )
         summary_sheet = workbook["\u30b5\u30de\u30ea\u30fc"]
         self.assertEqual("\u30b5\u30de\u30ea\u30fc", summary_sheet["A1"].value)
-        self.assertEqual("\u5b9f\u884cID", summary_sheet["A4"].value)
-        self.assertEqual(run_id, summary_sheet["B4"].value)
-        self.assertEqual("\u9069\u7528\u6761\u4ef6", summary_sheet["A12"].value)
-        self.assertIn("Sales", str(summary_sheet["B12"].value))
+        summary_pairs = self.summary_section_pairs(summary_sheet)
+        self.assertNotIn("実行ID", summary_pairs)
+        self.assertEqual("pattern", summary_pairs["分析種別"])
+        self.assertEqual("処理順パターン分析", summary_pairs["分析名"])
+        self.assertIn("Sales", str(summary_pairs["適用条件"]))
+        self.assertEqual("2024-01-01 09:00 〜 2024-01-04 09:00", summary_pairs["分析期間"])
+        self.assertEqual("group_a、group_b、group_c", summary_pairs["グルーピング条件"])
+        self.assertEqual("Submit → Approve", summary_pairs["選択中遷移"])
+        self.assertEqual("C001", summary_pairs["選択中ケースID"])
         summary_values = [summary_sheet.cell(row=row_index, column=1).value for row_index in range(1, summary_sheet.max_row + 1)]
         self.assertIn("主要KPI", summary_values)
-        self.assertIn("AIハイライト", summary_values)
+        self.assertIn("分析ハイライト", summary_values)
+        self.assertIn("グループ別比較", summary_values)
+
+        group_table_row = self.find_row_by_value(summary_sheet, "グループ別比較")
+        group_headers = [
+            summary_sheet.cell(row=group_table_row + 2, column=column_index).value
+            for column_index in range(1, 11)
+        ]
+        self.assertEqual(
+            [
+                "グルーピング軸",
+                "値",
+                "ケース数",
+                "ケース比率(%)",
+                "イベント数",
+                "イベント比率(%)",
+                "平均処理時間(分)",
+                "中央値処理時間(分)",
+                "最大処理時間(分)",
+                "合計処理時間(分)",
+            ],
+            group_headers,
+        )
+        self.assertEqual("全体", summary_sheet.cell(row=group_table_row + 3, column=2).value)
 
         ai_sheet = workbook["AI\u89e3\u8aac"]
         self.assertEqual("AI\u89e3\u8aac", ai_sheet["A1"].value)
@@ -486,6 +534,22 @@ class WebAppTestCase(unittest.TestCase):
         )
 
         workbook = load_workbook(BytesIO(response.content))
+        summary_sheet = workbook["サマリー"]
+        summary_pairs = self.summary_section_pairs(summary_sheet)
+        summary_values = [
+            summary_sheet.cell(row=row_index, column=1).value
+            for row_index in range(1, summary_sheet.max_row + 1)
+        ]
+        self.assertNotIn("実行ID", summary_pairs)
+        self.assertNotIn("選択中アクティビティ", summary_pairs)
+        self.assertNotIn("選択中遷移", summary_pairs)
+        self.assertNotIn("選択中ケースID", summary_pairs)
+        self.assertEqual("なし", summary_pairs["グルーピング条件"])
+        self.assertEqual("分析ハイライト", summary_values[summary_values.index("分析ハイライト")])
+        self.assertIn("最大ケース処理時間", summary_values)
+        self.assertIn("バリアント総数", summary_values)
+        self.assertIn("ユニークアクティビティ数", summary_values)
+        self.assertIn("平均ケースあたりイベント数", summary_values)
         ai_sheet = workbook["AI\u89e3\u8aac"]
         self.assertEqual("分析期間", ai_sheet["A5"].value)
         self.assertIn("既存集計からの要約", str(ai_sheet["B7"].value))
@@ -541,6 +605,12 @@ class WebAppTestCase(unittest.TestCase):
             ["\u30b5\u30de\u30ea\u30fc", "AI\u89e3\u8aac", "\u524d\u5f8c\u51e6\u7406\u5206\u6790", "\u30dc\u30c8\u30eb\u30cd\u30c3\u30af\u5206\u6790", "\u6539\u5584\u30a4\u30f3\u30d1\u30af\u30c8\u5206\u6790", "\u30c9\u30ea\u30eb\u30c0\u30a6\u30f3"],
             self.visible_sheetnames(workbook),
         )
+        summary_sheet = workbook["サマリー"]
+        summary_pairs = self.summary_section_pairs(summary_sheet)
+        self.assertNotIn("実行ID", summary_pairs)
+        self.assertEqual("Submit → Approve", summary_pairs["選択中遷移"])
+        self.assertEqual("未選択", summary_pairs["選択中アクティビティ"])
+        self.assertEqual("未選択", summary_pairs["選択中ケースID"])
         self.assertNotIn("\u983b\u5ea6\u5206\u6790", workbook.sheetnames)
         self.assertNotIn("\u51e6\u7406\u9806\u30d1\u30bf\u30fc\u30f3\u5206\u6790", workbook.sheetnames)
         self.assertNotIn("\u30d0\u30ea\u30a2\u30f3\u30c8\u5206\u6790", workbook.sheetnames)
@@ -588,6 +658,58 @@ class WebAppTestCase(unittest.TestCase):
         self.assertTrue(all(row[4] not in (None, "") for row in transition_data_rows))
         self.assertTrue(all(row[5] not in (None, "") for row in transition_data_rows))
         self.assertTrue(all(row[6] not in (None, "") for row in transition_data_rows))
+
+    def test_report_excel_export_parquet_mode_skips_group_comparison_without_error(self):
+        with mock.patch.object(web_app, "PARQUET_ONLY_PREPARED_DF_THRESHOLD", 1):
+            run_id = self.analyze_uploaded_csv(
+                "\n".join(
+                    [
+                        "case_id,activity,start_time,group_a,group_b,group_c",
+                        "C001,Submit,2024-01-01 09:00:00,Sales,Web,A",
+                        "C001,Approve,2024-01-02 09:00:00,Sales,Web,A",
+                        "C002,Submit,2024-01-03 09:00:00,HR,Mail,B",
+                        "C002,Reject,2024-01-04 09:00:00,HR,Mail,B",
+                    ]
+                ),
+                analysis_keys=["frequency"],
+                extra_data={
+                    "filter_column_1": "group_a",
+                    "filter_column_2": "group_b",
+                    "filter_column_3": "group_c",
+                },
+            )
+
+        run_data = web_app.get_run_data(run_id)
+        self.assertIsNone(run_data["prepared_df"])
+
+        with mock.patch(
+            "web_app.build_excel_ai_summary",
+            return_value={
+                "title": "AI解説",
+                "mode": "ollama",
+                "provider": "Ollama (qwen2.5:7b)",
+                "generated_at": "2026-04-02T00:00:00+00:00",
+                "period": "2024-01-01 09:00 〜 2024-01-04 09:00",
+                "text": "既存集計からの要約です。",
+                "highlights": ["頻度の高い活動を確認してください。"],
+                "note": "ローカルLLMで生成した解説を掲載しています。",
+            },
+        ):
+            response = self.client.get(
+                f"/api/runs/{run_id}/report-excel?analysis_key=frequency"
+            )
+
+        self.assertEqual(200, response.status_code)
+        workbook = load_workbook(BytesIO(response.content))
+        summary_sheet = workbook["サマリー"]
+        summary_pairs = self.summary_section_pairs(summary_sheet)
+        summary_values = [
+            summary_sheet.cell(row=row_index, column=1).value
+            for row_index in range(1, summary_sheet.max_row + 1)
+        ]
+        self.assertEqual("group_a、group_b、group_c", summary_pairs["グルーピング条件"])
+        self.assertIn("分析ハイライト", summary_values)
+        self.assertNotIn("グループ別比較", summary_values)
 
     def test_ai_insights_api_restores_cached_output_across_page_reload(self):
         run_id = self.analyze_uploaded_csv(
