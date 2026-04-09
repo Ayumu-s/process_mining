@@ -684,7 +684,147 @@ class WebAppTestCase(unittest.TestCase):
         self.assertTrue(all(row[5] not in (None, "") for row in transition_data_rows))
         self.assertTrue(all(row[6] not in (None, "") for row in transition_data_rows))
 
-    def test_report_excel_export_parquet_mode_skips_group_comparison_without_error(self):
+    def test_query_group_summary_matches_build_group_summary_for_parquet(self):
+        run_id = self.analyze_uploaded_csv(
+            "\n".join(
+                [
+                    "case_id,activity,start_time,group_a,group_b",
+                    "C001,Submit,2024-01-01 09:00:00,Sales,Web",
+                    "C001,Approve,2024-01-02 09:00:00,Sales,Web",
+                    "C002,Submit,2024-01-03 09:00:00,Sales,API",
+                    "C002,Approve,2024-01-04 09:00:00,Sales,API",
+                    "C003,Submit,2024-01-05 09:00:00,HR,Mail",
+                    "C003,Reject,2024-01-06 09:00:00,HR,Mail",
+                ]
+            ),
+            analysis_keys=["frequency"],
+            extra_data={
+                "filter_column_1": "group_a",
+                "filter_column_2": "group_b",
+            },
+        )
+
+        run_data = web_app.get_run_data(run_id)
+        expected = web_app.build_group_summary(run_data["prepared_df"], ["group_a", "group_b"])
+        actual = web_app.query_group_summary(
+            run_data["prepared_parquet_path"],
+            ["group_a", "group_b"],
+        )
+        self.assertEqual(expected, actual)
+
+    def test_report_excel_export_api_groups_frequency_sheet_sections_in_memory_mode(self):
+        run_id = self.analyze_uploaded_csv(
+            "\n".join(
+                [
+                    "case_id,activity,start_time,group_a,group_b",
+                    "C001,Submit,2024-01-01 09:00:00,Sales,Web",
+                    "C001,Approve,2024-01-02 09:00:00,Sales,Web",
+                    "C002,Submit,2024-01-03 09:00:00,Sales,API",
+                    "C002,Approve,2024-01-04 09:00:00,Sales,API",
+                    "C003,Submit,2024-01-05 09:00:00,Sales,Web",
+                    "C003,Approve,2024-01-06 09:00:00,Sales,Web",
+                    "C004,Submit,2024-01-07 09:00:00,HR,Mail",
+                    "C004,Reject,2024-01-08 09:00:00,HR,Mail",
+                    "C005,Submit,2024-01-09 09:00:00,HR,Mail",
+                    "C005,Approve,2024-01-10 09:00:00,HR,Mail",
+                    "C006,Submit,2024-01-11 09:00:00,,Tokyo",
+                    "C006,Approve,2024-01-12 09:00:00,,Tokyo",
+                ]
+            ),
+            analysis_keys=["frequency"],
+            extra_data={
+                "filter_column_1": "group_a",
+            },
+        )
+
+        with mock.patch(
+            "web_app.build_excel_ai_summary",
+            return_value={
+                "title": "AI解説",
+                "mode": "ollama",
+                "provider": "Ollama (qwen2.5:7b)",
+                "generated_at": "2026-04-09T00:00:00+00:00",
+                "period": "2024-01-01 09:00 〜 2024-01-12 09:00",
+                "text": "既存集計からの要約です。",
+                "highlights": ["頻度の高い活動を確認してください。"],
+                "note": "ローカルLLMで生成した解説を掲載しています。",
+            },
+        ):
+            response = self.client.get(
+                f"/api/runs/{run_id}/report-excel?analysis_key=frequency"
+            )
+
+        self.assertEqual(200, response.status_code)
+        workbook = load_workbook(BytesIO(response.content))
+        frequency_sheet = workbook["頻度分析"]
+        self.assertEqual("═══ 全体 ═══", frequency_sheet["A1"].value)
+        self.assertEqual(True, frequency_sheet["A1"].font.bold)
+        self.assertEqual(12, frequency_sheet["A1"].font.size)
+        self.assertTrue(str(frequency_sheet["A1"].fill.fgColor.rgb).endswith("D9E1F2"))
+        self.assertEqual("順位", frequency_sheet["A2"].value)
+        group_header_rows = [
+            row_index
+            for row_index in range(1, frequency_sheet.max_row + 1)
+            if str(frequency_sheet.cell(row=row_index, column=1).value or "").startswith("═══ グループ:")
+        ]
+        self.assertEqual(
+            [
+                "═══ グループ: Sales ═══",
+                "═══ グループ: HR ═══",
+                "═══ グループ: (未分類) ═══",
+            ],
+            [frequency_sheet.cell(row=row_index, column=1).value for row_index in group_header_rows],
+        )
+        first_group_row = group_header_rows[0]
+        self.assertTrue(all((frequency_sheet.cell(row=first_group_row - offset, column=1).value in (None, "")) for offset in (1, 2, 3)))
+
+    def test_report_excel_export_api_groups_frequency_sheet_sections_for_multiple_axes(self):
+        run_id = self.analyze_uploaded_csv(
+            "\n".join(
+                [
+                    "case_id,activity,start_time,group_a,group_b,group_c",
+                    "C001,Submit,2024-01-01 09:00:00,Sales,Web,A",
+                    "C001,Approve,2024-01-02 09:00:00,Sales,Web,A",
+                    "C002,Submit,2024-01-03 09:00:00,HR,Mail,B",
+                    "C002,Reject,2024-01-04 09:00:00,HR,Mail,B",
+                ]
+            ),
+            analysis_keys=["frequency"],
+            extra_data={
+                "filter_column_1": "group_a",
+                "filter_column_2": "group_b",
+            },
+        )
+
+        with mock.patch(
+            "web_app.build_excel_ai_summary",
+            return_value={
+                "title": "AI解説",
+                "mode": "ollama",
+                "provider": "Ollama (qwen2.5:7b)",
+                "generated_at": "2026-04-09T00:00:00+00:00",
+                "period": "2024-01-01 09:00 〜 2024-01-04 09:00",
+                "text": "既存集計からの要約です。",
+                "highlights": ["頻度の高い活動を確認してください。"],
+                "note": "ローカルLLMで生成した解説を掲載しています。",
+            },
+        ):
+            response = self.client.get(
+                f"/api/runs/{run_id}/report-excel?analysis_key=frequency"
+            )
+
+        self.assertEqual(200, response.status_code)
+        workbook = load_workbook(BytesIO(response.content))
+        frequency_sheet = workbook["頻度分析"]
+        group_headers = [
+            frequency_sheet.cell(row=row_index, column=1).value
+            for row_index in range(1, frequency_sheet.max_row + 1)
+            if str(frequency_sheet.cell(row=row_index, column=1).value or "").startswith("═══ グループ:")
+        ]
+        self.assertIn("═══ グループ: group_a=Sales, group_b=Web ═══", group_headers)
+        self.assertIn("═══ グループ: group_a=HR, group_b=Mail ═══", group_headers)
+
+    def test_report_excel_export_parquet_mode_includes_group_comparison_and_skips_group_sections(self):
         with mock.patch.object(web_app, "PARQUET_ONLY_PREPARED_DF_THRESHOLD", 1):
             run_id = self.analyze_uploaded_csv(
                 "\n".join(
@@ -734,7 +874,18 @@ class WebAppTestCase(unittest.TestCase):
         ]
         self.assertEqual("group_a、group_b、group_c", summary_pairs["グルーピング条件"])
         self.assertIn("分析ハイライト", summary_values)
-        self.assertNotIn("グループ別比較", summary_values)
+        self.assertIn("グループ別比較", summary_values)
+        group_table_row = self.find_row_by_value(summary_sheet, "グループ別比較")
+        self.assertEqual("全体", summary_sheet.cell(row=group_table_row + 3, column=2).value)
+
+        frequency_sheet = workbook["頻度分析"]
+        self.assertEqual("═══ 全体 ═══", frequency_sheet["A1"].value)
+        parquet_group_headers = [
+            frequency_sheet.cell(row=row_index, column=1).value
+            for row_index in range(1, frequency_sheet.max_row + 1)
+            if str(frequency_sheet.cell(row=row_index, column=1).value or "").startswith("═══ グループ:")
+        ]
+        self.assertEqual([], parquet_group_headers)
 
     def test_ai_insights_api_restores_cached_output_across_page_reload(self):
         run_id = self.analyze_uploaded_csv(

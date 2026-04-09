@@ -64,6 +64,7 @@ from 共通スクリプト.duckdb_service import (
     query_case_trace_details,
     query_dashboard_summary,
     query_filtered_meta,
+    query_group_summary,
     query_impact_summary,
     query_pattern_bottleneck_details,
     query_period_text,
@@ -201,6 +202,7 @@ EXCEL_TITLE_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
 EXCEL_TITLE_FONT = Font(bold=True, size=14, color="FFFFFF")
 EXCEL_SUBTITLE_FILL = PatternFill(fill_type="solid", fgColor="EFF5FB")
 EXCEL_SECTION_FILL = PatternFill(fill_type="solid", fgColor="D9E7F6")
+EXCEL_GROUP_SECTION_FILL = PatternFill(fill_type="solid", fgColor="D9E1F2")
 EXCEL_HEADER_FILL = PatternFill(fill_type="solid", fgColor="EDF2F7")
 EXCEL_LABEL_FILL = PatternFill(fill_type="solid", fgColor="F8FAFC")
 EXCEL_ALT_ROW_FILL = PatternFill(fill_type="solid", fgColor="FBFDFF")
@@ -221,6 +223,7 @@ EXCEL_MUTED_FONT = Font(size=10, color="5B6B82")
 EXCEL_NOTE_FONT = Font(size=9, color="5B6B82")
 EXCEL_BODY_FONT = Font(size=10, color="1F2937")
 EXCEL_BOLD_FONT = Font(bold=True, size=10, color="1F2937")
+EXCEL_GROUP_SECTION_FONT = Font(bold=True, size=12, color="1F2937")
 
 DEFAULT_HEADERS = {
     "case_id_column": "case_id",
@@ -1231,6 +1234,117 @@ def build_ranked_rows(rows, rank_key="rank"):
             **row,
         })
     return ranked_rows
+
+
+def _normalize_group_section_value(value):
+    if pd.isna(value):
+        return "(未分類)"
+    normalized_value = str(value).strip()
+    return normalized_value or "(未分類)"
+
+
+def _write_section_header(worksheet, row_index, title, column_count=10):
+    safe_column_count = max(10, int(column_count or 10))
+    for column_index in range(1, safe_column_count + 1):
+        header_cell = worksheet.cell(row=row_index, column=column_index)
+        if column_index == 1:
+            header_cell.value = f"═══ {title} ═══"
+            font = EXCEL_GROUP_SECTION_FONT
+            alignment = Alignment(horizontal="left", vertical="center")
+        else:
+            font = EXCEL_GROUP_SECTION_FONT
+            alignment = Alignment(horizontal="left", vertical="center")
+        style_excel_cell(
+            header_cell,
+            font=font,
+            fill=EXCEL_GROUP_SECTION_FILL,
+            alignment=alignment,
+            border=EXCEL_THIN_BORDER,
+        )
+    worksheet.row_dimensions[row_index].height = 22
+    return row_index + 1
+
+
+def _iter_groups(prepared_df, grouping_columns):
+    valid_columns = [column_name for column_name in (grouping_columns or []) if column_name in prepared_df.columns]
+    if not valid_columns or prepared_df.empty:
+        return
+
+    working_df = prepared_df.copy()
+    for column_name in valid_columns:
+        working_df[column_name] = working_df[column_name].apply(_normalize_group_section_value)
+
+    grouped_entries = []
+    for group_key, group_df in working_df.groupby(valid_columns, dropna=False, sort=False):
+        normalized_key = group_key if isinstance(group_key, tuple) else (group_key,)
+        if len(valid_columns) == 1:
+            group_name = str(normalized_key[0])
+        else:
+            group_name = ", ".join(
+                f"{column_name}={value}"
+                for column_name, value in zip(valid_columns, normalized_key)
+            )
+        case_count = int(group_df["case_id"].nunique()) if "case_id" in group_df.columns else int(len(group_df))
+        grouped_entries.append((case_count, group_name, group_df.copy()))
+
+    for _, group_name, group_df in sorted(grouped_entries, key=lambda item: (-item[0], item[1])):
+        yield group_name, group_df
+
+
+def _write_frequency_data(worksheet, rows, start_row):
+    frequency_rows = build_ranked_rows(rows or [], rank_key=REPORT_HEADER_LABELS["rank"])
+    frequency_headers = list(frequency_rows[0].keys()) if frequency_rows else [REPORT_HEADER_LABELS["rank"]]
+    header_row = start_row
+    for column_index, header in enumerate(frequency_headers, start=1):
+        header_cell = worksheet.cell(row=header_row, column=column_index, value=header)
+        style_excel_cell(
+            header_cell,
+            font=EXCEL_BOLD_FONT,
+            fill=EXCEL_HEADER_FILL,
+            alignment=Alignment(horizontal="center", vertical="center", wrap_text=True),
+            border=EXCEL_THIN_BORDER,
+        )
+    worksheet.row_dimensions[header_row].height = 22
+
+    if not frequency_rows:
+        merge_excel_row(worksheet, header_row + 1, len(frequency_headers))
+        empty_cell = worksheet.cell(row=header_row + 1, column=1, value="表示できるデータがありません。")
+        style_excel_cell(
+            empty_cell,
+            font=EXCEL_MUTED_FONT,
+            fill=EXCEL_LABEL_FILL,
+            alignment=Alignment(wrap_text=True, vertical="center"),
+            border=EXCEL_THIN_BORDER,
+        )
+        worksheet.row_dimensions[header_row + 1].height = 22
+        return header_row + 3
+
+    data_start_row = header_row + 1
+    current_row = data_start_row
+    for row_index, row in enumerate(frequency_rows, start=0):
+        fill = EXCEL_ALT_ROW_FILL if row_index % 2 else None
+        for column_index, header in enumerate(frequency_headers, start=1):
+            body_cell = worksheet.cell(
+                row=current_row,
+                column=column_index,
+                value=normalize_excel_cell_value(row.get(header)),
+            )
+            style_excel_cell(
+                body_cell,
+                font=EXCEL_BODY_FONT,
+                fill=fill,
+                alignment=Alignment(wrap_text=True, vertical="top"),
+                border=EXCEL_THIN_BORDER,
+            )
+        worksheet.row_dimensions[current_row].height = 20
+        current_row += 1
+
+    if not worksheet.freeze_panes:
+        worksheet.freeze_panes = f"A{data_start_row}"
+    if not worksheet.auto_filter.ref:
+        worksheet.auto_filter.ref = f"A{header_row}:{get_column_letter(len(frequency_headers))}{current_row - 1}"
+
+    return current_row + 1
 
 
 def localize_report_headers(headers):
@@ -2757,8 +2871,17 @@ def build_detail_export_workbook_bytes(
         start_row=next_row,
         column_count=4,
     )
-    if group_columns and export_prepared_df is not None:
-        group_summary = build_group_summary(export_prepared_df, group_columns)
+    if group_columns:
+        if export_prepared_df is not None:
+            group_summary = build_group_summary(export_prepared_df, group_columns)
+        else:
+            group_summary = query_group_summary(
+                run_data["prepared_parquet_path"],
+                group_columns,
+                filter_params=filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+                variant_pattern=variant_pattern,
+            )
         if group_summary:
             group_summary_df = build_summary_sheet_df(group_summary, group_columns)
             next_row = append_table_to_worksheet(
@@ -2802,15 +2925,58 @@ def build_detail_export_workbook_bytes(
     if "frequency" in export_sheet_keys:
         frequency_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["frequency"]))
         initialize_excel_worksheet(frequency_sheet)
-        frequency_rows = build_ranked_rows(selected_analysis["rows"], rank_key=REPORT_HEADER_LABELS["rank"])
-        frequency_headers = list(frequency_rows[0].keys()) if frequency_rows else [REPORT_HEADER_LABELS["rank"]]
-        append_table_to_worksheet(
-            frequency_sheet,
-            REPORT_SHEET_NAMES["frequency"],
-            frequency_rows,
-            frequency_headers,
-            description="アクティビティごとの件数、ケース数、処理時間の代表値を確認できます。",
-        )
+        if not group_columns:
+            frequency_rows = build_ranked_rows(selected_analysis["rows"], rank_key=REPORT_HEADER_LABELS["rank"])
+            frequency_headers = list(frequency_rows[0].keys()) if frequency_rows else [REPORT_HEADER_LABELS["rank"]]
+            append_table_to_worksheet(
+                frequency_sheet,
+                REPORT_SHEET_NAMES["frequency"],
+                frequency_rows,
+                frequency_headers,
+                description="アクティビティごとの件数、ケース数、処理時間の代表値を確認できます。",
+            )
+        else:
+            if use_parquet_export:
+                overall_frequency_rows = query_analysis_records(
+                    run_data["prepared_parquet_path"],
+                    "frequency",
+                    filter_params=filter_params,
+                    filter_column_settings=run_data.get("column_settings"),
+                    variant_pattern=variant_pattern,
+                )["rows"]
+            else:
+                overall_frequency_rows = create_analysis_records(export_prepared_df, "frequency")["rows"]
+
+            current_row = 1
+            max_frequency_columns = max(10, len(overall_frequency_rows[0]) + 1 if overall_frequency_rows else 10)
+            current_row = _write_section_header(
+                frequency_sheet,
+                current_row,
+                "全体",
+                column_count=max_frequency_columns,
+            )
+            current_row = _write_frequency_data(
+                frequency_sheet,
+                overall_frequency_rows,
+                current_row,
+            )
+
+            if export_prepared_df is not None:
+                for group_name, group_df in _iter_groups(export_prepared_df, group_columns):
+                    current_row += 3
+                    group_frequency_rows = create_analysis_records(group_df, "frequency")["rows"]
+                    group_column_count = max(10, len(group_frequency_rows[0]) + 1 if group_frequency_rows else max_frequency_columns)
+                    current_row = _write_section_header(
+                        frequency_sheet,
+                        current_row,
+                        f"グループ: {group_name}",
+                        column_count=group_column_count,
+                    )
+                    current_row = _write_frequency_data(
+                        frequency_sheet,
+                        group_frequency_rows,
+                        current_row,
+                    )
 
     if "transition" in export_sheet_keys:
         transition_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["transition"]))
