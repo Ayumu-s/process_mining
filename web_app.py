@@ -186,6 +186,14 @@ REPORT_HEADER_LABELS = {
     "start_time": "開始時刻",
     "end_time": "終了時刻",
 }
+APPLIED_FILTERS_NOTE_TEXT = "\n".join(
+    [
+        "※ 適用条件の種類:",
+        "  • 期間フィルター: 開始日 / 終了日",
+        "  • グループ/カテゴリーフィルター①②③: CSVの任意カラムで絞り込み（例: 部署=営業部）",
+        "  • アクティビティフィルター: 特定アクティビティを含む/除外",
+    ]
+)
 EXCEL_TITLE_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
 EXCEL_TITLE_FONT = Font(bold=True, size=14, color="FFFFFF")
 EXCEL_SUBTITLE_FILL = PatternFill(fill_type="solid", fgColor="EFF5FB")
@@ -1068,24 +1076,48 @@ def append_key_value_rows(worksheet, title, rows, start_row=1, description=""):
     current_row += 1
 
     data_start_row = current_row
-    for row_index, (label, value) in enumerate(rows, start=0):
+    for row_index, row in enumerate(rows, start=0):
+        if isinstance(row, dict):
+            label = row.get("label", "")
+            value = row.get("value", "")
+            row_style = row.get("style", "default")
+        else:
+            label, value = row
+            row_style = "default"
         fill = EXCEL_ALT_ROW_FILL if row_index % 2 else None
         label_cell = worksheet.cell(row=current_row, column=1, value=label)
         value_cell = worksheet.cell(row=current_row, column=2, value=normalize_excel_cell_value(value))
-        style_excel_cell(
-            label_cell,
-            font=EXCEL_BOLD_FONT,
-            fill=EXCEL_LABEL_FILL if fill is None else fill,
-            alignment=Alignment(vertical="top", wrap_text=True),
-            border=EXCEL_THIN_BORDER,
-        )
-        style_excel_cell(
-            value_cell,
-            font=EXCEL_BODY_FONT,
-            fill=fill,
-            alignment=Alignment(vertical="top", wrap_text=True),
-            border=EXCEL_THIN_BORDER,
-        )
+        if row_style == "note":
+            note_fill = EXCEL_SUBTITLE_FILL if fill is None else fill
+            style_excel_cell(
+                label_cell,
+                font=EXCEL_MUTED_FONT,
+                fill=note_fill,
+                alignment=Alignment(vertical="top", wrap_text=True),
+                border=EXCEL_THIN_BORDER,
+            )
+            style_excel_cell(
+                value_cell,
+                font=EXCEL_MUTED_FONT,
+                fill=note_fill,
+                alignment=Alignment(vertical="top", wrap_text=True),
+                border=EXCEL_THIN_BORDER,
+            )
+        else:
+            style_excel_cell(
+                label_cell,
+                font=EXCEL_BOLD_FONT,
+                fill=EXCEL_LABEL_FILL if fill is None else fill,
+                alignment=Alignment(vertical="top", wrap_text=True),
+                border=EXCEL_THIN_BORDER,
+            )
+            style_excel_cell(
+                value_cell,
+                font=EXCEL_BODY_FONT,
+                fill=fill,
+                alignment=Alignment(vertical="top", wrap_text=True),
+                border=EXCEL_THIN_BORDER,
+            )
         worksheet.row_dimensions[current_row].height = max(
             20,
             estimate_wrapped_row_height(value, 1, min_height=20, max_height=120),
@@ -2677,6 +2709,7 @@ def build_detail_export_workbook_bytes(
         (REPORT_HEADER_LABELS["case_count"], filtered_meta["case_count"]),
         (REPORT_HEADER_LABELS["event_count"], filtered_meta["event_count"]),
         (REPORT_HEADER_LABELS["applied_filters"], build_filter_summary_text(filter_params, run_data.get("column_settings"))),
+        {"label": "", "value": APPLIED_FILTERS_NOTE_TEXT, "style": "note"},
         ("分析期間", period_text),
         ("グルーピング条件", grouping_text),
     ]
