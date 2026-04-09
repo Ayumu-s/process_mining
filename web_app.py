@@ -194,6 +194,9 @@ APPLIED_FILTERS_NOTE_TEXT = "\n".join(
         "  • アクティビティフィルター: 特定アクティビティを含む/除外",
     ]
 )
+GROUPING_CONDITION_NOTE_TEXT = (
+    "※ カラムを選択し値を未選択にすると、そのカラムがグルーピング軸（比較用）になります"
+)
 EXCEL_TITLE_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
 EXCEL_TITLE_FONT = Font(bold=True, size=14, color="FFFFFF")
 EXCEL_SUBTITLE_FILL = PatternFill(fill_type="solid", fgColor="EFF5FB")
@@ -215,6 +218,7 @@ EXCEL_THIN_BORDER = Border(
     bottom=Side(style="thin", color="D6DEE8"),
 )
 EXCEL_MUTED_FONT = Font(size=10, color="5B6B82")
+EXCEL_NOTE_FONT = Font(size=9, color="5B6B82")
 EXCEL_BODY_FONT = Font(size=10, color="1F2937")
 EXCEL_BOLD_FONT = Font(bold=True, size=10, color="1F2937")
 
@@ -1091,14 +1095,14 @@ def append_key_value_rows(worksheet, title, rows, start_row=1, description=""):
             note_fill = EXCEL_SUBTITLE_FILL if fill is None else fill
             style_excel_cell(
                 label_cell,
-                font=EXCEL_MUTED_FONT,
+                font=EXCEL_NOTE_FONT,
                 fill=note_fill,
                 alignment=Alignment(vertical="top", wrap_text=True),
                 border=EXCEL_THIN_BORDER,
             )
             style_excel_cell(
                 value_cell,
-                font=EXCEL_MUTED_FONT,
+                font=EXCEL_NOTE_FONT,
                 fill=note_fill,
                 alignment=Alignment(vertical="top", wrap_text=True),
                 border=EXCEL_THIN_BORDER,
@@ -2712,6 +2716,7 @@ def build_detail_export_workbook_bytes(
         {"label": "", "value": APPLIED_FILTERS_NOTE_TEXT, "style": "note"},
         ("分析期間", period_text),
         ("グルーピング条件", grouping_text),
+        {"label": "", "value": GROUPING_CONDITION_NOTE_TEXT, "style": "note"},
     ]
     if variant_id is not None:
         summary_rows.append((REPORT_HEADER_LABELS["selected_variant"], f"#{variant_id}"))
