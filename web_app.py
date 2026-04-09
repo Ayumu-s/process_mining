@@ -104,7 +104,7 @@ FILTER_COLUMN_NAMES = ("filter_column_1", "filter_column_2", "filter_column_3")
 FILTER_LABEL_NAMES = ("filter_label_1", "filter_label_2", "filter_label_3")
 REPORT_SHEET_NAMES = {
     "summary": "サマリー",
-    "ai_insights": "AI解説",
+    "ai_insights": "分析コメント",
     "pattern_conclusion": "結論サマリー",
     "pattern_dashboard": "サマリーダッシュボード",
     "frequency": "頻度分析",
@@ -3061,13 +3061,6 @@ def build_detail_export_workbook_bytes(
         ai_sheet,
         "解説本文",
         ai_summary.get("text", ""),
-        start_row=next_row,
-        column_count=6,
-    )
-    next_row = append_bullet_rows(
-        ai_sheet,
-        "要点一覧",
-        ai_summary.get("highlights", []),
         start_row=next_row,
         column_count=6,
     )

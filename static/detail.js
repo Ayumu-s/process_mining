@@ -94,7 +94,7 @@ function buildAiInsightsApiUrl(runId, filters = activeDetailFilters, forceRefres
 async function loadAiInsightsState(runId, filters = activeDetailFilters) {
     return fetchJson(
         buildAiInsightsApiUrl(runId, filters),
-        "AI解説の状態を読み込めませんでした。",
+        "分析コメントの状態を読み込めませんでした。",
         10000
     );
 }
@@ -105,7 +105,7 @@ async function generateAiInsights(runId, filters = activeDetailFilters, forceRef
     });
     const payload = await response.json();
     if (!response.ok) {
-        throw new Error(payload.detail || payload.error || "AI解説を生成できませんでした。");
+        throw new Error(payload.detail || payload.error || "分析コメントを生成できませんでした。");
     }
     return payload;
 }
@@ -122,7 +122,7 @@ function renderAiInsightsPayload(payload, analysisName = "") {
     }
 
     const resolvedAnalysisName = payload?.analysis_name || analysisName || detailPageTitle?.textContent?.trim() || "";
-    aiInsightsTitle.textContent = resolvedAnalysisName ? `${resolvedAnalysisName} AI解説` : "AI解説";
+    aiInsightsTitle.textContent = resolvedAnalysisName ? `${resolvedAnalysisName} 分析コメント` : "分析コメント";
 
     if (!payload?.generated) {
         currentAiInsightsPayload = payload || null;
@@ -131,7 +131,7 @@ function renderAiInsightsPayload(payload, analysisName = "") {
         aiInsightsOutput.textContent = "";
         aiInsightsOutput.classList.add("hidden");
         aiInsightsButton.disabled = false;
-        aiInsightsButton.textContent = "AI解説を生成";
+        aiInsightsButton.textContent = "分析コメントを生成";
         setAiInsightsChip("未生成", "idle");
         return;
     }
@@ -143,7 +143,7 @@ function renderAiInsightsPayload(payload, analysisName = "") {
     aiInsightsOutput.textContent = payload.text || "";
     aiInsightsOutput.classList.toggle("hidden", !payload.text);
     aiInsightsButton.disabled = false;
-    aiInsightsButton.textContent = payload.cached ? "AI解説を再生成" : "AI解説を更新";
+    aiInsightsButton.textContent = payload.cached ? "分析コメントを再生成" : "分析コメントを更新";
 
     if (payload.mode === "rule_based") {
         setAiInsightsChip(payload.cached ? "要約保存済み" : "要約生成済み", "fallback");
@@ -158,7 +158,7 @@ function renderAiInsightsLoading(analysisName = "") {
     }
 
     const resolvedAnalysisName = analysisName || detailPageTitle?.textContent?.trim() || "";
-    aiInsightsTitle.textContent = resolvedAnalysisName ? `${resolvedAnalysisName} AI解説` : "AI解説";
+    aiInsightsTitle.textContent = resolvedAnalysisName ? `${resolvedAnalysisName} 分析コメント` : "分析コメント";
     aiInsightsMeta.textContent = "現在の分析条件に対する解説を生成しています。";
     aiInsightsNote.textContent = "生成中です。完了すると画面切替後も保持されます。";
     aiInsightsOutput.textContent = "解説を生成しています...";
@@ -499,12 +499,12 @@ async function syncAiInsightsPanel(runId, analysisName = "", { forceRefresh = fa
             return null;
         }
 
-        aiInsightsMeta.textContent = "AI解説の取得に失敗しました。";
+            aiInsightsMeta.textContent = "分析コメントの取得に失敗しました。";
         aiInsightsNote.textContent = error.message;
         aiInsightsOutput.textContent = "";
         aiInsightsOutput.classList.add("hidden");
         aiInsightsButton.disabled = false;
-        aiInsightsButton.textContent = "AI解説を生成";
+            aiInsightsButton.textContent = "分析コメントを生成";
         setAiInsightsChip("取得失敗", "error");
         return null;
     }

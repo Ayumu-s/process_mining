@@ -322,12 +322,12 @@ class WebAppTestCase(unittest.TestCase):
         with mock.patch(
             "web_app.build_excel_ai_summary",
             return_value={
-                "title": "AI解説",
+                "title": "分析コメント",
                 "mode": "ollama",
                 "provider": "Ollama (qwen2.5:7b)",
                 "generated_at": "2026-04-02T00:00:00+00:00",
                 "period": "2024-01-01 09:00 〜 2024-01-04 09:00",
-                "text": "【全体サマリー】\nテスト用のAI解説です。",
+                "text": "【全体サマリー】\nテスト用の分析コメントです。",
                 "highlights": [
                     "Submit が中心のルートです。",
                     "Approve の前後を重点確認してください。",
@@ -356,7 +356,7 @@ class WebAppTestCase(unittest.TestCase):
 
         workbook = load_workbook(BytesIO(response.content))
         self.assertEqual(
-            ["\u30b5\u30de\u30ea\u30fc", "AI\u89e3\u8aac", "\u7d50\u8ad6\u30b5\u30de\u30ea\u30fc", "\u30b5\u30de\u30ea\u30fc\u30c0\u30c3\u30b7\u30e5\u30dc\u30fc\u30c9", "\u30d1\u30bf\u30fc\u30f3\u30b5\u30de\u30ea\u30fc", "\u51e6\u7406\u9806\u30d1\u30bf\u30fc\u30f3\u5206\u6790", "\u30d1\u30bf\u30fc\u30f301\u8a73\u7d30", "\u30c9\u30ea\u30eb\u30c0\u30a6\u30f3", "\u30b1\u30fc\u30b9\u8ffd\u8de1"],
+            ["サマリー", "分析コメント", "結論サマリー", "サマリーダッシュボード", "パターンサマリー", "処理順パターン分析", "パターン01詳細", "ドリルダウン", "ケース追跡"],
             self.visible_sheetnames(workbook),
         )
         summary_sheet = workbook["\u30b5\u30de\u30ea\u30fc"]
@@ -410,21 +410,19 @@ class WebAppTestCase(unittest.TestCase):
         )
         self.assertEqual("全体", summary_sheet.cell(row=group_table_row + 3, column=2).value)
 
-        ai_sheet = workbook["AI\u89e3\u8aac"]
-        self.assertEqual("AI\u89e3\u8aac", ai_sheet["A1"].value)
+        ai_sheet = workbook["分析コメント"]
+        self.assertEqual("分析コメント", ai_sheet["A1"].value)
         self.assertEqual("対象分析", ai_sheet["A4"].value)
         self.assertEqual("\u51e6\u7406\u9806\u30d1\u30bf\u30fc\u30f3\u5206\u6790", ai_sheet["B4"].value)
         analysis_premise_row = self.find_row_by_value(ai_sheet, "分析前提")
         explanation_row = self.find_row_by_value(ai_sheet, "解説本文")
-        highlights_row = self.find_row_by_value(ai_sheet, "要点一覧")
         terminology_row = self.find_row_by_value(ai_sheet, "用語説明")
         disclaimer_row = self.find_row_by_value(ai_sheet, "補足・免責事項")
         self.assertLess(analysis_premise_row, explanation_row)
-        self.assertLess(explanation_row, highlights_row)
-        self.assertLess(highlights_row, terminology_row)
+        self.assertLess(explanation_row, terminology_row)
         self.assertLess(terminology_row, disclaimer_row)
         self.assertIn("処理時間は、同一ケース内で", str(ai_sheet.cell(row=analysis_premise_row + 1, column=1).value))
-        self.assertIn("テスト用のAI解説", str(ai_sheet.cell(row=explanation_row + 1, column=1).value))
+        self.assertIn("テスト用の分析コメント", str(ai_sheet.cell(row=explanation_row + 1, column=1).value))
         self.assertEqual("用語", ai_sheet.cell(row=terminology_row + 1, column=1).value)
         self.assertEqual("説明", ai_sheet.cell(row=terminology_row + 1, column=2).value)
         self.assertEqual("ケース", ai_sheet.cell(row=terminology_row + 2, column=1).value)
@@ -590,7 +588,7 @@ class WebAppTestCase(unittest.TestCase):
         self.assertIn("バリアント総数", summary_values)
         self.assertIn("ユニークアクティビティ数", summary_values)
         self.assertIn("平均ケースあたりイベント数", summary_values)
-        ai_sheet = workbook["AI\u89e3\u8aac"]
+        ai_sheet = workbook["分析コメント"]
         self.assertEqual("分析期間", ai_sheet["A5"].value)
         explanation_row = self.find_row_by_value(ai_sheet, "解説本文")
         disclaimer_row = self.find_row_by_value(ai_sheet, "補足・免責事項")
@@ -621,12 +619,12 @@ class WebAppTestCase(unittest.TestCase):
         with mock.patch(
             "web_app.build_excel_ai_summary",
             return_value={
-                "title": "AI解説",
+                "title": "分析コメント",
                 "mode": "ollama",
                 "provider": "Ollama (qwen2.5:7b)",
                 "generated_at": "2026-04-02T00:00:00+00:00",
                 "period": "2024-01-01 09:00 〜 2024-01-04 09:00",
-                "text": "前後処理向けのAI解説です。",
+                "text": "前後処理向けの分析コメントです。",
                 "highlights": ["遷移の詰まりを確認してください。"],
                 "note": "ローカルLLMで生成した解説を掲載しています。",
             },
@@ -644,7 +642,7 @@ class WebAppTestCase(unittest.TestCase):
         )
         workbook = load_workbook(BytesIO(response.content))
         self.assertEqual(
-            ["\u30b5\u30de\u30ea\u30fc", "AI\u89e3\u8aac", "\u524d\u5f8c\u51e6\u7406\u5206\u6790", "\u30dc\u30c8\u30eb\u30cd\u30c3\u30af\u5206\u6790", "\u6539\u5584\u30a4\u30f3\u30d1\u30af\u30c8\u5206\u6790", "\u30c9\u30ea\u30eb\u30c0\u30a6\u30f3"],
+            ["サマリー", "分析コメント", "前後処理分析", "ボトルネック分析", "改善インパクト分析", "ドリルダウン"],
             self.visible_sheetnames(workbook),
         )
         summary_sheet = workbook["サマリー"]
@@ -757,7 +755,7 @@ class WebAppTestCase(unittest.TestCase):
         with mock.patch(
             "web_app.build_excel_ai_summary",
             return_value={
-                "title": "AI解説",
+                "title": "分析コメント",
                 "mode": "ollama",
                 "provider": "Ollama (qwen2.5:7b)",
                 "generated_at": "2026-04-09T00:00:00+00:00",
@@ -816,7 +814,7 @@ class WebAppTestCase(unittest.TestCase):
         with mock.patch(
             "web_app.build_excel_ai_summary",
             return_value={
-                "title": "AI解説",
+                "title": "分析コメント",
                 "mode": "ollama",
                 "provider": "Ollama (qwen2.5:7b)",
                 "generated_at": "2026-04-09T00:00:00+00:00",
@@ -866,7 +864,7 @@ class WebAppTestCase(unittest.TestCase):
         with mock.patch(
             "web_app.build_excel_ai_summary",
             return_value={
-                "title": "AI解説",
+                "title": "分析コメント",
                 "mode": "ollama",
                 "provider": "Ollama (qwen2.5:7b)",
                 "generated_at": "2026-04-02T00:00:00+00:00",
@@ -981,10 +979,12 @@ class WebAppTestCase(unittest.TestCase):
 
         frequency_workbook = load_workbook(BytesIO(frequency_response.content))
         pattern_workbook = load_workbook(BytesIO(pattern_response.content))
-        self.assertEqual(["\u30b5\u30de\u30ea\u30fc", "AI\u89e3\u8aac", "\u983b\u5ea6\u5206\u6790"], self.visible_sheetnames(frequency_workbook))
-        self.assertEqual(["\u30b5\u30de\u30ea\u30fc", "AI\u89e3\u8aac", "\u7d50\u8ad6\u30b5\u30de\u30ea\u30fc", "\u30b5\u30de\u30ea\u30fc\u30c0\u30c3\u30b7\u30e5\u30dc\u30fc\u30c9", "\u30d1\u30bf\u30fc\u30f3\u30b5\u30de\u30ea\u30fc", "\u51e6\u7406\u9806\u30d1\u30bf\u30fc\u30f3\u5206\u6790", "\u30d1\u30bf\u30fc\u30f301\u8a73\u7d30"], self.visible_sheetnames(pattern_workbook))
-        self.assertEqual("frequency ai", frequency_workbook["AI\u89e3\u8aac"]["A10"].value)
-        self.assertEqual("pattern ai", pattern_workbook["AI\u89e3\u8aac"]["A10"].value)
+        self.assertEqual(["サマリー", "分析コメント", "頻度分析"], self.visible_sheetnames(frequency_workbook))
+        self.assertEqual(["サマリー", "分析コメント", "結論サマリー", "サマリーダッシュボード", "パターンサマリー", "処理順パターン分析", "パターン01詳細"], self.visible_sheetnames(pattern_workbook))
+        frequency_explanation_row = self.find_row_by_value(frequency_workbook["分析コメント"], "解説本文")
+        pattern_explanation_row = self.find_row_by_value(pattern_workbook["分析コメント"], "解説本文")
+        self.assertEqual("frequency ai", frequency_workbook["分析コメント"].cell(row=frequency_explanation_row + 1, column=1).value)
+        self.assertEqual("pattern ai", pattern_workbook["分析コメント"].cell(row=pattern_explanation_row + 1, column=1).value)
 
     def test_pattern_report_excel_caps_detail_sheets_at_twenty(self):
         csv_lines = ["case_id,activity,start_time"]
