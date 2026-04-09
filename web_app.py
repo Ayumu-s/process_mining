@@ -2468,7 +2468,7 @@ def build_empty_ai_summary(analysis_key, analysis_name):
         "period": "",
         "text": "",
         "highlights": [],
-        "note": "まだ生成していません。現在の分析条件に対する AI 解説を生成すると、画面を切り替えても保持されます。",
+        "note": "まだ生成していません。現在の分析条件に対する分析コメントを生成すると、画面を切り替えても保持されます。",
     }
 
 
@@ -2683,7 +2683,7 @@ def build_ai_insights_summary(
                 "period": ai_context["period_text"],
                 "text": ai_text,
                 "highlights": [item["text"] for item in ai_context["insights_summary"].get("items", [])],
-                "note": "現在の分析条件に対応する AI 解説を保存しました。画面を切り替えても同じ条件なら再表示されます。",
+                "note": "現在の分析条件に対応する分析コメントを保存しました。画面を切り替えても同じ条件なら再表示されます。",
             }
             if use_cache:
                 cache[cache_key] = payload
@@ -2693,11 +2693,11 @@ def build_ai_insights_summary(
                 "cached": False,
             }
     except httpx.ConnectError:
-        error_message = "AI 解説を生成できなかったため、既存集計からの要約を掲載しています。"
+            error_message = "分析コメントを生成できなかったため、既存集計からの要約を掲載しています。"
     except Exception as exc:
-        error_message = f"AI 解説の生成に失敗したため、ルールベース要約を掲載しています。({exc})"
+                error_message = f"分析コメントの生成に失敗したため、ルールベース要約を掲載しています。({exc})"
     else:
-        error_message = "AI 解説を生成できなかったため、ルールベース要約を掲載しています。"
+                error_message = "分析コメントを生成できなかったため、ルールベース要約を掲載しています。"
 
     payload = {
         "title": REPORT_SHEET_NAMES["ai_insights"],
@@ -3047,7 +3047,7 @@ def build_detail_export_workbook_bytes(
         ai_sheet,
         REPORT_SHEET_NAMES["ai_insights"],
         ai_meta_rows,
-        description="現在の分析条件に対応する AI 解説、または既存集計からの要約を掲載します。",
+        description="現在の分析条件に対応する分析コメント、または既存集計からの要約を掲載します。",
     )
     next_row = append_custom_text_section_to_worksheet(
         ai_sheet,

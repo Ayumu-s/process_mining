@@ -927,7 +927,7 @@ class WebAppTestCase(unittest.TestCase):
 
         with mock.patch(
             "web_app.request_ollama_insights_text",
-            return_value="頻度分析向けの AI 解説です。",
+            return_value="頻度分析向けの分析コメントです。",
         ):
             generate_response = self.client.post(f"/api/runs/{run_id}/ai-insights/frequency")
 
@@ -936,14 +936,14 @@ class WebAppTestCase(unittest.TestCase):
         self.assertTrue(generate_payload["generated"])
         self.assertFalse(generate_payload["cached"])
         self.assertEqual("頻度分析", generate_payload["analysis_name"])
-        self.assertEqual("頻度分析向けの AI 解説です。", generate_payload["text"])
+        self.assertEqual("頻度分析向けの分析コメントです。", generate_payload["text"])
 
         restored_response = self.client.get(f"/api/runs/{run_id}/ai-insights/frequency")
         self.assertEqual(200, restored_response.status_code)
         restored_payload = restored_response.json()
         self.assertTrue(restored_payload["generated"])
         self.assertTrue(restored_payload["cached"])
-        self.assertEqual("頻度分析向けの AI 解説です。", restored_payload["text"])
+        self.assertEqual("頻度分析向けの分析コメントです。", restored_payload["text"])
 
     def test_report_excel_export_uses_analysis_specific_ai_output(self):
         run_id = self.analyze_uploaded_csv(
