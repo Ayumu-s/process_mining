@@ -10,6 +10,7 @@ from urllib.parse import quote
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
+import duckdb
 import httpx
 import pandas as pd
 import uvicorn
@@ -24,28 +25,28 @@ from openpyxl.chart.label import DataLabelList
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from 共通スクリプト.Excel出力.excel_exporter import build_excel_bytes, build_summary_sheet_df
+from 共通スクリプト.Excel出力.excel_exporter import (
+    build_excel_bytes,
+    build_summary_sheet_df,
+    convert_analysis_result_to_records,
+)
 from 共通スクリプト.analysis_service import (
     DEFAULT_ANALYSIS_KEYS,
     FLOW_PATTERN_CASE_COUNT_COLUMN,
     FLOW_PATTERN_COLUMN,
-    create_activity_case_drilldown,
     analyze_prepared_event_log,
     build_group_summary,
     detect_group_columns,
     create_analysis_records,
     create_bottleneck_summary,
-    create_case_trace_details,
     create_dashboard_summary,
     create_impact_summary,
     create_log_diagnostics,
     create_rule_based_insights,
     create_root_cause_summary,
-    create_transition_case_drilldown,
     filter_prepared_df,
     filter_prepared_df_by_pattern,
     get_filter_options,
-    create_variant_flow_snapshot,
     create_variant_summary,
     create_pattern_flow_snapshot,
     create_pattern_bottleneck_details,
@@ -57,12 +58,17 @@ from 共通スクリプト.analysis_service import (
     select_pattern_rows_for_flow,
 )
 from 共通スクリプト.duckdb_service import (
+    _build_scoped_relation_cte,
+    _format_stddev_column,
+    _get_parquet_column_names,
+    _quote_identifier,
     persist_prepared_parquet,
     query_activity_case_drilldown,
     query_analysis_records,
     query_bottleneck_summary,
     query_case_trace_details,
     query_dashboard_summary,
+    query_filter_options,
     query_filtered_meta,
     query_group_summary,
     query_impact_summary,
@@ -85,7 +91,6 @@ MAX_LOG_DIAGNOSTIC_SAMPLE_ROW_LIMIT = 50000
 PROCESS_FLOW_PATTERN_CAP = 300
 MAX_PATTERN_FLOW_CACHE = 24
 LARGE_DATASET_FLOW_FAST_PATH_THRESHOLD = 1_000_000
-PARQUET_ONLY_PREPARED_DF_THRESHOLD = 1_000_000
 FILTER_PARAM_NAMES = (
     "date_from",
     "date_to",
@@ -486,13 +491,19 @@ def save_run_data(
     run_id = uuid4().hex
     prepared_row_count = int(len(prepared_df))
     pattern_rows = ((result or {}).get("analyses", {}).get("pattern") or {}).get("rows", [])
+    filter_options = get_filter_options(
+        prepared_df,
+        filter_column_settings=column_settings,
+    )
+    prepared_parquet_path = get_run_prepared_parquet_path(run_id)
+    persist_prepared_parquet(prepared_df, prepared_parquet_path)
     RUN_STORE[run_id] = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source_file_name": source_file_name,
         "selected_analysis_keys": selected_analysis_keys,
-        "prepared_df": prepared_df,
+        "prepared_df": None,
         "prepared_row_count": prepared_row_count,
-        "prepared_parquet_path": None,
+        "prepared_parquet_path": str(prepared_parquet_path),
         "result": result,
         "column_settings": column_settings,
         "base_filter_params": base_filter_params,
@@ -506,10 +517,7 @@ def save_run_data(
         "insights_cache": {},
         "ai_insights_cache": {},
         "analysis_cache": {},
-        "filter_options": get_filter_options(
-            prepared_df,
-            filter_column_settings=column_settings,
-        ),
+        "filter_options": filter_options,
     }
     RUN_STORE.move_to_end(run_id)
 
@@ -528,11 +536,6 @@ def get_run_data(run_id):
 
     RUN_STORE.move_to_end(run_id)
     return run_data
-
-
-def has_parquet_backing(run_data):
-    prepared_parquet_path = run_data.get("prepared_parquet_path")
-    return bool(prepared_parquet_path and Path(prepared_parquet_path).exists())
 
 
 def get_run_group_columns(run_data):
@@ -593,54 +596,13 @@ def build_filter_cache_key(filter_params):
     )
 
 
-def build_filtered_meta(prepared_df):
-    return {
-        "case_count": int(prepared_df["case_id"].nunique()) if not prepared_df.empty else 0,
-        "event_count": int(len(prepared_df)),
-    }
-
-
 def get_filtered_meta_for_run(run_data, filter_params=None, variant_pattern=None):
-    if has_parquet_backing(run_data):
-        return query_filtered_meta(
-            run_data["prepared_parquet_path"],
-            filter_params=filter_params,
-            filter_column_settings=run_data.get("column_settings"),
-            variant_pattern=variant_pattern,
-        )
-
-    filtered_df = get_filtered_prepared_df(
-        run_data,
+    return query_filtered_meta(
+        run_data["prepared_parquet_path"],
         filter_params=filter_params,
-        variant_id=None,
-        pattern_index=None,
-    )
-    if variant_pattern:
-        filtered_df = filter_prepared_df_by_pattern(filtered_df, variant_pattern)
-    return build_filtered_meta(filtered_df)
-
-
-def get_base_filtered_prepared_df(run_data, filter_params=None):
-    prepared_df = run_data.get("prepared_df")
-    if prepared_df is None:
-        raise HTTPException(
-            status_code=500,
-            detail="内部データの再計算に必要なメモリ上のイベントログがありません。",
-        )
-
-    filter_cache_key = build_filter_cache_key(filter_params)
-    if is_unfiltered_request(filter_cache_key):
-        return prepared_df, {
-            "case_count": int(run_data["result"]["case_count"]),
-            "event_count": int(run_data["result"]["event_count"]),
-        }
-
-    filtered_df = filter_prepared_df(
-        prepared_df,
-        filter_params,
         filter_column_settings=run_data.get("column_settings"),
+        variant_pattern=variant_pattern,
     )
-    return filtered_df, build_filtered_meta(filtered_df)
 
 
 def build_column_settings_payload(column_settings):
@@ -1291,6 +1253,133 @@ def _iter_groups(prepared_df, grouping_columns):
         yield group_name, group_df
 
 
+def _iter_groups_from_parquet(
+    parquet_path,
+    grouping_columns,
+    filter_params=None,
+    filter_column_settings=None,
+    variant_pattern=None,
+):
+    valid_columns = [
+        str(column_name)
+        for column_name in (grouping_columns or [])
+        if str(column_name) in set(_get_parquet_column_names(parquet_path))
+    ]
+    if not valid_columns:
+        return
+
+    connection = duckdb.connect()
+    try:
+        cte_sql, params, relation_name = _build_scoped_relation_cte(
+            parquet_path,
+            filter_params=filter_params,
+            filter_column_settings=filter_column_settings,
+            variant_pattern=variant_pattern,
+        )
+        case_group_columns_sql = ",\n                ".join(
+            [
+                f"COALESCE(MAX(NULLIF(TRIM(CAST({_quote_identifier(column_name)} AS VARCHAR)), '')), '(未分類)') AS {_quote_identifier(column_name)}"
+                for column_name in valid_columns
+            ]
+        )
+        group_select_sql = ", ".join(_quote_identifier(column_name) for column_name in valid_columns)
+        group_order_sql = ", ".join(_quote_identifier(column_name) for column_name in valid_columns)
+        group_list_rows = connection.execute(
+            f"""
+            {cte_sql},
+            case_groups AS (
+                SELECT
+                    case_id,
+                    {case_group_columns_sql}
+                FROM {relation_name}
+                GROUP BY case_id
+            )
+            SELECT
+                {group_select_sql},
+                COUNT(*) AS case_count
+            FROM case_groups
+            GROUP BY {group_select_sql}
+            ORDER BY case_count DESC, {group_order_sql}
+            """,
+            params,
+        ).fetchall()
+        if not group_list_rows:
+            return
+
+        frequency_display_columns = (
+            get_available_analysis_definitions()
+            .get("frequency", {})
+            .get("config", {})
+            .get("display_columns", {})
+        )
+
+        for row in group_list_rows:
+            group_values = [str(value or "").strip() or "(未分類)" for value in row[: len(valid_columns)]]
+            if len(valid_columns) == 1:
+                group_name = group_values[0]
+            else:
+                group_name = ", ".join(
+                    f"{column_name}={group_value}"
+                    for column_name, group_value in zip(valid_columns, group_values)
+                )
+
+            group_conditions_sql = " AND ".join(
+                f"{_quote_identifier(column_name)} = ?"
+                for column_name in valid_columns
+            )
+            group_df = connection.execute(
+                f"""
+                {cte_sql},
+                case_groups AS (
+                    SELECT
+                        case_id,
+                        {case_group_columns_sql}
+                    FROM {relation_name}
+                    GROUP BY case_id
+                ),
+                selected_cases AS (
+                    SELECT case_id
+                    FROM case_groups
+                    WHERE {group_conditions_sql}
+                ),
+                group_scoped AS (
+                    SELECT scoped.*
+                    FROM {relation_name} AS scoped
+                    INNER JOIN selected_cases USING (case_id)
+                )
+                SELECT
+                    activity,
+                    COUNT(*) AS event_count,
+                    COUNT(DISTINCT case_id) AS case_count,
+                    ROUND(SUM(duration_min), 2) AS total_duration_min,
+                    ROUND(AVG(duration_min), 2) AS avg_duration_min,
+                    ROUND(MEDIAN(duration_min), 2) AS median_duration_min,
+                    CASE WHEN COUNT(*) > 1 THEN ROUND(STDDEV_SAMP(duration_min), 2) ELSE NULL END AS std_duration_min,
+                    ROUND(MIN(duration_min), 2) AS min_duration_min,
+                    ROUND(MAX(duration_min), 2) AS max_duration_min,
+                    ROUND(QUANTILE_CONT(duration_min, 0.75), 2) AS p75_duration_min,
+                    ROUND(QUANTILE_CONT(duration_min, 0.90), 2) AS p90_duration_min,
+                    ROUND(QUANTILE_CONT(duration_min, 0.95), 2) AS p95_duration_min,
+                    ROUND(
+                        COUNT(*) * 100.0 / NULLIF((SELECT COUNT(*) FROM group_scoped), 0),
+                        2
+                    ) AS event_ratio_pct
+                FROM group_scoped
+                GROUP BY activity
+                ORDER BY event_count DESC, activity ASC
+                """,
+                params + group_values,
+            ).df()
+            if "std_duration_min" in group_df.columns:
+                group_df["std_duration_min"] = _format_stddev_column(group_df["std_duration_min"])
+            yield group_name, convert_analysis_result_to_records(
+                group_df,
+                frequency_display_columns,
+            )
+    finally:
+        connection.close()
+
+
 def _write_frequency_data(worksheet, rows, start_row):
     frequency_rows = build_ranked_rows(rows or [], rank_key=REPORT_HEADER_LABELS["rank"])
     frequency_headers = list(frequency_rows[0].keys()) if frequency_rows else [REPORT_HEADER_LABELS["rank"]]
@@ -1392,27 +1481,6 @@ def build_filter_summary_text(filter_params, column_settings):
         summary_items.append(f"{activity_label}: {activity_values}")
 
     return " / ".join(summary_items) if summary_items else "未適用"
-
-
-def build_prepared_df_period_text(prepared_df):
-    if prepared_df is None or prepared_df.empty:
-        return "不明"
-
-    timestamp_series = None
-    for column_name in ("start_time", "end_time", "timestamp"):
-        if column_name not in prepared_df.columns:
-            continue
-        candidate_series = pd.to_datetime(prepared_df[column_name], errors="coerce").dropna()
-        if candidate_series.empty:
-            continue
-        timestamp_series = candidate_series if timestamp_series is None else pd.concat([timestamp_series, candidate_series], ignore_index=True)
-
-    if timestamp_series is None or timestamp_series.empty:
-        return "不明"
-
-    period_start = timestamp_series.min()
-    period_end = timestamp_series.max()
-    return f"{period_start.strftime('%Y-%m-%d %H:%M')} 〜 {period_end.strftime('%Y-%m-%d %H:%M')}"
 
 
 def build_transition_display_label(row):
@@ -2311,21 +2379,14 @@ def build_ai_context_summary(
     )
     resolved_prepared_df = prepared_df
     if resolved_prepared_df is None:
-        if has_parquet_backing(run_data) and normalized_analysis_key in {"frequency", "transition", "pattern"}:
+        if normalized_analysis_key in {"frequency", "transition", "pattern"}:
             resolved_prepared_df = pd.DataFrame(
                 columns=["case_id", "activity", "duration_sec", "start_time", "next_time", "timestamp"]
             )
         else:
-            resolved_prepared_df = filter_prepared_df(
-                run_data["prepared_df"],
-                filter_params,
-                filter_column_settings=run_data.get("column_settings"),
+            resolved_prepared_df = pd.DataFrame(
+                columns=["case_id", "activity", "duration_sec", "start_time", "next_time", "timestamp"]
             )
-            if variant_pattern:
-                resolved_prepared_df = filter_prepared_df_by_pattern(
-                    resolved_prepared_df,
-                    variant_pattern,
-                )
     resolved_dashboard_summary = dashboard_summary or get_dashboard_summary(
         run_data,
         filter_params=filter_params,
@@ -2341,19 +2402,13 @@ def build_ai_context_summary(
     resolved_bottleneck_summary = bottleneck_summary
     if resolved_bottleneck_summary is None:
         if variant_pattern:
-            if has_parquet_backing(run_data):
-                resolved_bottleneck_summary = query_bottleneck_summary(
-                    run_data["prepared_parquet_path"],
-                    filter_params=filter_params,
-                    filter_column_settings=run_data.get("column_settings"),
-                    variant_pattern=variant_pattern,
-                    limit=None,
-                )
-            else:
-                resolved_bottleneck_summary = create_bottleneck_summary(
-                    resolved_prepared_df,
-                    limit=None,
-                )
+            resolved_bottleneck_summary = query_bottleneck_summary(
+                run_data["prepared_parquet_path"],
+                filter_params=filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+                variant_pattern=variant_pattern,
+                limit=None,
+            )
         else:
             resolved_bottleneck_summary = get_bottleneck_summary(
                 run_data,
@@ -2370,15 +2425,12 @@ def build_ai_context_summary(
         or resolved_analysis.get("analysis_name")
         or analysis_definitions.get(normalized_analysis_key, {}).get("config", {}).get("analysis_name", analysis_key)
     )
-    if has_parquet_backing(run_data) and (prepared_df is None or resolved_prepared_df.empty):
-        period_text = query_period_text(
-            run_data["prepared_parquet_path"],
-            filter_params=filter_params,
-            filter_column_settings=run_data.get("column_settings"),
-            variant_pattern=variant_pattern,
-        )
-    else:
-        period_text = build_prepared_df_period_text(resolved_prepared_df)
+    period_text = query_period_text(
+        run_data["prepared_parquet_path"],
+        filter_params=filter_params,
+        filter_column_settings=run_data.get("column_settings"),
+        variant_pattern=variant_pattern,
+    )
     resolved_insights_summary = insights_summary or get_rule_based_insights_summary(
         run_data,
         normalized_analysis_key,
@@ -2682,7 +2734,6 @@ def build_detail_export_workbook_bytes(
     analysis_definitions = get_available_analysis_definitions()
     analysis_name = analysis_definitions.get(analysis_key, {}).get("config", {}).get("analysis_name", analysis_key)
     export_sheet_keys = set(get_analysis_export_sheet_keys(analysis_key))
-    use_parquet_export = has_parquet_backing(run_data) and run_data.get("prepared_df") is None
     workbook = Workbook()
     summary_sheet = workbook.active
     summary_sheet.title = sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["summary"])
@@ -2693,107 +2744,71 @@ def build_detail_export_workbook_bytes(
         variant_id=variant_id,
         filter_params=filter_params,
     )
-    if use_parquet_export:
-        export_prepared_df = None
-        filtered_meta = get_filtered_meta_for_run(
-            run_data,
+    filtered_meta = get_filtered_meta_for_run(
+        run_data,
+        filter_params=filter_params,
+        variant_pattern=variant_pattern,
+    )
+    selected_analysis = get_analysis_data(
+        run_data,
+        analysis_key,
+        filter_params=filter_params,
+        variant_pattern=variant_pattern,
+    )
+    export_variant_items = get_variant_items(
+        run_data,
+        filter_params=filter_params,
+        variant_pattern=variant_pattern,
+    )
+    if variant_pattern:
+        bottleneck_summary = query_bottleneck_summary(
+            run_data["prepared_parquet_path"],
             filter_params=filter_params,
+            filter_column_settings=run_data.get("column_settings"),
             variant_pattern=variant_pattern,
-        )
-        selected_analysis = get_analysis_data(
-            run_data,
-            analysis_key,
-            filter_params=filter_params,
-            variant_pattern=variant_pattern,
-        )
-        export_variant_items = get_variant_items(
-            run_data,
-            filter_params=filter_params,
-            variant_pattern=variant_pattern,
-        )
-        if variant_pattern:
-            bottleneck_summary = query_bottleneck_summary(
-                run_data["prepared_parquet_path"],
-                filter_params=filter_params,
-                filter_column_settings=run_data.get("column_settings"),
-                variant_pattern=variant_pattern,
-                limit=None,
-            )
-        else:
-            bottleneck_summary = get_bottleneck_summary(
-                run_data,
-                variant_id=variant_id,
-                filter_params=filter_params,
-            )
-        dashboard_summary = get_dashboard_summary(
-            run_data,
-            filter_params=filter_params,
-            prepared_df=None,
-            variant_pattern=variant_pattern,
-        )
-        impact_summary = get_impact_summary(
-            run_data,
-            filter_params=filter_params,
-            prepared_df=None,
-            variant_pattern=variant_pattern,
-        )
-        root_cause_summary = get_root_cause_summary(
-            run_data,
-            filter_params=filter_params,
-            prepared_df=None,
-            variant_pattern=variant_pattern,
-        )
-        insights_summary = get_rule_based_insights_summary(
-            run_data,
-            analysis_key=analysis_key,
-            analysis_rows=selected_analysis.get("rows", []),
-            filter_params=filter_params,
-            prepared_df=None,
-            variant_pattern=variant_pattern,
-            dashboard_summary=dashboard_summary,
-            bottleneck_summary=bottleneck_summary,
-            impact_summary=impact_summary,
+            limit=None,
         )
     else:
-        export_prepared_df = get_filtered_prepared_df(
+        bottleneck_summary = get_bottleneck_summary(
             run_data,
             variant_id=variant_id,
             filter_params=filter_params,
         )
-        filtered_meta = build_filtered_meta(export_prepared_df)
-        selected_analysis = create_analysis_records(export_prepared_df, analysis_key)
-        export_variant_items = create_variant_summary(export_prepared_df, limit=None)
-        bottleneck_summary = create_bottleneck_summary(export_prepared_df, limit=None)
-        dashboard_summary = create_dashboard_summary(
-            export_prepared_df,
-            variant_items=export_variant_items[:10],
-            bottleneck_summary=bottleneck_summary,
-            coverage_limit=10,
-        )
-        impact_summary = create_impact_summary(
-            export_prepared_df,
-            limit=None,
-        )
-        root_cause_summary = create_root_cause_summary(
-            export_prepared_df,
-            filter_column_settings=run_data.get("column_settings"),
-            limit=10,
-        )
-        insights_summary = create_rule_based_insights(
-            export_prepared_df,
-            analysis_key=analysis_key,
-            analysis_rows=selected_analysis.get("rows", []),
-            dashboard_summary=dashboard_summary,
-            bottleneck_summary=bottleneck_summary,
-            impact_summary=impact_summary,
-            max_items=5,
-        )
+    dashboard_summary = get_dashboard_summary(
+        run_data,
+        filter_params=filter_params,
+        prepared_df=None,
+        variant_pattern=variant_pattern,
+    )
+    impact_summary = get_impact_summary(
+        run_data,
+        filter_params=filter_params,
+        prepared_df=None,
+        variant_pattern=variant_pattern,
+    )
+    root_cause_summary = get_root_cause_summary(
+        run_data,
+        filter_params=filter_params,
+        prepared_df=None,
+        variant_pattern=variant_pattern,
+    )
+    insights_summary = get_rule_based_insights_summary(
+        run_data,
+        analysis_key=analysis_key,
+        analysis_rows=selected_analysis.get("rows", []),
+        filter_params=filter_params,
+        prepared_df=None,
+        variant_pattern=variant_pattern,
+        dashboard_summary=dashboard_summary,
+        bottleneck_summary=bottleneck_summary,
+        impact_summary=impact_summary,
+    )
     ai_summary = build_excel_ai_summary(
         run_data=run_data,
         analysis_key=analysis_key,
         analysis_name=analysis_name,
         filter_params=filter_params,
-        prepared_df=export_prepared_df,
+        prepared_df=None,
         variant_pattern=variant_pattern,
         dashboard_summary=dashboard_summary,
         impact_summary=impact_summary,
@@ -2807,15 +2822,12 @@ def build_detail_export_workbook_bytes(
 
     from_activity, to_activity = parse_transition_selection(selected_transition_key)
     selected_transition_label = f"{from_activity} → {to_activity}" if from_activity and to_activity else str(selected_transition_key or "").strip()
-    if use_parquet_export:
-        period_text = query_period_text(
-            run_data["prepared_parquet_path"],
-            filter_params=filter_params,
-            filter_column_settings=run_data.get("column_settings"),
-            variant_pattern=variant_pattern,
-        )
-    else:
-        period_text = build_prepared_df_period_text(export_prepared_df)
+    period_text = query_period_text(
+        run_data["prepared_parquet_path"],
+        filter_params=filter_params,
+        filter_column_settings=run_data.get("column_settings"),
+        variant_pattern=variant_pattern,
+    )
     group_columns = get_run_group_columns(run_data)
     grouping_text = "、".join(group_columns) if group_columns else "なし"
     summary_rows = [
@@ -2854,7 +2866,7 @@ def build_detail_export_workbook_bytes(
         dashboard_summary,
         impact_summary,
         bottleneck_summary,
-        prepared_df=export_prepared_df,
+        prepared_df=None,
         variant_items=export_variant_items,
     )
     next_row = append_key_value_rows(
@@ -2872,16 +2884,13 @@ def build_detail_export_workbook_bytes(
         column_count=4,
     )
     if group_columns:
-        if export_prepared_df is not None:
-            group_summary = build_group_summary(export_prepared_df, group_columns)
-        else:
-            group_summary = query_group_summary(
-                run_data["prepared_parquet_path"],
-                group_columns,
-                filter_params=filter_params,
-                filter_column_settings=run_data.get("column_settings"),
-                variant_pattern=variant_pattern,
-            )
+        group_summary = query_group_summary(
+            run_data["prepared_parquet_path"],
+            group_columns,
+            filter_params=filter_params,
+            filter_column_settings=run_data.get("column_settings"),
+            variant_pattern=variant_pattern,
+        )
         if group_summary:
             group_summary_df = build_summary_sheet_df(group_summary, group_columns)
             next_row = append_table_to_worksheet(
@@ -2936,16 +2945,13 @@ def build_detail_export_workbook_bytes(
                 description="アクティビティごとの件数、ケース数、処理時間の代表値を確認できます。",
             )
         else:
-            if use_parquet_export:
-                overall_frequency_rows = query_analysis_records(
-                    run_data["prepared_parquet_path"],
-                    "frequency",
-                    filter_params=filter_params,
-                    filter_column_settings=run_data.get("column_settings"),
-                    variant_pattern=variant_pattern,
-                )["rows"]
-            else:
-                overall_frequency_rows = create_analysis_records(export_prepared_df, "frequency")["rows"]
+            overall_frequency_rows = query_analysis_records(
+                run_data["prepared_parquet_path"],
+                "frequency",
+                filter_params=filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+                variant_pattern=variant_pattern,
+            )["rows"]
 
             current_row = 1
             max_frequency_columns = max(10, len(overall_frequency_rows[0]) + 1 if overall_frequency_rows else 10)
@@ -2961,22 +2967,26 @@ def build_detail_export_workbook_bytes(
                 current_row,
             )
 
-            if export_prepared_df is not None:
-                for group_name, group_df in _iter_groups(export_prepared_df, group_columns):
-                    current_row += 3
-                    group_frequency_rows = create_analysis_records(group_df, "frequency")["rows"]
-                    group_column_count = max(10, len(group_frequency_rows[0]) + 1 if group_frequency_rows else max_frequency_columns)
-                    current_row = _write_section_header(
-                        frequency_sheet,
-                        current_row,
-                        f"グループ: {group_name}",
-                        column_count=group_column_count,
-                    )
-                    current_row = _write_frequency_data(
-                        frequency_sheet,
-                        group_frequency_rows,
-                        current_row,
-                    )
+            for group_name, group_frequency_rows in _iter_groups_from_parquet(
+                run_data["prepared_parquet_path"],
+                group_columns,
+                filter_params=filter_params,
+                filter_column_settings=run_data.get("column_settings"),
+                variant_pattern=variant_pattern,
+            ) or []:
+                current_row += 3
+                group_column_count = max(10, len(group_frequency_rows[0]) + 1 if group_frequency_rows else max_frequency_columns)
+                current_row = _write_section_header(
+                    frequency_sheet,
+                    current_row,
+                    f"グループ: {group_name}",
+                    column_count=group_column_count,
+                )
+                current_row = _write_frequency_data(
+                    frequency_sheet,
+                    group_frequency_rows,
+                    current_row,
+                )
 
     if "transition" in export_sheet_keys:
         transition_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["transition"]))
@@ -3173,7 +3183,7 @@ def build_detail_export_workbook_bytes(
         for pattern_rank, pattern_row in enumerate(selected_analysis.get("rows", [])[:pattern_detail_count], start=1):
             pattern_text = str(pattern_row.get(pattern_column_label) or "").strip()
             pattern_detail = None
-            if use_parquet_export and pattern_text:
+            if pattern_text:
                 pattern_detail = query_pattern_bottleneck_details(
                     run_data["prepared_parquet_path"],
                     pattern_text,
@@ -3183,7 +3193,7 @@ def build_detail_export_workbook_bytes(
                 )
             append_pattern_detail_sheet(
                 workbook,
-                export_prepared_df,
+                None,
                 pattern_row,
                 pattern_rank,
                 pattern_column_label,
@@ -3256,40 +3266,25 @@ def build_detail_export_workbook_bytes(
     drilldown_title = REPORT_SHEET_NAMES["drilldown"]
     if from_activity and to_activity:
         drilldown_title = f"遷移ドリルダウン: {from_activity} → {to_activity}"
-        if use_parquet_export:
-            drilldown_rows = query_transition_case_drilldown(
-                run_data["prepared_parquet_path"],
-                from_activity=from_activity,
-                to_activity=to_activity,
-                limit=max(0, int(drilldown_limit)),
-                filter_params=filter_params,
-                filter_column_settings=run_data.get("column_settings"),
-                variant_pattern=variant_pattern,
-            )
-        else:
-            drilldown_rows = create_transition_case_drilldown(
-                export_prepared_df,
-                from_activity=from_activity,
-                to_activity=to_activity,
-                limit=max(0, int(drilldown_limit)),
-            )
+        drilldown_rows = query_transition_case_drilldown(
+            run_data["prepared_parquet_path"],
+            from_activity=from_activity,
+            to_activity=to_activity,
+            limit=max(0, int(drilldown_limit)),
+            filter_params=filter_params,
+            filter_column_settings=run_data.get("column_settings"),
+            variant_pattern=variant_pattern,
+        )
     elif selected_activity_name:
         drilldown_title = f"アクティビティドリルダウン: {selected_activity_name}"
-        if use_parquet_export:
-            drilldown_rows = query_activity_case_drilldown(
-                run_data["prepared_parquet_path"],
-                activity=selected_activity_name,
-                limit=max(0, int(drilldown_limit)),
-                filter_params=filter_params,
-                filter_column_settings=run_data.get("column_settings"),
-                variant_pattern=variant_pattern,
-            )
-        else:
-            drilldown_rows = create_activity_case_drilldown(
-                export_prepared_df,
-                activity=selected_activity_name,
-                limit=max(0, int(drilldown_limit)),
-            )
+        drilldown_rows = query_activity_case_drilldown(
+            run_data["prepared_parquet_path"],
+            activity=selected_activity_name,
+            limit=max(0, int(drilldown_limit)),
+            filter_params=filter_params,
+            filter_column_settings=run_data.get("column_settings"),
+            variant_pattern=variant_pattern,
+        )
     if drilldown_rows:
         drilldown_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["drilldown"]))
         initialize_excel_worksheet(drilldown_sheet)
@@ -3307,13 +3302,10 @@ def build_detail_export_workbook_bytes(
 
     normalized_case_id = str(case_id or "").strip()
     if normalized_case_id:
-        if use_parquet_export:
-            case_trace = query_case_trace_details(
-                run_data["prepared_parquet_path"],
-                normalized_case_id,
-            )
-        else:
-            case_trace = create_case_trace_details(export_prepared_df, normalized_case_id)
+        case_trace = query_case_trace_details(
+            run_data["prepared_parquet_path"],
+            normalized_case_id,
+        )
         if case_trace.get("found"):
             case_trace_sheet = workbook.create_sheet(title=sanitize_workbook_sheet_name(REPORT_SHEET_NAMES["case_trace"]))
             initialize_excel_worksheet(case_trace_sheet)
@@ -3353,14 +3345,14 @@ def build_detail_export_workbook_bytes(
 def get_filter_options_payload(run_data):
     filter_options = run_data.get("filter_options")
     if filter_options is None:
-        prepared_df = run_data.get("prepared_df")
-        if prepared_df is None:
+        prepared_parquet_path = run_data.get("prepared_parquet_path")
+        if not prepared_parquet_path:
             raise HTTPException(
                 status_code=500,
                 detail="フィルター候補を再構築できませんでした。",
             )
-        filter_options = get_filter_options(
-            prepared_df,
+        filter_options = query_filter_options(
+            prepared_parquet_path,
             filter_column_settings=run_data.get("column_settings"),
         )
         run_data["filter_options"] = filter_options
@@ -3445,23 +3437,13 @@ def get_variant_items(run_data, filter_params=None, variant_pattern=None):
                 variant_cache[cache_key] = build_variant_items_from_pattern_rows(pattern_rows)
                 return variant_cache[cache_key]
 
-        if has_parquet_backing(run_data):
-            variant_cache[cache_key] = query_variant_summary(
-                run_data["prepared_parquet_path"],
-                filter_params=filter_params,
-                filter_column_settings=run_data.get("column_settings"),
-                variant_pattern=variant_pattern,
-                limit=None,
-            )
-        else:
-            filtered_df = filter_prepared_df(
-                run_data["prepared_df"],
-                filter_params,
-                filter_column_settings=run_data.get("column_settings"),
-            )
-            if variant_pattern:
-                filtered_df = filter_prepared_df_by_pattern(filtered_df, variant_pattern)
-            variant_cache[cache_key] = create_variant_summary(filtered_df, limit=None)
+        variant_cache[cache_key] = query_variant_summary(
+            run_data["prepared_parquet_path"],
+            filter_params=filter_params,
+            filter_column_settings=run_data.get("column_settings"),
+            variant_pattern=variant_pattern,
+            limit=None,
+        )
 
     return variant_cache[cache_key]
 
@@ -3505,20 +3487,6 @@ def get_pattern_summary_row(run_data, pattern_index):
     return pattern_analysis, summary_row, pattern_entry, pattern
 
 
-def get_filtered_prepared_df(run_data, variant_id=None, pattern_index=None, filter_params=None):
-    prepared_df, _ = get_base_filtered_prepared_df(run_data, filter_params=filter_params)
-
-    if pattern_index is not None:
-        _, _, _, pattern = get_pattern_summary_row(run_data, pattern_index)
-        prepared_df = filter_prepared_df_by_pattern(prepared_df, pattern)
-
-    if variant_id is not None:
-        variant_item = get_variant_item(run_data, variant_id, filter_params=filter_params)
-        prepared_df = filter_prepared_df_by_pattern(prepared_df, variant_item["pattern"])
-
-    return prepared_df
-
-
 def get_analysis_data(run_data, analysis_key, filter_params=None, variant_pattern=None):
     normalized_filter_key = build_filter_cache_key(filter_params)
     analysis_cache = run_data.setdefault("analysis_cache", {})
@@ -3530,38 +3498,25 @@ def get_analysis_data(run_data, analysis_key, filter_params=None, variant_patter
 
         cache_key = ("analysis", analysis_key, normalized_filter_key, None)
         if cache_key not in analysis_cache:
-            if has_parquet_backing(run_data):
-                analysis_cache[cache_key] = query_analysis_records(
-                    run_data["prepared_parquet_path"],
-                    analysis_key=analysis_key,
-                    filter_params=filter_params,
-                    filter_column_settings=run_data.get("column_settings"),
-                    variant_pattern=None,
-                )
-            else:
-                analysis_cache[cache_key] = create_analysis_records(run_data["prepared_df"], analysis_key)
-        return analysis_cache[cache_key]
-
-    cache_key = ("analysis", analysis_key, normalized_filter_key, str(variant_pattern or "").strip() or None)
-
-    if cache_key not in analysis_cache:
-        if has_parquet_backing(run_data):
             analysis_cache[cache_key] = query_analysis_records(
                 run_data["prepared_parquet_path"],
                 analysis_key=analysis_key,
                 filter_params=filter_params,
                 filter_column_settings=run_data.get("column_settings"),
-                variant_pattern=variant_pattern,
+                variant_pattern=None,
             )
-        else:
-            filtered_df = filter_prepared_df(
-                run_data["prepared_df"],
-                filter_params,
-                filter_column_settings=run_data.get("column_settings"),
-            )
-            if variant_pattern:
-                filtered_df = filter_prepared_df_by_pattern(filtered_df, variant_pattern)
-            analysis_cache[cache_key] = create_analysis_records(filtered_df, analysis_key)
+        return analysis_cache[cache_key]
+
+    cache_key = ("analysis", analysis_key, normalized_filter_key, str(variant_pattern or "").strip() or None)
+
+    if cache_key not in analysis_cache:
+        analysis_cache[cache_key] = query_analysis_records(
+            run_data["prepared_parquet_path"],
+            analysis_key=analysis_key,
+            filter_params=filter_params,
+            filter_column_settings=run_data.get("column_settings"),
+            variant_pattern=variant_pattern,
+        )
 
     return analysis_cache[cache_key]
 
@@ -3576,27 +3531,18 @@ def get_bottleneck_summary(run_data, variant_id=None, pattern_index=None, filter
     cache = run_data.setdefault("bottleneck_cache", {})
 
     if cache_key not in cache:
-        if has_parquet_backing(run_data):
-            cache[cache_key] = query_bottleneck_summary(
-                run_data["prepared_parquet_path"],
-                filter_params=filter_params,
-                filter_column_settings=run_data.get("column_settings"),
-                variant_pattern=get_run_variant_pattern(
-                    run_data,
-                    variant_id=variant_id,
-                    pattern_index=pattern_index,
-                    filter_params=filter_params,
-                ),
-                limit=None,
-            )
-        else:
-            filtered_df = get_filtered_prepared_df(
+        cache[cache_key] = query_bottleneck_summary(
+            run_data["prepared_parquet_path"],
+            filter_params=filter_params,
+            filter_column_settings=run_data.get("column_settings"),
+            variant_pattern=get_run_variant_pattern(
                 run_data,
                 variant_id=variant_id,
                 pattern_index=pattern_index,
                 filter_params=filter_params,
-            )
-            cache[cache_key] = create_bottleneck_summary(filtered_df, limit=None)
+            ),
+            limit=None,
+        )
 
     return cache[cache_key]
 
@@ -3606,52 +3552,29 @@ def get_dashboard_summary(run_data, filter_params=None, prepared_df=None, varian
     cache = run_data.setdefault("dashboard_cache", {})
 
     if cache_key not in cache:
-        if has_parquet_backing(run_data):
-            if variant_pattern:
-                resolved_bottleneck_summary = query_bottleneck_summary(
-                    run_data["prepared_parquet_path"],
-                    filter_params=filter_params,
-                    filter_column_settings=run_data.get("column_settings"),
-                    variant_pattern=variant_pattern,
-                    limit=None,
-                )
-            else:
-                resolved_bottleneck_summary = get_bottleneck_summary(run_data, filter_params=filter_params)
-            cache[cache_key] = query_dashboard_summary(
+        if variant_pattern:
+            resolved_bottleneck_summary = query_bottleneck_summary(
                 run_data["prepared_parquet_path"],
                 filter_params=filter_params,
                 filter_column_settings=run_data.get("column_settings"),
                 variant_pattern=variant_pattern,
-                variant_items=get_variant_items(
-                    run_data,
-                    filter_params=filter_params,
-                    variant_pattern=variant_pattern,
-                )[:10],
-                bottleneck_summary=resolved_bottleneck_summary,
-                coverage_limit=10,
+                limit=None,
             )
         else:
-            filtered_df = prepared_df
-            if filtered_df is None:
-                filtered_df, _ = get_base_filtered_prepared_df(run_data, filter_params=filter_params)
-                if variant_pattern:
-                    filtered_df = filter_prepared_df_by_pattern(filtered_df, variant_pattern)
-
-            if variant_pattern:
-                resolved_bottleneck_summary = create_bottleneck_summary(filtered_df, limit=None)
-            else:
-                resolved_bottleneck_summary = get_bottleneck_summary(run_data, filter_params=filter_params)
-
-            cache[cache_key] = create_dashboard_summary(
-                filtered_df,
-                variant_items=get_variant_items(
-                    run_data,
-                    filter_params=filter_params,
-                    variant_pattern=variant_pattern,
-                )[:10],
-                bottleneck_summary=resolved_bottleneck_summary,
-                coverage_limit=10,
-            )
+            resolved_bottleneck_summary = get_bottleneck_summary(run_data, filter_params=filter_params)
+        cache[cache_key] = query_dashboard_summary(
+            run_data["prepared_parquet_path"],
+            filter_params=filter_params,
+            filter_column_settings=run_data.get("column_settings"),
+            variant_pattern=variant_pattern,
+            variant_items=get_variant_items(
+                run_data,
+                filter_params=filter_params,
+                variant_pattern=variant_pattern,
+            )[:10],
+            bottleneck_summary=resolved_bottleneck_summary,
+            coverage_limit=10,
+        )
 
     return cache[cache_key]
 
@@ -3661,26 +3584,13 @@ def get_root_cause_summary(run_data, filter_params=None, prepared_df=None, varia
     cache = run_data.setdefault("root_cause_cache", {})
 
     if cache_key not in cache:
-        if has_parquet_backing(run_data):
-            cache[cache_key] = query_root_cause_summary(
-                run_data["prepared_parquet_path"],
-                filter_params=filter_params,
-                filter_column_settings=run_data.get("column_settings"),
-                variant_pattern=variant_pattern,
-                limit=10,
-            )
-        else:
-            filtered_df = prepared_df
-            if filtered_df is None:
-                filtered_df, _ = get_base_filtered_prepared_df(run_data, filter_params=filter_params)
-                if variant_pattern:
-                    filtered_df = filter_prepared_df_by_pattern(filtered_df, variant_pattern)
-
-            cache[cache_key] = create_root_cause_summary(
-                filtered_df,
-                filter_column_settings=run_data.get("column_settings"),
-                limit=10,
-            )
+        cache[cache_key] = query_root_cause_summary(
+            run_data["prepared_parquet_path"],
+            filter_params=filter_params,
+            filter_column_settings=run_data.get("column_settings"),
+            variant_pattern=variant_pattern,
+            limit=10,
+        )
 
     return cache[cache_key]
 
@@ -3690,25 +3600,13 @@ def get_impact_summary(run_data, filter_params=None, prepared_df=None, variant_p
     cache = run_data.setdefault("impact_cache", {})
 
     if cache_key not in cache:
-        if has_parquet_backing(run_data):
-            cache[cache_key] = query_impact_summary(
-                run_data["prepared_parquet_path"],
-                filter_params=filter_params,
-                filter_column_settings=run_data.get("column_settings"),
-                variant_pattern=variant_pattern,
-                limit=None,
-            )
-        else:
-            filtered_df = prepared_df
-            if filtered_df is None:
-                filtered_df, _ = get_base_filtered_prepared_df(run_data, filter_params=filter_params)
-                if variant_pattern:
-                    filtered_df = filter_prepared_df_by_pattern(filtered_df, variant_pattern)
-
-            cache[cache_key] = create_impact_summary(
-                filtered_df,
-                limit=None,
-            )
+        cache[cache_key] = query_impact_summary(
+            run_data["prepared_parquet_path"],
+            filter_params=filter_params,
+            filter_column_settings=run_data.get("column_settings"),
+            variant_pattern=variant_pattern,
+            limit=None,
+        )
 
     return cache[cache_key]
 
@@ -3735,12 +3633,7 @@ def get_rule_based_insights_summary(
         normalized_analysis_key = str(analysis_key or "").strip().lower()
         filtered_df = prepared_df
         if filtered_df is None:
-            if has_parquet_backing(run_data) and normalized_analysis_key in {"frequency", "transition", "pattern"}:
-                filtered_df = pd.DataFrame(columns=["case_id", "activity", "duration_sec"])
-            else:
-                filtered_df, _ = get_base_filtered_prepared_df(run_data, filter_params=filter_params)
-                if variant_pattern:
-                    filtered_df = filter_prepared_df_by_pattern(filtered_df, variant_pattern)
+            filtered_df = pd.DataFrame(columns=["case_id", "activity", "duration_sec"])
 
         resolved_bottleneck_summary = bottleneck_summary
         resolved_impact_summary = impact_summary
@@ -3767,7 +3660,6 @@ def get_rule_based_insights_summary(
                 resolved_impact_summary = get_impact_summary(
                     run_data,
                     filter_params=filter_params,
-                    prepared_df=filtered_df,
                     variant_pattern=variant_pattern,
                 )
 
@@ -3778,7 +3670,6 @@ def get_rule_based_insights_summary(
             dashboard_summary=dashboard_summary or get_dashboard_summary(
                 run_data,
                 filter_params=filter_params,
-                prepared_df=filtered_df,
                 variant_pattern=variant_pattern,
             ),
             bottleneck_summary=resolved_bottleneck_summary,
@@ -3830,20 +3721,13 @@ def get_pattern_flow_snapshot(
         variant_item = get_variant_item(run_data, variant_id, filter_params=filter_params)
         variant_pattern = variant_item["pattern"]
 
-    if has_parquet_backing(run_data):
-        scoped_meta = get_filtered_meta_for_run(
-            run_data,
-            filter_params=filter_params,
-            variant_pattern=variant_pattern,
-        )
-        scoped_event_count = int(scoped_meta.get("event_count") or 0)
-        use_lightweight_flow = scoped_event_count >= LARGE_DATASET_FLOW_FAST_PATH_THRESHOLD
-    else:
-        prepared_row_count = int(run_data.get("prepared_row_count") or 0)
-        use_lightweight_flow = (
-            prepared_row_count >= LARGE_DATASET_FLOW_FAST_PATH_THRESHOLD
-            and is_unfiltered_request(filter_cache_key)
-        )
+    scoped_meta = get_filtered_meta_for_run(
+        run_data,
+        filter_params=filter_params,
+        variant_pattern=variant_pattern,
+    )
+    scoped_event_count = int(scoped_meta.get("event_count") or 0)
+    use_lightweight_flow = scoped_event_count >= LARGE_DATASET_FLOW_FAST_PATH_THRESHOLD
 
     if variant_id is None:
         pattern_analysis = get_analysis_data(run_data, "pattern", filter_params=filter_params)
@@ -3852,38 +3736,29 @@ def get_pattern_flow_snapshot(
             if is_unfiltered_request(filter_cache_key)
             else get_analysis_data(run_data, "frequency", filter_params=filter_params)
         )
-        filtered_df = None
         selected_transition_rows = []
-
-        if has_parquet_backing(run_data):
-            pattern_selection = select_pattern_rows_for_flow(
-                pattern_analysis["rows"],
-                pattern_percent=pattern_percent,
-                pattern_count=pattern_count,
-                pattern_cap=PROCESS_FLOW_PATTERN_CAP,
-            )
-            selected_patterns = []
-            for row in pattern_selection["selected_pattern_rows"]:
-                selected_pattern = extract_pattern_text_from_row(row)
-                if selected_pattern:
-                    selected_patterns.append(selected_pattern)
-            if not use_lightweight_flow and selected_patterns:
-                selected_transition_rows = query_transition_records_for_patterns(
-                    run_data["prepared_parquet_path"],
-                    selected_patterns,
-                    filter_params=filter_params,
-                    filter_column_settings=run_data.get("column_settings"),
-                )
-        elif not use_lightweight_flow:
-            filtered_df = filter_prepared_df(
-                run_data["prepared_df"],
-                filter_params,
+        pattern_selection = select_pattern_rows_for_flow(
+            pattern_analysis["rows"],
+            pattern_percent=pattern_percent,
+            pattern_count=pattern_count,
+            pattern_cap=PROCESS_FLOW_PATTERN_CAP,
+        )
+        selected_patterns = []
+        for row in pattern_selection["selected_pattern_rows"]:
+            selected_pattern = extract_pattern_text_from_row(row)
+            if selected_pattern:
+                selected_patterns.append(selected_pattern)
+        if not use_lightweight_flow and selected_patterns:
+            selected_transition_rows = query_transition_records_for_patterns(
+                run_data["prepared_parquet_path"],
+                selected_patterns,
+                filter_params=filter_params,
                 filter_column_settings=run_data.get("column_settings"),
             )
 
         snapshot = create_pattern_flow_snapshot(
             pattern_rows=pattern_analysis["rows"],
-            prepared_df=filtered_df,
+            prepared_df=None,
             transition_rows=selected_transition_rows,
             frequency_rows=(frequency_analysis or {}).get("rows", []),
             pattern_percent=pattern_percent,
@@ -3909,7 +3784,7 @@ def get_pattern_flow_snapshot(
                 connection_percent=connection_percent,
                 pattern_cap=1,
             )
-        elif has_parquet_backing(run_data):
+        else:
             selected_transition_rows = query_transition_records_for_patterns(
                 run_data["prepared_parquet_path"],
                 [variant_pattern],
@@ -3931,18 +3806,6 @@ def get_pattern_flow_snapshot(
                 activity_percent=activity_percent,
                 connection_percent=connection_percent,
                 pattern_cap=1,
-            )
-        else:
-            filtered_df = filter_prepared_df(
-                run_data["prepared_df"],
-                filter_params,
-                filter_column_settings=run_data.get("column_settings"),
-            )
-            snapshot = create_variant_flow_snapshot(
-                prepared_df=filtered_df,
-                variant_pattern=variant_item["pattern"],
-                activity_percent=activity_percent,
-                connection_percent=connection_percent,
             )
         snapshot["selected_variant"] = build_variant_response_item(variant_item, run_data=run_data)
 
@@ -4258,14 +4121,11 @@ def pattern_detail_api(run_id: str, pattern_index: int):
     run_data = get_run_data(run_id)
     pattern_analysis, summary_row, _, pattern = get_pattern_summary_row(run_data, pattern_index)
 
-    if has_parquet_backing(run_data):
-        detail = query_pattern_bottleneck_details(
-            run_data["prepared_parquet_path"],
-            pattern,
-            filter_column_settings=run_data.get("column_settings"),
-        )
-    else:
-        detail = create_pattern_bottleneck_details(run_data["prepared_df"], pattern)
+    detail = query_pattern_bottleneck_details(
+        run_data["prepared_parquet_path"],
+        pattern,
+        filter_column_settings=run_data.get("column_settings"),
+    )
     return JSONResponse(
         content={
             "run_id": run_id,
@@ -4303,17 +4163,11 @@ def analysis_detail_api(
     run_data = get_run_data(run_id)
     filter_params = get_effective_filter_params(run_data, get_request_filter_params(request))
     analysis = get_analysis_data(run_data, analysis_key, filter_params=filter_params)
-    if has_parquet_backing(run_data):
-        filtered_df = None
-        filtered_meta = get_filtered_meta_for_run(
-            run_data,
-            filter_params=filter_params,
-        )
-    else:
-        filtered_df, filtered_meta = get_base_filtered_prepared_df(
-            run_data,
-            filter_params=filter_params,
-        )
+    filtered_df = None
+    filtered_meta = get_filtered_meta_for_run(
+        run_data,
+        filter_params=filter_params,
+    )
     deferred_sections = []
 
     response_analyses = {
@@ -4680,34 +4534,20 @@ def transition_case_drilldown_api(
     run_data = get_run_data(run_id)
     filter_params = get_effective_filter_params(run_data, get_request_filter_params(request))
     safe_limit = max(0, int(limit))
-    if has_parquet_backing(run_data):
-        case_rows = query_transition_case_drilldown(
-            run_data["prepared_parquet_path"],
-            from_activity=from_activity,
-            to_activity=to_activity,
-            limit=safe_limit,
-            filter_params=filter_params,
-            filter_column_settings=run_data.get("column_settings"),
-            variant_pattern=get_run_variant_pattern(
-                run_data,
-                variant_id=variant_id,
-                pattern_index=pattern_index,
-                filter_params=filter_params,
-            ),
-        )
-    else:
-        filtered_df = get_filtered_prepared_df(
+    case_rows = query_transition_case_drilldown(
+        run_data["prepared_parquet_path"],
+        from_activity=from_activity,
+        to_activity=to_activity,
+        limit=safe_limit,
+        filter_params=filter_params,
+        filter_column_settings=run_data.get("column_settings"),
+        variant_pattern=get_run_variant_pattern(
             run_data,
             variant_id=variant_id,
             pattern_index=pattern_index,
             filter_params=filter_params,
-        )
-        case_rows = create_transition_case_drilldown(
-            filtered_df,
-            from_activity=from_activity,
-            to_activity=to_activity,
-            limit=safe_limit,
-        )
+        ),
+    )
 
     return JSONResponse(
         content={
@@ -4738,32 +4578,19 @@ def activity_case_drilldown_api(
     run_data = get_run_data(run_id)
     filter_params = get_effective_filter_params(run_data, get_request_filter_params(request))
     safe_limit = max(0, int(limit))
-    if has_parquet_backing(run_data):
-        case_rows = query_activity_case_drilldown(
-            run_data["prepared_parquet_path"],
-            activity=activity,
-            limit=safe_limit,
-            filter_params=filter_params,
-            filter_column_settings=run_data.get("column_settings"),
-            variant_pattern=get_run_variant_pattern(
-                run_data,
-                variant_id=variant_id,
-                pattern_index=pattern_index,
-                filter_params=filter_params,
-            ),
-        )
-    else:
-        filtered_df = get_filtered_prepared_df(
+    case_rows = query_activity_case_drilldown(
+        run_data["prepared_parquet_path"],
+        activity=activity,
+        limit=safe_limit,
+        filter_params=filter_params,
+        filter_column_settings=run_data.get("column_settings"),
+        variant_pattern=get_run_variant_pattern(
             run_data,
             variant_id=variant_id,
             pattern_index=pattern_index,
             filter_params=filter_params,
-        )
-        case_rows = create_activity_case_drilldown(
-            filtered_df,
-            activity=activity,
-            limit=safe_limit,
-        )
+        ),
+    )
 
     return JSONResponse(
         content={
@@ -4797,13 +4624,10 @@ def case_trace_api(run_id: str, case_id: str):
             },
         )
 
-    if has_parquet_backing(run_data):
-        case_trace = query_case_trace_details(
-            run_data["prepared_parquet_path"],
-            normalized_case_id,
-        )
-    else:
-        case_trace = create_case_trace_details(run_data["prepared_df"], normalized_case_id)
+    case_trace = query_case_trace_details(
+        run_data["prepared_parquet_path"],
+        normalized_case_id,
+    )
     return JSONResponse(
         content={
             "run_id": run_id,
@@ -5028,16 +4852,6 @@ async def analyze(request: Request):
             },
             base_filter_params=base_filter_params,
         )
-        prepared_parquet_path = get_run_prepared_parquet_path(run_id)
-        try:
-            persist_prepared_parquet(prepared_df, prepared_parquet_path)
-        except Exception:
-            RUN_STORE.pop(run_id, None)
-            cleanup_run_storage(run_id)
-            raise
-        RUN_STORE[run_id]["prepared_parquet_path"] = str(prepared_parquet_path)
-        if int(RUN_STORE[run_id].get("prepared_row_count") or 0) >= PARQUET_ONLY_PREPARED_DF_THRESHOLD:
-            RUN_STORE[run_id]["prepared_df"] = None
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
     except Exception as exc:

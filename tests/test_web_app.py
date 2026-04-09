@@ -705,7 +705,7 @@ class WebAppTestCase(unittest.TestCase):
         )
 
         run_data = web_app.get_run_data(run_id)
-        expected = web_app.build_group_summary(run_data["prepared_df"], ["group_a", "group_b"])
+        expected = run_data["result"]["group_summary"]
         actual = web_app.query_group_summary(
             run_data["prepared_parquet_path"],
             ["group_a", "group_b"],
@@ -824,25 +824,24 @@ class WebAppTestCase(unittest.TestCase):
         self.assertIn("═══ グループ: group_a=Sales, group_b=Web ═══", group_headers)
         self.assertIn("═══ グループ: group_a=HR, group_b=Mail ═══", group_headers)
 
-    def test_report_excel_export_parquet_mode_includes_group_comparison_and_skips_group_sections(self):
-        with mock.patch.object(web_app, "PARQUET_ONLY_PREPARED_DF_THRESHOLD", 1):
-            run_id = self.analyze_uploaded_csv(
-                "\n".join(
-                    [
-                        "case_id,activity,start_time,group_a,group_b,group_c",
-                        "C001,Submit,2024-01-01 09:00:00,Sales,Web,A",
-                        "C001,Approve,2024-01-02 09:00:00,Sales,Web,A",
-                        "C002,Submit,2024-01-03 09:00:00,HR,Mail,B",
-                        "C002,Reject,2024-01-04 09:00:00,HR,Mail,B",
-                    ]
-                ),
-                analysis_keys=["frequency"],
-                extra_data={
-                    "filter_column_1": "group_a",
-                    "filter_column_2": "group_b",
-                    "filter_column_3": "group_c",
-                },
-            )
+    def test_report_excel_export_parquet_mode_includes_group_comparison_and_group_sections(self):
+        run_id = self.analyze_uploaded_csv(
+            "\n".join(
+                [
+                    "case_id,activity,start_time,group_a,group_b,group_c",
+                    "C001,Submit,2024-01-01 09:00:00,Sales,Web,A",
+                    "C001,Approve,2024-01-02 09:00:00,Sales,Web,A",
+                    "C002,Submit,2024-01-03 09:00:00,HR,Mail,B",
+                    "C002,Reject,2024-01-04 09:00:00,HR,Mail,B",
+                ]
+            ),
+            analysis_keys=["frequency"],
+            extra_data={
+                "filter_column_1": "group_a",
+                "filter_column_2": "group_b",
+                "filter_column_3": "group_c",
+            },
+        )
 
         run_data = web_app.get_run_data(run_id)
         self.assertIsNone(run_data["prepared_df"])
@@ -885,7 +884,13 @@ class WebAppTestCase(unittest.TestCase):
             for row_index in range(1, frequency_sheet.max_row + 1)
             if str(frequency_sheet.cell(row=row_index, column=1).value or "").startswith("═══ グループ:")
         ]
-        self.assertEqual([], parquet_group_headers)
+        self.assertEqual(
+            [
+                "═══ グループ: group_a=HR, group_b=Mail, group_c=B ═══",
+                "═══ グループ: group_a=Sales, group_b=Web, group_c=A ═══",
+            ],
+            parquet_group_headers,
+        )
 
     def test_ai_insights_api_restores_cached_output_across_page_reload(self):
         run_id = self.analyze_uploaded_csv(
@@ -1411,22 +1416,21 @@ class WebAppTestCase(unittest.TestCase):
         self.assertTrue(all("avg_duration_text" in edge for edge in payload["flow_data"]["edges"]))
 
     def test_large_parquet_backed_run_can_release_prepared_df_and_still_render_pattern_flow(self):
-        with mock.patch.object(web_app, "PARQUET_ONLY_PREPARED_DF_THRESHOLD", 1):
-            with mock.patch.object(web_app, "LARGE_DATASET_FLOW_FAST_PATH_THRESHOLD", 999999):
-                run_id = self.analyze_uploaded_csv(
-                    self.build_duckdb_validation_csv(),
-                    analysis_keys=["frequency", "pattern"],
-                )
-                run_data = web_app.get_run_data(run_id)
-                self.assertIsNone(run_data["prepared_df"])
+        with mock.patch.object(web_app, "LARGE_DATASET_FLOW_FAST_PATH_THRESHOLD", 999999):
+            run_id = self.analyze_uploaded_csv(
+                self.build_duckdb_validation_csv(),
+                analysis_keys=["frequency", "pattern"],
+            )
+            run_data = web_app.get_run_data(run_id)
+            self.assertIsNone(run_data["prepared_df"])
 
-                filter_options_response = self.client.get(f"/api/runs/{run_id}/filter-options")
-                self.assertEqual(200, filter_options_response.status_code)
-                self.assertEqual(run_data["filter_options"], filter_options_response.json()["options"])
+            filter_options_response = self.client.get(f"/api/runs/{run_id}/filter-options")
+            self.assertEqual(200, filter_options_response.status_code)
+            self.assertEqual(run_data["filter_options"], filter_options_response.json()["options"])
 
-                flow_response = self.client.get(
-                    f"/api/runs/{run_id}/pattern-flow?pattern_count=2&activity_percent=100&connection_percent=100"
-                )
+            flow_response = self.client.get(
+                f"/api/runs/{run_id}/pattern-flow?pattern_count=2&activity_percent=100&connection_percent=100"
+            )
 
         self.assertEqual(200, flow_response.status_code)
         payload = flow_response.json()
@@ -1618,11 +1622,10 @@ class WebAppTestCase(unittest.TestCase):
         self.assertEqual(payload["summary_row"].get("簡易コメント", ""), payload["simple_comment"])
 
     def test_pattern_detail_api_supports_parquet_backed_uploaded_csv_without_variant_column(self):
-        with mock.patch.object(web_app, "PARQUET_ONLY_PREPARED_DF_THRESHOLD", 1):
-            run_id = self.analyze_uploaded_csv(
-                self.build_duckdb_validation_csv(),
-                analysis_keys=["pattern"],
-            )
+        run_id = self.analyze_uploaded_csv(
+            self.build_duckdb_validation_csv(),
+            analysis_keys=["pattern"],
+        )
 
         run_data = web_app.get_run_data(run_id)
         self.assertIsNone(run_data["prepared_df"])
@@ -1644,11 +1647,10 @@ class WebAppTestCase(unittest.TestCase):
         self.assertGreaterEqual(transition_response.json()["returned_case_count"], 1)
 
     def test_pattern_detail_api_supports_parquet_backed_uploaded_csv_with_variant_column(self):
-        with mock.patch.object(web_app, "PARQUET_ONLY_PREPARED_DF_THRESHOLD", 1):
-            run_id = self.analyze_uploaded_csv(
-                self.build_duckdb_validation_csv_with_variant(),
-                analysis_keys=["pattern"],
-            )
+        run_id = self.analyze_uploaded_csv(
+            self.build_duckdb_validation_csv_with_variant(),
+            analysis_keys=["pattern"],
+        )
 
         run_data = web_app.get_run_data(run_id)
         self.assertIsNone(run_data["prepared_df"])

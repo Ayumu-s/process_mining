@@ -1203,7 +1203,7 @@ def _append_insight(items, max_items, insight_id, text, source_keys):
 
 
 def _collect_attention_activities(prepared_df):
-    if prepared_df.empty or "activity" not in prepared_df.columns:
+    if prepared_df is None or prepared_df.empty or "activity" not in prepared_df.columns:
         return []
 
     activity_values = [

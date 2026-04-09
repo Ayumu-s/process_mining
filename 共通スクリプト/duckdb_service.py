@@ -483,6 +483,44 @@ def query_group_summary(parquet_path, group_columns, filter_params=None, filter_
         connection.close()
 
 
+def query_filter_options(parquet_path, filter_column_settings=None):
+    normalized_settings = normalize_filter_column_settings(**(filter_column_settings or {}))
+    filters = []
+    connection = duckdb.connect()
+    try:
+        for filter_key in FILTER_SLOT_KEYS:
+            column_name = normalized_settings[filter_key]["column_name"]
+            label = normalized_settings[filter_key]["label"]
+            options = []
+            if column_name and str(column_name) in _get_parquet_column_names(parquet_path):
+                quoted_column = _quote_identifier(column_name)
+                try:
+                    rows = connection.execute(
+                        f"""
+                        SELECT DISTINCT TRIM(CAST({quoted_column} AS VARCHAR)) AS val
+                        FROM read_parquet(?)
+                        WHERE {quoted_column} IS NOT NULL
+                          AND TRIM(CAST({quoted_column} AS VARCHAR)) <> ''
+                        ORDER BY val
+                        """,
+                        [str(parquet_path)],
+                    ).fetchall()
+                    options = [str(row[0]) for row in rows]
+                except Exception:
+                    options = []
+            filters.append(
+                {
+                    "slot": filter_key,
+                    "label": label,
+                    "column_name": column_name,
+                    "options": options,
+                }
+            )
+        return {"filters": filters}
+    finally:
+        connection.close()
+
+
 def query_frequency_analysis_df(parquet_path, filter_params=None, filter_column_settings=None, variant_pattern=None):
     connection = duckdb.connect()
     try:
