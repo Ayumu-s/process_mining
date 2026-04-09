@@ -203,11 +203,43 @@ APPLIED_FILTERS_NOTE_TEXT = "\n".join(
 GROUPING_CONDITION_NOTE_TEXT = (
     "※ カラムを選択し値を未選択にすると、そのカラムがグルーピング軸（比較用）になります"
 )
+ANALYSIS_PRECONDITIONS_TEXT = "\n".join(
+    [
+        "• 処理時間は、同一ケース内で当該アクティビティの開始時刻から次のアクティビティの開始時刻までの差分として算出しています。",
+        "• ケース内の最終アクティビティは、次のイベントが存在しないため処理時間が0分となります。",
+        "• 処理時間が0分のイベントも集計対象に含まれています。統計値（平均・中央値等）に影響する点にご留意ください。",
+        "• 本分析はフィルター適用後のデータに基づいています。適用条件の詳細はサマリーシートをご参照ください。",
+    ]
+)
+TERMINOLOGY_ROWS = [
+    {
+        "用語": "ケース",
+        "説明": "業務プロセスの1つの実行単位（例: 1件の注文、1件の申請）",
+    },
+    {
+        "用語": "アクティビティ",
+        "説明": "ケース内で実行される個々の作業ステップ（例: 申請、承認、支払）",
+    },
+    {
+        "用語": "イベント",
+        "説明": "特定のケースで特定のアクティビティが実行された1回の記録",
+    },
+    {
+        "用語": "処理時間",
+        "説明": "あるアクティビティの開始から次のアクティビティの開始までの所要時間",
+    },
+    {
+        "用語": "イベント比率(%)",
+        "説明": "全イベント数に対する当該アクティビティのイベント数の割合",
+    },
+]
 EXCEL_TITLE_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
 EXCEL_TITLE_FONT = Font(bold=True, size=14, color="FFFFFF")
 EXCEL_SUBTITLE_FILL = PatternFill(fill_type="solid", fgColor="EFF5FB")
 EXCEL_SECTION_FILL = PatternFill(fill_type="solid", fgColor="D9E7F6")
 EXCEL_GROUP_SECTION_FILL = PatternFill(fill_type="solid", fgColor="D9E1F2")
+EXCEL_ASSUMPTION_SECTION_FILL = PatternFill(fill_type="solid", fgColor="E8EDF2")
+EXCEL_MUTED_SECTION_FILL = PatternFill(fill_type="solid", fgColor="F0F0F0")
 EXCEL_HEADER_FILL = PatternFill(fill_type="solid", fgColor="EDF2F7")
 EXCEL_LABEL_FILL = PatternFill(fill_type="solid", fgColor="F8FAFC")
 EXCEL_ALT_ROW_FILL = PatternFill(fill_type="solid", fgColor="FBFDFF")
@@ -1186,6 +1218,108 @@ def append_text_block_to_worksheet(worksheet, title, text, start_row=1, column_c
     worksheet.row_dimensions[current_row].height = estimate_wrapped_row_height(body_cell.value, safe_column_count, min_height=88, max_height=360)
 
     return current_row + 2
+
+
+def append_custom_text_section_to_worksheet(
+    worksheet,
+    title,
+    text,
+    start_row=1,
+    column_count=6,
+    header_fill=None,
+    body_fill=None,
+    empty_text="表示できる内容がありません。",
+):
+    current_row = start_row
+    safe_column_count = max(1, int(column_count or 1))
+    merge_excel_row(worksheet, current_row, safe_column_count)
+    section_cell = worksheet.cell(row=current_row, column=1, value=title)
+    style_excel_cell(
+        section_cell,
+        font=EXCEL_BOLD_FONT,
+        fill=header_fill or EXCEL_SECTION_FILL,
+        alignment=Alignment(horizontal="left", vertical="center"),
+        border=EXCEL_THIN_BORDER,
+    )
+    worksheet.row_dimensions[current_row].height = 22
+    current_row += 1
+
+    merge_excel_row(worksheet, current_row, safe_column_count)
+    body_cell = worksheet.cell(
+        row=current_row,
+        column=1,
+        value=normalize_excel_cell_value(text) or empty_text,
+    )
+    style_excel_cell(
+        body_cell,
+        font=EXCEL_BODY_FONT,
+        fill=body_fill or EXCEL_TEXT_BLOCK_FILL,
+        alignment=Alignment(wrap_text=True, vertical="top"),
+        border=EXCEL_THIN_BORDER,
+    )
+    worksheet.row_dimensions[current_row].height = estimate_wrapped_row_height(
+        body_cell.value,
+        safe_column_count,
+        min_height=54,
+        max_height=240,
+    )
+
+    return current_row + 2
+
+
+def append_definition_table_to_worksheet(worksheet, title, rows, start_row=1, column_count=6, header_fill=None):
+    current_row = start_row
+    safe_column_count = max(2, int(column_count or 2))
+    merge_excel_row(worksheet, current_row, safe_column_count)
+    section_cell = worksheet.cell(row=current_row, column=1, value=title)
+    style_excel_cell(
+        section_cell,
+        font=EXCEL_BOLD_FONT,
+        fill=header_fill or EXCEL_MUTED_SECTION_FILL,
+        alignment=Alignment(horizontal="left", vertical="center"),
+        border=EXCEL_THIN_BORDER,
+    )
+    worksheet.row_dimensions[current_row].height = 22
+    current_row += 1
+
+    headers = ("用語", "説明")
+    for column_index, header in enumerate(headers, start=1):
+        header_cell = worksheet.cell(row=current_row, column=column_index, value=header)
+        style_excel_cell(
+            header_cell,
+            font=EXCEL_BOLD_FONT,
+            fill=EXCEL_HEADER_FILL,
+            alignment=Alignment(horizontal="center", vertical="center", wrap_text=True),
+            border=EXCEL_THIN_BORDER,
+        )
+    worksheet.row_dimensions[current_row].height = 22
+    current_row += 1
+
+    for row_index, row in enumerate(rows or [], start=0):
+        fill = EXCEL_ALT_ROW_FILL if row_index % 2 else None
+        term_cell = worksheet.cell(row=current_row, column=1, value=normalize_excel_cell_value(row.get("用語")))
+        description_cell = worksheet.cell(row=current_row, column=2, value=normalize_excel_cell_value(row.get("説明")))
+        style_excel_cell(
+            term_cell,
+            font=EXCEL_BOLD_FONT,
+            fill=EXCEL_LABEL_FILL if fill is None else fill,
+            alignment=Alignment(wrap_text=True, vertical="top"),
+            border=EXCEL_THIN_BORDER,
+        )
+        style_excel_cell(
+            description_cell,
+            font=EXCEL_BODY_FONT,
+            fill=fill,
+            alignment=Alignment(wrap_text=True, vertical="top"),
+            border=EXCEL_THIN_BORDER,
+        )
+        worksheet.row_dimensions[current_row].height = max(
+            20,
+            estimate_wrapped_row_height(row.get("説明"), 1, min_height=20, max_height=96),
+        )
+        current_row += 1
+
+    return current_row + 1
 
 
 def build_ranked_rows(rows, rank_key="rank"):
@@ -2908,13 +3042,20 @@ def build_detail_export_workbook_bytes(
         ("対象分析", analysis_name),
         ("分析期間", ai_summary.get("period", "不明")),
         ("出力時刻", ai_summary.get("generated_at", "")),
-        ("補足", ai_summary.get("note", "")),
     ]
     next_row = append_key_value_rows(
         ai_sheet,
         REPORT_SHEET_NAMES["ai_insights"],
         ai_meta_rows,
         description="現在の分析条件に対応する AI 解説、または既存集計からの要約を掲載します。",
+    )
+    next_row = append_custom_text_section_to_worksheet(
+        ai_sheet,
+        "分析前提",
+        ANALYSIS_PRECONDITIONS_TEXT,
+        start_row=next_row,
+        column_count=6,
+        header_fill=EXCEL_ASSUMPTION_SECTION_FILL,
     )
     next_row = append_text_block_to_worksheet(
         ai_sheet,
@@ -2923,12 +3064,29 @@ def build_detail_export_workbook_bytes(
         start_row=next_row,
         column_count=6,
     )
-    append_bullet_rows(
+    next_row = append_bullet_rows(
         ai_sheet,
         "要点一覧",
         ai_summary.get("highlights", []),
         start_row=next_row,
         column_count=6,
+    )
+    next_row = append_definition_table_to_worksheet(
+        ai_sheet,
+        "用語説明",
+        TERMINOLOGY_ROWS,
+        start_row=next_row,
+        column_count=6,
+        header_fill=EXCEL_MUTED_SECTION_FILL,
+    )
+    append_custom_text_section_to_worksheet(
+        ai_sheet,
+        "補足・免責事項",
+        ai_summary.get("note", ""),
+        start_row=next_row,
+        column_count=6,
+        header_fill=EXCEL_MUTED_SECTION_FILL,
+        body_fill=EXCEL_LABEL_FILL,
     )
 
     if "frequency" in export_sheet_keys:
