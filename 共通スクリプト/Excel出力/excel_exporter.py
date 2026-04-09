@@ -75,6 +75,19 @@ def format_analysis_result(df, display_columns=None, group_columns=None):
 
 GROUP_SECTION_FILL = PatternFill(fill_type="solid", fgColor="D6E4F0")
 GROUP_SECTION_FONT = Font(bold=True, color="1F2937", size=11)
+GROUP_SUMMARY_META_KEY = "__meta__"
+SUMMARY_SHEET_COLUMNS = [
+    "グルーピング軸",
+    "値",
+    "ケース数",
+    "ケース比率(%)",
+    "イベント数",
+    "イベント比率(%)",
+    "平均処理時間(分)",
+    "中央値処理時間(分)",
+    "最大処理時間(分)",
+    "合計処理時間(分)",
+]
 
 
 def insert_group_section_rows(worksheet, df, group_columns):
@@ -117,23 +130,66 @@ def insert_group_section_rows(worksheet, df, group_columns):
             )
 
 
+def _format_group_axis_label(column_name, level, group_count):
+    if group_count <= 1:
+        return column_name
+    suffix = "①②③"[level - 1] if level <= 3 else str(level)
+    return f"{column_name}（グループ{suffix}）"
+
+
+def _duration_cell_value(value):
+    return value if value is not None else "—"
+
+
 def _build_summary_sheet_df(group_summary, group_columns):
     """サマリーシート用DataFrameを構築する。"""
+    meta = group_summary.get(GROUP_SUMMARY_META_KEY, {})
     rows = []
     for level, col in enumerate(group_columns, start=1):
         col_data = group_summary.get(col, {})
         for value, stats in col_data.items():
             row = {
-                "グルーピング軸": f"{col}（グループ{'①②③'[level - 1] if level <= 3 else str(level)}）",
+                "グルーピング軸": _format_group_axis_label(col, level, len(group_columns)),
                 "値": value,
                 "ケース数": stats.get("case_count", ""),
+                "ケース比率(%)": stats.get("case_ratio_pct", ""),
                 "イベント数": stats.get("event_count", ""),
-                "平均処理時間(分)": stats.get("avg_duration_min") if stats.get("avg_duration_min") is not None else "—",
+                "イベント比率(%)": stats.get("event_ratio_pct", ""),
+                "平均処理時間(分)": _duration_cell_value(stats.get("avg_duration_min")),
+                "中央値処理時間(分)": _duration_cell_value(stats.get("median_duration_min")),
+                "最大処理時間(分)": _duration_cell_value(stats.get("max_duration_min")),
+                "合計処理時間(分)": _duration_cell_value(stats.get("total_duration_min")),
             }
             rows.append(row)
-    return pd.DataFrame(rows) if rows else pd.DataFrame(
-        columns=["グルーピング軸", "値", "ケース数", "イベント数", "平均処理時間(分)"]
+
+    group_rows_df = pd.DataFrame(rows, columns=SUMMARY_SHEET_COLUMNS)
+    if not group_rows_df.empty:
+        group_rows_df = group_rows_df.sort_values(
+            ["ケース数", "グルーピング軸", "値"],
+            ascending=[False, True, True],
+        ).reset_index(drop=True)
+
+    total_row_df = pd.DataFrame(
+        [
+            {
+                "グルーピング軸": "",
+                "値": "全体",
+                "ケース数": meta.get("total_case_count", ""),
+                "ケース比率(%)": 100.0 if meta else "",
+                "イベント数": meta.get("total_event_count", ""),
+                "イベント比率(%)": 100.0 if meta else "",
+                "平均処理時間(分)": _duration_cell_value(meta.get("avg_duration_min")) if meta else "—",
+                "中央値処理時間(分)": _duration_cell_value(meta.get("median_duration_min")) if meta else "—",
+                "最大処理時間(分)": _duration_cell_value(meta.get("max_duration_min")) if meta else "—",
+                "合計処理時間(分)": _duration_cell_value(meta.get("total_duration_min")) if meta else "—",
+            }
+        ],
+        columns=SUMMARY_SHEET_COLUMNS,
     )
+    if group_rows_df.empty:
+        return total_row_df if meta else pd.DataFrame(columns=SUMMARY_SHEET_COLUMNS)
+
+    return pd.concat([total_row_df, group_rows_df], ignore_index=True)
 
 
 def build_excel_bytes(

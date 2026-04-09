@@ -404,6 +404,70 @@ def detect_group_columns(filter_params, filter_column_settings):
     return group_columns
 
 
+def _build_case_duration_minutes(prepared_df):
+    if prepared_df.empty or "case_id" not in prepared_df.columns:
+        return pd.DataFrame(columns=["case_id", "case_duration_min"])
+
+    if "duration_sec" in prepared_df.columns:
+        case_duration_df = (
+            prepared_df.groupby("case_id", as_index=False)
+            .agg(case_duration_sec=("duration_sec", "sum"))
+        )
+        case_duration_df["case_duration_min"] = (
+            case_duration_df["case_duration_sec"].astype(float) / 60
+        ).round(2)
+        return case_duration_df[["case_id", "case_duration_min"]]
+
+    if {"start_time", "next_time"}.issubset(prepared_df.columns):
+        case_duration_df = (
+            prepared_df.groupby("case_id", as_index=False)
+            .agg(
+                start_time=("start_time", "min"),
+                end_time=("next_time", "max"),
+            )
+        )
+        case_duration_df["case_duration_min"] = (
+            (case_duration_df["end_time"] - case_duration_df["start_time"]).dt.total_seconds() / 60
+        ).round(2)
+        return case_duration_df[["case_id", "case_duration_min"]]
+
+    return pd.DataFrame(columns=["case_id", "case_duration_min"])
+
+
+def _build_case_group_value_table(prepared_df, column_name):
+    if prepared_df.empty or column_name not in prepared_df.columns:
+        return pd.DataFrame(columns=["case_id", "value"])
+
+    sort_columns = ["case_id"]
+    if "sequence_no" in prepared_df.columns:
+        sort_columns.append("sequence_no")
+    elif "timestamp" in prepared_df.columns:
+        sort_columns.append("timestamp")
+
+    case_value_df = prepared_df[["case_id", column_name, *sort_columns[1:]]].copy()
+    case_value_df = case_value_df.dropna(subset=[column_name])
+    if case_value_df.empty:
+        return pd.DataFrame(columns=["case_id", "value"])
+
+    case_value_df[column_name] = case_value_df[column_name].astype(str).str.strip()
+    case_value_df = case_value_df[case_value_df[column_name] != ""]
+    if case_value_df.empty:
+        return pd.DataFrame(columns=["case_id", "value"])
+
+    case_value_df = (
+        case_value_df.sort_values(sort_columns)
+        .drop_duplicates(subset=["case_id"], keep="first")
+        .rename(columns={column_name: "value"})
+    )
+    return case_value_df[["case_id", "value"]]
+
+
+def _round_optional(value):
+    if pd.isna(value):
+        return None
+    return round(float(value), 2)
+
+
 def build_group_summary(prepared_df, group_columns):
     """
     グループ列ごとの集計サマリーを生成する。
@@ -411,44 +475,103 @@ def build_group_summary(prepared_df, group_columns):
 
     返却値:
     {
+        "__meta__": {
+            "total_case_count": int,
+            "total_event_count": int,
+            "avg_duration_min": float,
+            "median_duration_min": float,
+            "max_duration_min": float,
+            "total_duration_min": float,
+        },
         "column_name": {
-            "value_1": { "case_count": int, "event_count": int, "avg_duration_min": float },
+            "value_1": {
+                "case_count": int,
+                "case_ratio_pct": float,
+                "event_count": int,
+                "event_ratio_pct": float,
+                "avg_duration_min": float,
+                "median_duration_min": float,
+                "max_duration_min": float,
+                "total_duration_min": float,
+            },
             ...
         }
     }
     """
+    if not group_columns:
+        return {}
+
+    total_case_count = int(prepared_df["case_id"].nunique()) if "case_id" in prepared_df.columns else 0
+    total_event_count = int(len(prepared_df))
+    case_duration_df = _build_case_duration_minutes(prepared_df)
+    case_duration_series = case_duration_df["case_duration_min"].astype(float) if not case_duration_df.empty else pd.Series(dtype=float)
+
     summary = {}
+    valid_columns = []
     for col in (group_columns or []):
         if col not in prepared_df.columns:
             continue
-        grouped = (
+        valid_columns.append(col)
+
+        event_counts_df = (
             prepared_df.groupby(col)
             .agg(
-                case_count=("case_id", "nunique"),
                 event_count=("activity", "count"),
             )
             .reset_index()
+            .rename(columns={col: "value"})
         )
-        if "duration_min" in prepared_df.columns:
-            dur = (
-                prepared_df.groupby(col)["duration_min"]
-                .mean()
-                .reset_index()
-                .rename(columns={"duration_min": "avg_duration_min"})
+
+        case_value_df = _build_case_group_value_table(prepared_df, col)
+        case_stats_df = pd.DataFrame(columns=["value", "case_count", "avg_duration_min", "median_duration_min", "max_duration_min", "total_duration_min"])
+        if not case_value_df.empty:
+            case_stats_df = (
+                case_value_df.merge(case_duration_df, on="case_id", how="left")
+                .groupby("value", as_index=False)
+                .agg(
+                    case_count=("case_id", "nunique"),
+                    avg_duration_min=("case_duration_min", "mean"),
+                    median_duration_min=("case_duration_min", "median"),
+                    max_duration_min=("case_duration_min", "max"),
+                    total_duration_min=("case_duration_min", "sum"),
+                )
             )
-            grouped = grouped.merge(dur, on=col, how="left")
-            grouped["avg_duration_min"] = grouped["avg_duration_min"].round(2)
+
+        grouped = event_counts_df.merge(case_stats_df, on="value", how="outer")
+        grouped["event_count"] = grouped["event_count"].fillna(0).astype(int)
+        grouped["case_count"] = grouped["case_count"].fillna(0).astype(int)
+        grouped["case_ratio_pct"] = (
+            grouped["case_count"] / total_case_count * 100
+        ).round(2) if total_case_count else 0.0
+        grouped["event_ratio_pct"] = (
+            grouped["event_count"] / total_event_count * 100
+        ).round(2) if total_event_count else 0.0
 
         summary[col] = {}
         for _, row in grouped.iterrows():
             entry = {
                 "case_count": int(row["case_count"]),
+                "case_ratio_pct": float(row["case_ratio_pct"]),
                 "event_count": int(row["event_count"]),
+                "event_ratio_pct": float(row["event_ratio_pct"]),
+                "avg_duration_min": _round_optional(row.get("avg_duration_min")),
+                "median_duration_min": _round_optional(row.get("median_duration_min")),
+                "max_duration_min": _round_optional(row.get("max_duration_min")),
+                "total_duration_min": _round_optional(row.get("total_duration_min")),
             }
-            if "avg_duration_min" in grouped.columns:
-                avg = row["avg_duration_min"]
-                entry["avg_duration_min"] = float(avg) if avg == avg else None
-            summary[col][str(row[col])] = entry
+            summary[col][str(row["value"])] = entry
+
+    if not valid_columns:
+        return {}
+
+    summary["__meta__"] = {
+        "total_case_count": total_case_count,
+        "total_event_count": total_event_count,
+        "avg_duration_min": round(float(case_duration_series.mean()), 2) if not case_duration_series.empty else 0.0,
+        "median_duration_min": round(float(case_duration_series.median()), 2) if not case_duration_series.empty else 0.0,
+        "max_duration_min": round(float(case_duration_series.max()), 2) if not case_duration_series.empty else 0.0,
+        "total_duration_min": round(float(case_duration_series.sum()), 2) if not case_duration_series.empty else 0.0,
+    }
 
     return summary
 

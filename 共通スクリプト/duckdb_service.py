@@ -44,6 +44,46 @@ def _get_parquet_column_names(parquet_path):
         connection.close()
 
 
+@lru_cache(maxsize=64)
+def _variant_column_is_exact_pattern_key(parquet_path):
+    parquet_columns = {
+        str(column_name or "").strip().lower()
+        for column_name in _get_parquet_column_names(parquet_path)
+    }
+    if "variant" not in parquet_columns:
+        return False
+
+    connection = duckdb.connect()
+    try:
+        result = connection.execute(
+            f"""
+            WITH case_patterns AS (
+                SELECT
+                    case_id,
+                    TRIM(CAST(variant AS VARCHAR)) AS variant,
+                    string_agg(CAST(activity AS VARCHAR), '{FLOW_PATH_SEPARATOR}' ORDER BY sequence_no) AS pattern
+                FROM read_parquet(?)
+                WHERE variant IS NOT NULL
+                  AND TRIM(CAST(variant AS VARCHAR)) <> ''
+                GROUP BY case_id, TRIM(CAST(variant AS VARCHAR))
+            ),
+            variant_pattern_counts AS (
+                SELECT
+                    variant,
+                    COUNT(DISTINCT pattern) AS pattern_count
+                FROM case_patterns
+                GROUP BY variant
+            )
+            SELECT COALESCE(MAX(pattern_count), 0) <= 1
+            FROM variant_pattern_counts
+            """,
+            [str(parquet_path)],
+        ).fetchone()
+        return bool(result[0]) if result else False
+    finally:
+        connection.close()
+
+
 def _can_use_variant_pattern_fast_path(parquet_path, normalized_filters):
     if not parquet_path:
         return False
@@ -60,7 +100,7 @@ def _can_use_variant_pattern_fast_path(parquet_path, normalized_filters):
         str(column_name or "").strip().lower()
         for column_name in _get_parquet_column_names(parquet_path)
     }
-    return "variant" in parquet_columns
+    return "variant" in parquet_columns and _variant_column_is_exact_pattern_key(parquet_path)
 
 
 def persist_prepared_parquet(prepared_df, output_path):

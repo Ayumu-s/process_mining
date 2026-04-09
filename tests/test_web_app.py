@@ -75,6 +75,23 @@ class WebAppTestCase(unittest.TestCase):
             ]
         )
 
+    def build_variant_collision_csv(self):
+        return "\n".join(
+            [
+                "case_id,activity,start_time,variant",
+                "C001,Start,2024-01-01 09:00:00,V1",
+                "C001,Review,2024-01-01 09:05:00,V1",
+                "C001,Done,2024-01-01 09:10:00,V1",
+                "C002,Start,2024-01-02 09:00:00,V1",
+                "C002,Review,2024-01-02 09:05:00,V1",
+                "C002,Reminder,2024-01-02 09:08:00,V1",
+                "C002,Done,2024-01-02 09:12:00,V1",
+                "C003,Start,2024-01-03 09:00:00,V2",
+                "C003,Review,2024-01-03 09:04:00,V2",
+                "C003,Done,2024-01-03 09:09:00,V2",
+            ]
+        )
+
     def test_detail_script_is_served(self):
         response = self.client.get("/static/detail.js")
 
@@ -676,6 +693,39 @@ class WebAppTestCase(unittest.TestCase):
             if sheet_name.startswith("\u30d1\u30bf\u30fc\u30f3") and sheet_name.endswith("詳細")
         ]
         self.assertEqual(20, len(detail_sheet_names))
+
+    def test_pattern_detail_api_handles_variant_code_collisions(self):
+        run_id = self.analyze_uploaded_csv(
+            self.build_variant_collision_csv(),
+            analysis_keys=["pattern"],
+        )
+
+        response = self.client.get(f"/api/runs/{run_id}/patterns/1")
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertIn("Reminder", payload["pattern"])
+        self.assertEqual(1, payload["case_count"])
+        self.assertTrue(payload["step_metrics"])
+
+    def test_pattern_report_excel_handles_variant_code_collisions(self):
+        run_id = self.analyze_uploaded_csv(
+            self.build_variant_collision_csv(),
+            analysis_keys=["pattern"],
+        )
+
+        with mock.patch(
+            "web_app.request_ollama_insights_text",
+            return_value="pattern ai",
+        ):
+            response = self.client.get(
+                f"/api/runs/{run_id}/report-excel?analysis_key=pattern&pattern_display_limit=10"
+            )
+
+        self.assertEqual(200, response.status_code)
+        workbook = load_workbook(BytesIO(response.content))
+        self.assertIn("\u30d1\u30bf\u30fc\u30f301\u8a73\u7d30", workbook.sheetnames)
+        self.assertIn("\u30d1\u30bf\u30fc\u30f302\u8a73\u7d30", workbook.sheetnames)
 
     def test_pattern_flow_api_accepts_exact_pattern_count(self):
         analyze_response = self.client.post(
